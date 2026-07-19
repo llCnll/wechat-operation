@@ -3,6 +3,7 @@ from django.db import models
 POST_STATUS_NORMAL = 2
 POST_STATUS_BLOCKED = 4
 POST_STATUS_SUNK = 8
+POST_STATUS_SELF_VISIBLE = 16
 POST_STATUS_DELETED = 128
 POST_STATUS_MODERATION_MASK = POST_STATUS_BLOCKED | POST_STATUS_SUNK
 
@@ -29,6 +30,11 @@ def is_post_blocked(status: int | None) -> bool:
 
 def is_post_sunk(status: int | None) -> bool:
     return has_post_status(status, POST_STATUS_SUNK)
+
+
+def is_post_self_visible(status: int | None) -> bool:
+    """Status 16 is an upstream visibility state, not a local moderation action."""
+    return status == POST_STATUS_SELF_VISIBLE
 
 
 def is_post_normal(status: int | None) -> bool:

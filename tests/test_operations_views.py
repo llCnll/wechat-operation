@@ -11,6 +11,7 @@ from jobs.models import BackgroundJob
 from posts.models import (
     POST_STATUS_BLOCKED,
     POST_STATUS_DELETED,
+    POST_STATUS_SELF_VISIBLE,
     POST_STATUS_SUNK,
     CandidatePost,
     InteractionSnapshot,
@@ -285,6 +286,56 @@ def test_dashboard_filters_combined_upstream_post_statuses():
     assert normal.content_text not in page
     assert "状态未同步" not in page
     assert 'name="post_status" value="BLOCKED" checked' in page
+
+
+@pytest.mark.django_db
+def test_dashboard_displays_and_filters_self_visible_posts():
+    user = get_user_model().objects.create_user(username="self-visible", password="test-password")
+    post = OriginalPost.objects.create(
+        topic_id=1009,
+        content_id="status-self-visible",
+        content_text="仅自己可见状态",
+        status=POST_STATUS_SELF_VISIBLE,
+    )
+    client = Client()
+    client.force_login(user)
+
+    page = client.get("/", {"post_status": ["SELF_VISIBLE"]}).content.decode()
+
+    assert post.content_text in page
+    assert "当前状态：仅自己可见" in page
+    assert 'name="post_status" value="SELF_VISIBLE" checked' in page
+
+
+@pytest.mark.django_db
+def test_dashboard_rejects_upstream_operation_for_self_visible_post(monkeypatch):
+    monkeypatch.setattr(runtime, "enable_upstream_writes", True)
+    monkeypatch.setattr(runtime, "enable_block_writes", True)
+    user = get_user_model().objects.create_user(
+        username="self-visible-action", password="test-password"
+    )
+    post = OriginalPost.objects.create(
+        topic_id=1010,
+        content_id="self-visible-action-content",
+        status=POST_STATUS_SELF_VISIBLE,
+        source_appid="wx-game",
+    )
+
+    class Source:
+        def __init__(self, **kwargs):
+            raise AssertionError("仅自己可见帖子不能建立上游处置会话")
+
+    monkeypatch.setattr("posts.views.CdpGameCircleClient", Source)
+    client = Client()
+    client.force_login(user)
+
+    response = client.post(
+        f"/posts/{post.topic_id}/operate/BLOCK/",
+        {"reason": "广告", "block_reason": "8", "confirmed": "yes"},
+    )
+
+    assert response.status_code == 302
+    assert not ReviewTask.objects.filter(post=post).exists()
 
 
 @pytest.mark.django_db

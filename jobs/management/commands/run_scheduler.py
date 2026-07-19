@@ -9,6 +9,7 @@ from posts.ingestion_jobs import (
     enqueue_scheduled_jobs,
     scheduled_ingestion_window,
 )
+from service_supervisor.runtime import write_worker_heartbeat
 
 
 class Command(BaseCommand):
@@ -25,6 +26,7 @@ class Command(BaseCommand):
         if options["poll_seconds"] <= 0:
             raise CommandError("--poll-seconds 必须为正数")
         while True:
+            write_worker_heartbeat()
             self._schedule_once()
             if options["once"]:
                 return
@@ -43,7 +45,8 @@ class Command(BaseCommand):
         self.stdout.write(
             "自动采集任务"
             f" {outcome}：appid=wx6d2454a8afcd9706，"
-            f"窗口={start_at.isoformat()} 至 {end_at.isoformat()}，任务={scheduled.ingestion.job.pk}。"
+            f"窗口={start_at.isoformat()} 至 {end_at.isoformat()}，"
+            f"任务={scheduled.ingestion.job.pk}。"
         )
         status_outcome = "已创建" if scheduled.status_sync.created else "已存在"
         self.stdout.write(

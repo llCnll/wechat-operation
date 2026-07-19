@@ -1,6 +1,33 @@
 """Small, read-only context used by the system configuration homepage."""
 
 from django.db.models import Max
+from django.utils import timezone
+
+from config.cdp import CdpUnavailableError, get_browser_login_status
+from config.runtime_config import public_runtime_config
+from config.supervisor import SupervisorClient, SupervisorUnavailableError
+
+MANAGED_SERVICE_NAMES = ("web", "scheduler", "ingestion", "backfill_ingestion", "review")
+
+
+def _pipeline_node(
+    key: str,
+    label: str,
+    ready: bool,
+    next_step: str,
+    reason: str,
+    checked_at,
+    **extra,
+) -> dict:
+    return {
+        "key": key,
+        "label": label,
+        "ready": ready,
+        "next_step": next_step,
+        "reason": reason,
+        "checked_at": checked_at,
+        **extra,
+    }
 
 
 def admin_console_overview(request):
@@ -13,6 +40,7 @@ def admin_console_overview(request):
         return {}
 
     from jobs.models import BackgroundJob, JobStatus
+    from posts.game_catalog import DEFAULT_GAME_APPID, DEFAULT_GAME_NAME, GameOption
     from posts.models import ManagedGame
     from reviews.models import PolicyVersion, risk_label_display
 
@@ -55,16 +83,208 @@ def admin_console_overview(request):
             "description": f"当前启用策略包含 {enabled_rule_count} 条规则。",
             "tone": "is-healthy",
         }
+    managed_games = list(ManagedGame.objects.order_by("name", "appid"))
+    if not any(game.appid == DEFAULT_GAME_APPID for game in managed_games):
+        managed_games.insert(0, GameOption(DEFAULT_GAME_APPID, DEFAULT_GAME_NAME))
     game_summary = ManagedGame.objects.aggregate(last_synced_at=Max("last_synced_at"))
+    runtime_config = public_runtime_config()
+    try:
+        services = SupervisorClient().status()
+        supervisor_error = ""
+    except SupervisorUnavailableError as exc:
+        services = {}
+        supervisor_error = str(exc)
+    for name in MANAGED_SERVICE_NAMES:
+        services.setdefault(name, {"running": False, "desired": False})
+    try:
+        cdp_status = get_browser_login_status()
+        cdp_valid = cdp_status.valid
+        cdp_reason = cdp_status.reason
+    except CdpUnavailableError:
+        cdp_valid = False
+        cdp_reason = "受控 Chrome 未启动"
+    ai_ready = bool(
+        runtime_config["ai_base_url"]
+        and runtime_config["ai_api_key_configured"]
+        and runtime_config["ai_model"]
+    )
+    ocr_ready = bool(
+        runtime_config["ocr_base_url"]
+        and runtime_config["ocr_api_key_configured"]
+        and runtime_config["ocr_model"]
+    )
+    write_switches = tuple(
+        (key, {"name": label, "enabled": runtime_config[key.lower()] == "true"})
+        for key, label in (
+            ("ENABLE_UPSTREAM_WRITES", "启用人工处置总开关"),
+            ("ENABLE_SINK_WRITES", "允许沉底"),
+            ("ENABLE_BLOCK_WRITES", "允许屏蔽"),
+            ("ENABLE_MUTE_WRITES", "允许禁言"),
+            ("ENABLE_UNMUTE_WRITES", "允许解除禁言"),
+            ("ENABLE_RESTORE_WRITES", "允许恢复正常"),
+        )
+    )
+    checked_at = timezone.now()
+    pipeline = [
+        _pipeline_node(
+            "web",
+            "Web 服务",
+            not supervisor_error and services["web"]["running"],
+            "启动 Supervisor",
+            supervisor_error
+            or ("Web 服务运行正常" if services["web"]["running"] else "Web 服务未运行"),
+            checked_at,
+            service="web",
+            description="由本机 Supervisor 托管，提供工作台、系统配置和本地控制代理。",
+        ),
+        _pipeline_node(
+            "policy",
+            "默认审核策略",
+            bool(enabled_rule_count),
+            "初始化或启用审核策略",
+            policy_status["description"],
+            checked_at,
+            description="为 AI 审核建议提供唯一启用策略和规则阈值。",
+        ),
+        _pipeline_node(
+            "ai",
+            "AI 审核配置",
+            ai_ready,
+            "填写 AI 服务配置",
+            "AI 服务地址、模型和密钥均已配置" if ai_ready else "AI 配置尚不完整",
+            checked_at,
+            description="用于帖子内容分类、风险识别和人工审核建议。",
+        ),
+        _pipeline_node(
+            "ocr",
+            "OCR 配置（可选）",
+            ocr_ready,
+            "填写 OCR 服务配置",
+            "OCR 服务地址、模型和密钥均已配置" if ocr_ready else "未配置时跳过图片文字识别",
+            checked_at,
+            optional=True,
+            description="从图片中提取文字并纳入 AI 审核上下文；未配置不影响纯文本审核。",
+        ),
+        _pipeline_node(
+            "writes",
+            "人工处置授权（可选）",
+            runtime_config["enable_upstream_writes"] == "true",
+            "按需开启人工处置开关",
+            "人工处置总开关已开启"
+            if runtime_config["enable_upstream_writes"] == "true"
+            else "保持关闭，不会向上游执行处置",
+            checked_at,
+            optional=True,
+            description="仅授权人工确认后的沉底、屏蔽、禁言、解除禁言和恢复正常请求。",
+        ),
+        _pipeline_node(
+            "cdp",
+            "CDP 登录态",
+            cdp_valid,
+            cdp_reason or "打开受控 Chrome 登录页",
+            "登录态有效" if cdp_valid else cdp_reason,
+            checked_at,
+            description="检查受控 Chrome 的微信插件会话；系统不保存 Cookie、令牌或二维码内容。",
+        ),
+    ]
+    for service, label, description in (
+        (
+            "scheduler",
+            "自动调度器",
+            "每 15 分钟创建采集和状态巡检任务；不读取微信，也不调用 AI。",
+        ),
+        (
+            "review",
+            "AI 审核 Worker",
+            "执行图片 OCR 和 AI 评估任务；不创建任务，也不直接读取微信。",
+        ),
+    ):
+        pipeline.append(
+            _pipeline_node(
+                service,
+                label,
+                bool(services[service]["running"]),
+                f"启动{label}",
+                _service_reason(services[service]),
+                checked_at,
+                service=service,
+                running=bool(services[service]["running"]),
+                description=description,
+            )
+        )
+    ingestion_services = (
+        (
+            "ingestion",
+            "实时采集",
+            "消费自动采集与状态巡检任务，保障每 15 分钟任务及时处理。",
+        ),
+        (
+            "backfill_ingestion",
+            "人工补采",
+            "消费历史补采、范围互动刷新和旧采集任务。",
+        ),
+    )
+    ingestion_subservices = tuple(
+        {
+            "service": service,
+            "label": label,
+            "running": bool(services[service].get("running")),
+            "reason": _service_reason(services[service]),
+        }
+        for service, label, description in ingestion_services
+    )
+    ingestion_ready = all(item["running"] for item in ingestion_subservices)
+    pipeline.insert(
+        -1,
+        _pipeline_node(
+            "ingestion",
+            "帖子采集 Worker",
+            ingestion_ready,
+            "启动帖子采集 Worker（同时启动实时采集和人工补采）",
+            "；".join(f"{item['label']}：{item['reason']}" for item in ingestion_subservices),
+            checked_at,
+            running=ingestion_ready,
+            subservices=ingestion_subservices,
+            description=(
+                "实时采集 Worker 处理自动采集和状态巡检；"
+                "人工补采 Worker 处理历史补采、互动刷新和旧任务。"
+            ),
+        ),
+    )
+    core_keys = {"web", "policy", "ai", "cdp", "scheduler", "ingestion", "review"}
+    first_blocked = next(
+        (node for node in pipeline if node["key"] in core_keys and not node["ready"]), None
+    )
     return {
         "admin_console": {
             "active_policy": active_policy,
             "active_policy_rules": active_policy_rules,
             "policy_status": policy_status,
             "managed_game_count": ManagedGame.objects.count(),
+            "manual_ingestion_default_appid": DEFAULT_GAME_APPID,
+            "manual_ingestion_games": managed_games,
             "last_game_sync_at": game_summary["last_synced_at"],
             "pending_job_count": BackgroundJob.objects.filter(status=JobStatus.PENDING).count(),
             "running_job_count": BackgroundJob.objects.filter(status=JobStatus.RUNNING).count(),
             "failed_job_count": BackgroundJob.objects.filter(status=JobStatus.FAILED).count(),
+            "runtime_config": runtime_config,
+            "services": services,
+            "supervisor_error": supervisor_error,
+            "pipeline": pipeline,
+            "pipeline_ready": first_blocked is None,
+            "first_blocked_pipeline_node": first_blocked,
+            "pipeline_checked_at": checked_at,
+            "write_switches": write_switches,
         }
     }
+
+
+def _service_reason(service: dict) -> str:
+    if service.get("running"):
+        heartbeat = service.get("heartbeat_at")
+        state = f"运行中；最近心跳 {heartbeat}" if heartbeat else "运行中；尚未写入心跳"
+    elif service.get("exit_code") is not None:
+        state = f"未运行；最近退出码 {service['exit_code']}"
+    else:
+        state = "未运行；尚未启用"
+    return state

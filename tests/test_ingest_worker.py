@@ -6,10 +6,13 @@ from jobs.adapters import CandidatePostDTO, SourceBusinessDeletedError, SourceTr
 from jobs.models import BackgroundJob
 from posts.models import POST_STATUS_DELETED, CandidatePost, OriginalPost, OriginType
 from posts.tasks import (
-    INGEST_WINDOW_TASK,
+    BACKFILL_INGESTION_WORKER_HANDLERS,
+    LEGACY_INGEST_WINDOW_TASK,
+    MANUAL_INGEST_WINDOW_TASK,
     METRICS_REFRESH_WINDOW_TASK,
+    REALTIME_INGESTION_WORKER_HANDLERS,
+    SCHEDULED_INGEST_WINDOW_TASK,
     STATUS_SYNC_TASK,
-    WORKER_HANDLERS,
     ingest_window_handler,
     refresh_metrics_window_handler,
     sync_pending_status_handler,
@@ -34,7 +37,7 @@ class OnePageSource:
 @pytest.mark.django_db
 def test_worker_ingests_full_window_and_persists_completion_checkpoint():
     job = BackgroundJob.objects.create(
-        task_type=INGEST_WINDOW_TASK,
+        task_type=SCHEDULED_INGEST_WINDOW_TASK,
         idempotency_key="ingest:worker",
         parameter_summary={"appid": "wx-test", "start_time": 1, "end_time": 2, "page_size": 10},
     )
@@ -173,7 +176,23 @@ def test_metrics_refresh_updates_only_interaction_snapshots_and_skips_deleted_po
     assert refreshed.content_text == "unchanged"
     assert deleted.status == 2
     assert job.checkpoint == {"last_topic_id": 31, "processed": 1, "skipped": 1, "complete": True}
-    assert WORKER_HANDLERS[METRICS_REFRESH_WINDOW_TASK] is refresh_metrics_window_handler
+    assert (
+        BACKFILL_INGESTION_WORKER_HANDLERS[METRICS_REFRESH_WINDOW_TASK]
+        is refresh_metrics_window_handler
+    )
+
+
+def test_ingestion_worker_lanes_are_explicit_and_keep_legacy_jobs_in_backfill():
+    assert set(REALTIME_INGESTION_WORKER_HANDLERS) == {
+        SCHEDULED_INGEST_WINDOW_TASK,
+        STATUS_SYNC_TASK,
+    }
+    assert set(BACKFILL_INGESTION_WORKER_HANDLERS) == {
+        LEGACY_INGEST_WINDOW_TASK,
+        MANUAL_INGEST_WINDOW_TASK,
+        METRICS_REFRESH_WINDOW_TASK,
+    }
+    assert BACKFILL_INGESTION_WORKER_HANDLERS[LEGACY_INGEST_WINDOW_TASK] is ingest_window_handler
 
 
 @pytest.mark.django_db

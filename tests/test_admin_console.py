@@ -1,5 +1,8 @@
+from types import SimpleNamespace
+
 import pytest
 from django.contrib.auth import get_user_model
+from django.contrib.messages import get_messages
 from django.db import connection
 from django.test import Client, RequestFactory
 from django.test.utils import CaptureQueriesContext
@@ -7,6 +10,7 @@ from django.urls import resolve
 from django.utils import timezone
 
 from config.context_processors import admin_console_overview
+from config.supervisor import SupervisorUnavailableError
 from jobs.models import BackgroundJob, JobStatus
 from posts.models import ManagedGame, OriginalPost
 from reviews.adapters import AssessmentOutput
@@ -37,6 +41,216 @@ def test_admin_home_is_configuration_and_traceability_console(admin_client):
     assert "数据追溯" in page
     assert "仅此区域允许编辑" in page
     assert "未启用策略" in page
+    assert "初始化与运行状态" in page
+    assert "每 15 分钟创建采集和状态巡检任务；不读取微信，也不调用 AI。" in page
+    assert "实时采集 Worker 处理自动采集和状态巡检" in page
+    assert "人工补采 Worker 处理历史补采、互动刷新和旧任务。" in page
+    assert "执行图片 OCR 和 AI 评估任务；不创建任务，也不直接读取微信。" in page
+    assert "配置 AI 审核" in page
+    assert "配置 OCR" in page
+    assert "人工处置授权" in page
+    assert 'data-config-dialog="ai"' in page
+    assert 'data-config-dialog-panel="ai"' in page
+    assert 'data-config-dialog-panel="ocr"' in page
+    assert 'data-config-dialog-panel="writes"' in page
+    assert "配置 AI、OCR 与人工处置授权" not in page
+    assert "console-pipeline-info" in page
+    assert "查看帖子采集 Worker说明" in page
+    assert "检测" in page
+    assert "下一步：" in page
+
+
+@pytest.mark.django_db
+def test_admin_home_degrades_when_supervisor_is_unavailable(admin_client, monkeypatch):
+    def unavailable(_self):
+        raise SupervisorUnavailableError("Supervisor 未启动或运行态文件不可用")
+
+    monkeypatch.setattr("config.context_processors.SupervisorClient.status", unavailable)
+
+    page = admin_client.get("/admin/").content.decode()
+
+    assert "Supervisor 未启动或运行态文件不可用" in page
+    assert "启动 Supervisor" in page
+
+
+@pytest.mark.django_db
+def test_admin_home_only_offers_restart_and_stop_for_running_worker(admin_client, monkeypatch):
+    def running_services(_self):
+        return {
+            "web": {"running": True, "desired": True},
+            "scheduler": {"running": True, "desired": True},
+            "ingestion": {"running": False, "desired": False},
+            "backfill_ingestion": {"running": False, "desired": False},
+            "review": {"running": False, "desired": False},
+        }
+
+    monkeypatch.setattr("config.context_processors.SupervisorClient.status", running_services)
+
+    page = admin_client.get("/admin/").content.decode()
+
+    scheduler_start = "/admin/runtime/services/scheduler/start/"
+    scheduler_restart = "/admin/runtime/services/scheduler/restart/"
+    assert scheduler_start not in page
+    assert scheduler_restart in page
+    assert "/admin/runtime/services/scheduler/stop/" in page
+    assert "/admin/runtime/ingestion/start/" in page
+    assert "启动两个 Worker" in page
+
+
+@pytest.mark.django_db
+def test_runtime_control_is_staff_only_and_uses_fixed_proxy(admin_client, monkeypatch):
+    calls = []
+
+    def record(_self, service, action):
+        calls.append((service, action))
+        return {"service": service}
+
+    monkeypatch.setattr("config.supervisor_views.SupervisorClient.control", record)
+    anonymous = Client()
+
+    denied = anonymous.post("/admin/runtime/services/review/start/")
+    response = admin_client.post(
+        "/admin/runtime/services/review/start/", {"return_to": "/admin/"}
+    )
+
+    assert denied.status_code == 302
+    assert response.status_code == 302
+    assert calls == [("review", "start")]
+
+
+@pytest.mark.django_db
+def test_runtime_log_route_uses_the_read_only_log_proxy(admin_client, monkeypatch):
+    monkeypatch.setattr(
+        "config.supervisor_views.SupervisorClient.logs",
+        lambda _self, service: [f"{service} 日志"],
+    )
+
+    response = admin_client.get("/admin/runtime/services/backfill_ingestion/logs/")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "service": "backfill_ingestion",
+        "lines": ["backfill_ingestion 日志"],
+    }
+
+
+@pytest.mark.django_db
+def test_ingestion_control_starts_both_fixed_workers_and_reports_partial_failure(
+    admin_client, monkeypatch
+):
+    calls = []
+
+    def record(_self, service, action):
+        calls.append((service, action))
+        if service == "backfill_ingestion":
+            raise SupervisorUnavailableError("控制通道不可用")
+        return {"service": service}
+
+    monkeypatch.setattr("config.supervisor_views.SupervisorClient.control", record)
+
+    response = admin_client.post("/admin/runtime/ingestion/start/", {"return_to": "/admin/"})
+
+    assert response.status_code == 302
+    assert calls == [("ingestion", "start"), ("backfill_ingestion", "start")]
+    response_messages = " ".join(
+        str(message) for message in get_messages(response.wsgi_request)
+    )
+    assert "backfill_ingestion" in response_messages
+
+
+@pytest.mark.django_db
+def test_admin_can_enqueue_bounded_manual_ingestion_for_a_managed_game(admin_client, monkeypatch):
+    game = ManagedGame.objects.create(appid="wx-manual-ingestion", name="人工补采游戏")
+    captured = {}
+
+    def enqueue(**kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(created=True, job=SimpleNamespace(pk=123))
+
+    monkeypatch.setattr("config.supervisor_views.enqueue_manual_ingestion_window", enqueue)
+
+    response = admin_client.post(
+        "/admin/runtime/ingestion/enqueue/",
+        {"return_to": "/admin/", "appid": game.appid, "hours": "12"},
+    )
+
+    assert response.status_code == 302
+    assert captured["appid"] == game.appid
+    assert captured["page_size"] == 20
+    assert captured["end_time"] - captured["start_time"] == 12 * 60 * 60
+    response_messages = " ".join(
+        str(message) for message in get_messages(response.wsgi_request)
+    )
+    assert "已创建" in response_messages
+    assert resolve("/admin/runtime/ingestion/enqueue/").func.__name__ == "enqueue_manual_ingestion"
+
+
+@pytest.mark.django_db
+def test_admin_rejects_manual_ingestion_outside_the_bounded_hour_range(admin_client):
+    response = admin_client.post(
+        "/admin/runtime/ingestion/enqueue/",
+        {"return_to": "/admin/", "appid": "wx6d2454a8afcd9706", "hours": "745"},
+    )
+
+    assert response.status_code == 302
+    response_messages = " ".join(
+        str(message) for message in get_messages(response.wsgi_request)
+    )
+    assert "1 至 744 小时" in response_messages
+
+
+@pytest.mark.django_db
+def test_admin_home_offers_manual_ingestion_with_the_default_game_selected(admin_client):
+    ManagedGame.objects.create(appid="wx-other-game", name="其他游戏")
+
+    page = admin_client.get("/admin/").content.decode()
+
+    assert "创建历史补采" in page
+    assert 'action="/admin/runtime/ingestion/enqueue/"' in page
+    assert 'name="hours" type="number" min="1" max="744" value="12"' in page
+    assert 'value="wx6d2454a8afcd9706" selected' in page
+
+
+@pytest.mark.django_db
+def test_runtime_configuration_view_turns_missing_write_switches_off(admin_client, monkeypatch):
+    saved = {}
+
+    def record(values):
+        saved.update(values)
+        return {"ENABLE_BLOCK_WRITES"}
+
+    monkeypatch.setattr("config.supervisor_views.update_runtime_config", record)
+    monkeypatch.setattr("config.supervisor_views.affected_services", lambda _changed: {"web"})
+
+    response = admin_client.post(
+        "/admin/runtime/configuration/",
+        {"config_scope": "writes", "AI_MODEL": "test-model", "return_to": "/admin/"},
+    )
+
+    assert response.status_code == 302
+    assert saved["AI_MODEL"] == "test-model"
+    assert saved["ENABLE_BLOCK_WRITES"] == "false"
+    assert saved["ENABLE_MUTE_WRITES"] == "false"
+
+
+@pytest.mark.django_db
+def test_ai_configuration_does_not_change_write_switches(admin_client, monkeypatch):
+    saved = {}
+
+    def record(values):
+        saved.update(values)
+        return {"AI_MODEL"}
+
+    monkeypatch.setattr("config.supervisor_views.update_runtime_config", record)
+    monkeypatch.setattr("config.supervisor_views.affected_services", lambda _changed: {"review"})
+
+    response = admin_client.post(
+        "/admin/runtime/configuration/",
+        {"config_scope": "ai", "AI_MODEL": "test-model", "return_to": "/admin/"},
+    )
+
+    assert response.status_code == 302
+    assert saved == {"config_scope": "ai", "AI_MODEL": "test-model", "return_to": "/admin/"}
 
 
 @pytest.mark.django_db

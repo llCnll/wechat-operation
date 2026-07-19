@@ -13,6 +13,142 @@
   </div>
 </section>
 
+<section class="console-pipeline {% if admin_console.pipeline_ready %}is-ready{% endif %}">
+  <div class="console-pipeline-heading">
+    <div>
+      <p>INITIALIZATION PIPELINE</p>
+      <h2>初始化与运行状态</h2>
+      {% if admin_console.pipeline_ready %}
+      <span>核心审核能力已就绪。可展开查看诊断与可选能力。</span>
+      {% else %}
+      <span>下一步：{{ admin_console.first_blocked_pipeline_node.label }} · {{ admin_console.first_blocked_pipeline_node.next_step }}</span>
+      {% endif %}
+    </div>
+    <time>检查于 {{ admin_console.pipeline_checked_at|date:"m-d H:i:s" }}</time>
+  </div>
+  {% if admin_console.supervisor_error %}
+  <div class="console-pipeline-alert">{{ admin_console.supervisor_error }}。请在终端启动 `uv run python -m service_supervisor`。</div>
+  {% endif %}
+  <details class="console-pipeline-details" {% if not admin_console.pipeline_ready %}open{% endif %}>
+    <summary>{% if admin_console.pipeline_ready %}查看运行诊断与可选配置{% else %}查看初始化步骤与配置{% endif %}</summary>
+  <div class="console-pipeline-grid">
+    {% for node in admin_console.pipeline %}
+    <article class="console-pipeline-node {% if node.ready %}is-ready{% else %}is-blocked{% endif %}{% if node.optional %} is-optional{% endif %}">
+      <div class="console-pipeline-node-heading">
+        <span>{% if node.ready %}已就绪{% elif node.optional %}可选{% else %}待处理{% endif %}</span>
+        <div class="console-pipeline-node-indicators">
+          <i aria-hidden="true"></i>
+          {% if node.description %}
+          <button class="console-pipeline-info" type="button" aria-describedby="pipeline-info-{{ node.key }}" aria-label="查看{{ node.label }}说明">i<span id="pipeline-info-{{ node.key }}" class="console-pipeline-tooltip" role="tooltip">{{ node.description }}</span></button>
+          {% endif %}
+        </div>
+      </div>
+      <strong>{{ node.label }}</strong>
+      <small>{{ node.reason }}</small>
+      <span class="console-pipeline-node-check">检测 {{ node.checked_at|date:"H:i:s" }} · 下一步：{{ node.next_step }}</span>
+      {% if node.key == "ai" %}
+      <button type="button" data-config-dialog="ai" aria-haspopup="dialog">配置 AI 审核</button>
+      {% elif node.key == "ocr" %}
+      <button type="button" class="is-quiet" data-config-dialog="ocr" aria-haspopup="dialog">配置 OCR</button>
+      {% elif node.key == "writes" %}
+      <button type="button" class="is-quiet" data-config-dialog="writes" aria-haspopup="dialog">管理授权</button>
+      {% elif node.key == "policy" %}
+      <a href="{% url 'admin:reviews_policyversion_changelist' %}">管理策略</a>
+      {% elif node.key == "cdp" %}
+      <form method="post" action="{% url 'open-controlled-login' %}">{% csrf_token %}<input type="hidden" name="return_to" value="/admin/"><button type="submit">打开登录页</button></form>
+      {% elif node.key == "ingestion" %}
+      <div class="console-service-actions">
+        <button type="button" class="is-quiet" data-config-dialog="manual-ingestion" aria-haspopup="dialog">创建历史补采</button>
+        {% if node.running %}
+        <form method="post" action="{% url 'supervisor-control-ingestion-workers' action='restart' %}">{% csrf_token %}<input type="hidden" name="return_to" value="/admin/"><button type="submit">重启两个 Worker</button></form>
+        <form method="post" action="{% url 'supervisor-control-ingestion-workers' action='stop' %}">{% csrf_token %}<input type="hidden" name="return_to" value="/admin/"><button class="is-quiet" type="submit">停止两个 Worker</button></form>
+        {% else %}
+        <form method="post" action="{% url 'supervisor-control-ingestion-workers' action='start' %}">{% csrf_token %}<input type="hidden" name="return_to" value="/admin/"><button type="submit">启动两个 Worker</button></form>
+        {% endif %}
+      </div>
+      <div class="console-ingestion-subservices">
+        {% for service in node.subservices %}
+        <div><span class="{% if service.running %}is-running{% else %}is-stopped{% endif %}">{{ service.label }}</span><button class="is-quiet" type="button" data-supervisor-logs="{% url 'supervisor-service-logs' service=service.service %}" data-supervisor-log-label="{{ service.label }}">日志</button></div>
+        {% endfor %}
+      </div>
+      {% elif node.service %}
+      <div class="console-service-actions">
+        {% if node.service == "web" %}
+        <form method="post" action="{% url 'supervisor-control-service' service=node.service action='restart' %}">{% csrf_token %}<input type="hidden" name="return_to" value="/admin/"><button type="submit">重启 Web</button></form>
+        {% else %}
+        {% if node.running %}
+        <form method="post" action="{% url 'supervisor-control-service' service=node.service action='restart' %}">{% csrf_token %}<input type="hidden" name="return_to" value="/admin/"><button type="submit">重启</button></form>
+        <form method="post" action="{% url 'supervisor-control-service' service=node.service action='stop' %}">{% csrf_token %}<input type="hidden" name="return_to" value="/admin/"><button class="is-quiet" type="submit">停止</button></form>
+        {% else %}
+        <form method="post" action="{% url 'supervisor-control-service' service=node.service action='start' %}">{% csrf_token %}<input type="hidden" name="return_to" value="/admin/"><button type="submit">启动</button></form>
+        {% endif %}
+        {% endif %}
+        <button class="is-quiet" type="button" data-supervisor-logs="{% url 'supervisor-service-logs' service=node.service %}" data-supervisor-log-label="{{ node.label }}">日志</button>
+      </div>
+      {% endif %}
+    </article>
+    {% endfor %}
+  </div>
+  </details>
+</section>
+
+<dialog class="console-log-dialog" data-supervisor-log-dialog aria-labelledby="supervisor-log-title">
+  <header><div><p>SERVICE LOG</p><h2 id="supervisor-log-title" data-supervisor-log-title>运行日志</h2></div><button type="button" class="console-dialog-close" data-supervisor-log-close aria-label="关闭">关闭</button></header>
+  <pre class="console-service-log" data-supervisor-log-output>正在读取脱敏日志...</pre>
+</dialog>
+
+<dialog class="console-config-dialog" data-config-dialog-panel="manual-ingestion" aria-labelledby="manual-ingestion-title">
+  <form method="post" action="{% url 'enqueue-manual-ingestion' %}">{% csrf_token %}<input type="hidden" name="return_to" value="/admin/">
+    <header><div><p>MANUAL BACKFILL</p><h2 id="manual-ingestion-title">创建历史补采</h2></div><button type="button" class="console-dialog-close" data-config-dialog-close aria-label="关闭">关闭</button></header>
+    <p class="console-dialog-intro">按游戏和时间范围创建只读原创帖补采任务，由人工补采 Worker 异步处理。自动调度任务不受影响。</p>
+    <div class="console-dialog-fields">
+      <label class="console-dialog-field-wide">游戏<select name="appid" required>{% for game in admin_console.manual_ingestion_games %}<option value="{{ game.appid }}" {% if game.appid == admin_console.manual_ingestion_default_appid %}selected{% endif %}>{{ game.name }}</option>{% endfor %}</select></label>
+      <label>最近小时数<input name="hours" type="number" min="1" max="744" value="12" required inputmode="numeric"></label>
+    </div>
+    <footer><span>支持 1 至 744 小时；任务入队后可在“后台任务”查看进度。</span><button class="console-config-submit" type="submit">创建补采任务</button></footer>
+  </form>
+</dialog>
+
+<dialog class="console-config-dialog" data-config-dialog-panel="ai" aria-labelledby="ai-config-title">
+  <form method="post" action="{% url 'save-runtime-configuration' %}">{% csrf_token %}<input type="hidden" name="return_to" value="/admin/"><input type="hidden" name="config_scope" value="ai">
+    <header><div><p>MODEL CONNECTION</p><h2 id="ai-config-title">配置 AI 审核</h2></div><button type="button" class="console-dialog-close" data-config-dialog-close aria-label="关闭">关闭</button></header>
+    <p class="console-dialog-intro">用于帖子风险识别与分类建议。密钥不会回显；留空表示保留当前密钥。</p>
+    <div class="console-dialog-fields">
+      <label>服务地址<input name="AI_BASE_URL" value="{{ admin_console.runtime_config.ai_base_url }}" placeholder="https://.../v1"></label>
+      <label>模型名称<input name="AI_MODEL" value="{{ admin_console.runtime_config.ai_model }}" placeholder="模型名称"></label>
+      <label>访问密钥{% if admin_console.runtime_config.ai_api_key_configured %}<em>已配置，留空保留</em>{% endif %}<input name="AI_API_KEY" type="password" autocomplete="new-password" placeholder="输入新密钥"></label>
+      <label>超时（秒）<input name="AI_TIMEOUT_SECONDS" value="{{ admin_console.runtime_config.ai_timeout_seconds }}" inputmode="decimal"></label>
+    </div>
+    <footer><span>保存后重启 AI 审核 Worker 即可加载。</span><button class="console-config-submit" type="submit">保存 AI 配置</button></footer>
+  </form>
+</dialog>
+
+<dialog class="console-config-dialog" data-config-dialog-panel="ocr" aria-labelledby="ocr-config-title">
+  <form method="post" action="{% url 'save-runtime-configuration' %}">{% csrf_token %}<input type="hidden" name="return_to" value="/admin/"><input type="hidden" name="config_scope" value="ocr">
+    <header><div><p>OPTIONAL CAPABILITY</p><h2 id="ocr-config-title">配置 OCR</h2></div><button type="button" class="console-dialog-close" data-config-dialog-close aria-label="关闭">关闭</button></header>
+    <p class="console-dialog-intro">OCR 会提取帖子图片文字并纳入 AI 审核上下文。未配置时，帖子审核仍可正常进行。</p>
+    <div class="console-dialog-fields">
+      <label>服务地址<input name="OCR_BASE_URL" value="{{ admin_console.runtime_config.ocr_base_url }}" placeholder="https://.../v1"></label>
+      <label>模型名称<input name="OCR_MODEL" value="{{ admin_console.runtime_config.ocr_model }}" placeholder="模型名称"></label>
+      <label>访问密钥{% if admin_console.runtime_config.ocr_api_key_configured %}<em>已配置，留空保留</em>{% endif %}<input name="OCR_API_KEY" type="password" autocomplete="new-password" placeholder="输入新密钥"></label>
+    </div>
+    <footer><span>保存后重启 AI 审核 Worker 即可加载。</span><button class="console-config-submit" type="submit">保存 OCR 配置</button></footer>
+  </form>
+</dialog>
+
+<dialog class="console-config-dialog console-config-dialog-risk" data-config-dialog-panel="writes" aria-labelledby="writes-config-title">
+  <form method="post" action="{% url 'save-runtime-configuration' %}">{% csrf_token %}<input type="hidden" name="return_to" value="/admin/"><input type="hidden" name="config_scope" value="writes">
+    <header><div><p>UPSTREAM AUTHORIZATION</p><h2 id="writes-config-title">人工处置授权</h2></div><button type="button" class="console-dialog-close" data-config-dialog-close aria-label="关闭">关闭</button></header>
+    <p class="console-dialog-intro">开启后，运营人员仍需在帖子工作台逐帖确认，系统不会自动执行沉底、屏蔽或禁言。</p>
+    <fieldset class="console-write-switches"><legend>允许写入上游平台</legend>
+      {% for key, label in admin_console.write_switches %}
+      <label><input type="checkbox" name="{{ key }}" value="true" {% if label.enabled %}checked{% endif %}> {{ label.name }}</label>
+      {% endfor %}
+    </fieldset>
+    <footer><span>未勾选的授权会在保存时关闭。</span><button class="console-config-submit" type="submit">保存授权</button></footer>
+  </form>
+</dialog>
+
 <section class="console-section">
   <div class="console-section-heading">
     <div><p>CONFIGURATION</p><h2>核心配置</h2></div>

@@ -6,6 +6,7 @@ from posts.models import (
     POST_STATUS_BLOCKED,
     POST_STATUS_DELETED,
     POST_STATUS_NORMAL,
+    POST_STATUS_SELF_VISIBLE,
     POST_STATUS_SUNK,
     CandidatePost,
     InteractionSnapshot,
@@ -14,6 +15,7 @@ from posts.models import (
     OriginType,
     PostMedia,
     is_post_deleted,
+    is_post_self_visible,
     mark_post_deleted,
     normalize_post_status,
 )
@@ -40,6 +42,12 @@ def test_business_deletion_preserves_only_moderation_status_bits(status, expecte
 @pytest.mark.parametrize(("value", "expected"), ((None, 2), ("", 2), ("8", 8), (16, 16)))
 def test_missing_or_invalid_upstream_status_uses_normal_base(value, expected):
     assert normalize_post_status(value) == expected
+
+
+def test_self_visible_status_is_preserved_as_an_upstream_visibility_state():
+    assert normalize_post_status(POST_STATUS_SELF_VISIBLE) == POST_STATUS_SELF_VISIBLE
+    assert is_post_self_visible(POST_STATUS_SELF_VISIBLE)
+    assert not is_post_self_visible(POST_STATUS_NORMAL)
 
 
 @pytest.mark.django_db

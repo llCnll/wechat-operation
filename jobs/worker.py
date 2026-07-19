@@ -13,6 +13,7 @@ from django.db import OperationalError
 from config.settings import runtime
 from jobs.models import BackgroundJob
 from jobs.services import execute_next_job, recover_interrupted_jobs
+from service_supervisor.runtime import write_worker_heartbeat
 
 try:
     import fcntl
@@ -83,6 +84,7 @@ def consume_jobs(
             return
         recovery_complete = False
         while True:
+            write_worker_heartbeat()
             try:
                 if not recovery_complete:
                     recovered = recover_interrupted_jobs(task_types=task_types)

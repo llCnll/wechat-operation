@@ -18,6 +18,7 @@ from posts.models import (
     OriginalPost,
     OriginType,
     is_post_deleted,
+    is_post_self_visible,
 )
 
 from .adapters import AssessmentOutput
@@ -263,6 +264,8 @@ def create_confirmed_operation(
 ) -> OperationAudit:
     if is_post_deleted(task.post.status):
         raise ValueError("帖子已从原平台管理队列删除，不能执行处置")
+    if is_post_self_visible(task.post.status):
+        raise ValueError("帖子当前仅自己可见，不能覆盖原平台可见性状态")
     if not is_operation_enabled(action):
         raise PermissionError("上游写操作能力未启用")
     return OperationAudit.objects.create(
@@ -289,6 +292,8 @@ def execute_confirmed_operation(
     payload = _prepare_upstream_payload(action, reason, upstream_payload)
     if is_post_deleted(task.post.status):
         raise ValueError("帖子已从原平台管理队列删除，不能执行处置")
+    if is_post_self_visible(task.post.status):
+        raise ValueError("帖子当前仅自己可见，不能覆盖原平台可见性状态")
     candidate = CandidatePost.objects.filter(topic_id=task.post.topic_id).first()
     if candidate is None or candidate.origin_type != OriginType.ORIGINAL:
         raise ValueError("操作前原创状态复核失败")

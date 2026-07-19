@@ -11,4 +11,45 @@
 
 {% block extrabody %}
 {% include "posts/includes/cdp_login_status_script.html" %}
+<script>
+  (() => {
+    const logDialog = document.querySelector("[data-supervisor-log-dialog]");
+    const output = document.querySelector("[data-supervisor-log-output]");
+    const logTitle = document.querySelector("[data-supervisor-log-title]");
+    document.querySelectorAll("[data-supervisor-logs]").forEach((button) => {
+      button.addEventListener("click", async () => {
+        logTitle.textContent = `${button.dataset.supervisorLogLabel || "服务"} · 脱敏日志`;
+        output.textContent = "正在读取脱敏日志...";
+        logDialog.showModal();
+        try {
+          const response = await fetch(button.dataset.supervisorLogs, {cache: "no-store"});
+          const payload = await response.json();
+          output.textContent = payload.lines ? payload.lines.join("\n") : (payload.error || "暂无日志。");
+        } catch (_) {
+          output.textContent = "日志暂时不可用。";
+        }
+      });
+    });
+
+    document.querySelectorAll("[data-config-dialog]").forEach((button) => {
+      button.addEventListener("click", () => {
+        document.querySelector(`[data-config-dialog-panel="${button.dataset.configDialog}"]`)?.showModal();
+      });
+    });
+    document.querySelectorAll("[data-config-dialog-close]").forEach((button) => {
+      button.addEventListener("click", () => button.closest("dialog")?.close());
+    });
+    document.querySelectorAll("[data-supervisor-log-close]").forEach((button) => {
+      button.addEventListener("click", () => button.closest("dialog")?.close());
+    });
+    document.querySelectorAll(".console-config-dialog").forEach((dialog) => {
+      dialog.addEventListener("click", (event) => {
+        if (event.target === dialog) dialog.close();
+      });
+    });
+    logDialog?.addEventListener("click", (event) => {
+      if (event.target === logDialog) logDialog.close();
+    });
+  })();
+</script>
 {% endblock %}

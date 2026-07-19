@@ -47,6 +47,23 @@ def test_specialized_worker_only_claims_its_own_task_types():
 
 
 @pytest.mark.django_db
+def test_realtime_worker_claims_scheduled_work_without_waiting_for_older_manual_work():
+    manual = BackgroundJob.objects.create(
+        task_type="MANUAL_INGEST_WINDOW", idempotency_key="manual:older"
+    )
+    scheduled = BackgroundJob.objects.create(
+        task_type="SCHEDULED_INGEST_WINDOW", idempotency_key="scheduled:newer"
+    )
+
+    claimed = claim_next_job(task_types={"SCHEDULED_INGEST_WINDOW", "STATUS_SYNC"})
+
+    assert claimed is not None
+    assert claimed.pk == scheduled.pk
+    manual.refresh_from_db()
+    assert manual.status == JobStatus.PENDING
+
+
+@pytest.mark.django_db
 def test_enqueue_is_idempotent_and_handler_completes_job():
     first = enqueue_job(
         task_type="REPORT", idempotency_key="report:2026-07-18", parameter_summary={}

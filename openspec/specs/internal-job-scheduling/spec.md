@@ -9,7 +9,7 @@
 
 #### Scenario: 时间桶内首次调度
 - **WHEN** Scheduler Worker 运行并进入一个尚未调度的北京时间 15 分钟时间桶
-- **THEN** 系统 SHALL 先幂等创建一个上限为 20 的 `STATUS_SYNC` 任务，再幂等创建一个回看最近 30 分钟、页大小为 20 的 `INGEST_WINDOW` 任务
+- **THEN** 系统 SHALL 先幂等创建一个上限为 20 的 `STATUS_SYNC` 任务，再幂等创建一个回看最近 30 分钟、页大小为 20 的 `SCHEDULED_INGEST_WINDOW` 任务
 
 #### Scenario: 重复检查或重复启动
 - **WHEN** 一个或多个 Scheduler Worker 在同一时间桶内重复检查或重启
@@ -28,4 +28,4 @@
 
 #### Scenario: 超过回看窗口的空洞
 - **WHEN** Scheduler Worker 停止超过 30 分钟
-- **THEN** 系统 SHALL 不自动扩大采集窗口，运营人员 MUST 使用受控的手动采集命令补采历史窗口
+- **THEN** 系统 SHALL 不自动扩大采集窗口，运营人员 MUST 在系统配置首页的帖子采集 Worker 节点创建受控历史补采窗口；直接管理命令仅用于诊断

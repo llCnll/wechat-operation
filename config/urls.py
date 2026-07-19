@@ -2,6 +2,7 @@ from django.contrib import admin
 from django.http import JsonResponse
 from django.urls import path
 
+from config import supervisor_views
 from config.cdp import CdpUnavailableError, get_browser_login_status
 from posts import views as post_views
 from reporting import views as reporting_views
@@ -30,6 +31,31 @@ urlpatterns = [
     path("healthz", health_check, name="health-check"),
     path("auth/status", browser_login_status, name="browser-login-status"),
     path("auth/open-login/", post_views.open_controlled_login, name="open-controlled-login"),
+    path(
+        "admin/runtime/services/<str:service>/logs/",
+        supervisor_views.service_logs,
+        name="supervisor-service-logs",
+    ),
+    path(
+        "admin/runtime/services/<str:service>/<str:action>/",
+        supervisor_views.control_service,
+        name="supervisor-control-service",
+    ),
+    path(
+        "admin/runtime/ingestion/enqueue/",
+        supervisor_views.enqueue_manual_ingestion,
+        name="enqueue-manual-ingestion",
+    ),
+    path(
+        "admin/runtime/ingestion/<str:action>/",
+        supervisor_views.control_ingestion_workers,
+        name="supervisor-control-ingestion-workers",
+    ),
+    path(
+        "admin/runtime/configuration/",
+        supervisor_views.save_runtime_configuration,
+        name="save-runtime-configuration",
+    ),
     path("", post_views.operations_dashboard, name="operations-dashboard"),
     path("reports/", reporting_views.live_operations_analysis, name="live-operations-analysis"),
     path(

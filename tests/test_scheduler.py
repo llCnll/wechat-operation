@@ -52,7 +52,7 @@ def test_scheduled_enqueue_is_fixed_game_and_idempotent_in_one_time_bucket():
         "end_time": int(_shanghai_time(10, 15).timestamp()),
         "page_size": 20,
     }
-    assert BackgroundJob.objects.filter(task_type="INGEST_WINDOW").count() == 1
+    assert BackgroundJob.objects.filter(task_type="SCHEDULED_INGEST_WINDOW").count() == 1
 
 
 @pytest.mark.django_db
@@ -105,6 +105,7 @@ def test_manual_enqueue_uses_shared_window_validation_and_reports_existing_job()
         )
 
     job = BackgroundJob.objects.get()
+    assert job.task_type == "MANUAL_INGEST_WINDOW"
     assert job.parameter_summary == {
         "appid": "wx-manual",
         "start_time": int(_shanghai_time(8, 16).timestamp()),
@@ -131,7 +132,7 @@ def test_scheduler_command_reports_window_and_duplicate_result():
     assert "待审核帖子状态巡检" in created_output.getvalue()
     assert (
         BackgroundJob.objects.get(task_type="STATUS_SYNC").pk
-        < BackgroundJob.objects.get(task_type="INGEST_WINDOW").pk
+        < BackgroundJob.objects.get(task_type="SCHEDULED_INGEST_WINDOW").pk
     )
 
 
@@ -156,7 +157,7 @@ def test_scheduler_loop_runs_immediately_then_waits_for_next_check():
         call_command("run_scheduler", "--loop", "--poll-seconds", "12")
 
     assert BackgroundJob.objects.filter(task_type="STATUS_SYNC").count() == 1
-    assert BackgroundJob.objects.filter(task_type="INGEST_WINDOW").count() == 1
+    assert BackgroundJob.objects.filter(task_type="SCHEDULED_INGEST_WINDOW").count() == 1
     sleep.assert_called_once_with(12)
 
 

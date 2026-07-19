@@ -8,13 +8,14 @@
 
 ## 启动前确认
 
-- 本项目是本机内部工具。基础 Web 可以在没有 Chrome 登录态的情况下启动，但帖子采集、状态回读、游戏目录同步和人工上游处置都依赖步骤 3 的受控 Chrome 会话。
+- 本项目是本机内部工具。基础 Web 可以在没有 Chrome 登录态的情况下启动，但帖子采集、状态回读、游戏目录同步和人工上游处置都依赖步骤 1 启动的受控 Chrome 会话。
+- Chrome DevTools Protocol（CDP）无需单独安装：它是 Chrome/Chromium 自带的调试协议。必须预先安装 Chrome 或 Chromium，并以 `--remote-debugging-port=9222` 启动独立浏览器进程；普通已运行的 Chrome 无法在启动后补加该端口。
 - `uv` 是唯一需要预先可用的开发工具；项目要求 Python 3.12，`uv sync --python 3.12 --all-groups` 会下载受管解释器。
 - 需要真实使用工作台时，先创建一个本地 Django 管理员账号。该账号只用于本系统登录，不是微信账号，也不应使用或记录微信会话信息。
 
 ## 启动流程（Agent 执行清单）
 
-所有命令均在项目根目录执行。完成步骤 0 至 4 后，Web、帖子采集、状态巡检、OCR 和 AI 评估均可用；原平台写操作默认保持关闭，只有完成步骤 5 的显式审批配置后才可人工执行。清单不会覆盖已有 `runtime/.env`、数据库或其他运行数据。
+所有命令均在项目根目录执行。终端只负责依赖安装、首次初始化、启动 Supervisor 和受控 Chrome；步骤 2 至 5 均在 `/admin/` 的“初始化与运行状态”完成。Web、帖子采集、状态巡检、OCR 和 AI 评估均可用；原平台写操作默认保持关闭，只有完成步骤 5 的显式审批配置后才可人工执行。清单不会覆盖已有 `runtime/.env`、数据库或其他运行数据。
 
 ### 0. `uv` 不可用时
 
@@ -60,7 +61,7 @@ uv --version
 
 若安装脚本不可用且系统没有 Python，需由具备系统安装权限的操作者安装 `uv` 本身：macOS 可执行 `brew install uv`，Windows PowerShell 可执行 `winget install -e --id astral-sh.uv`；Linux 应使用所在发行版的软件源或由运维提供的 `uv` 安装包。Agent 不应改写项目内的依赖锁文件或将 `uv`、受管 Python 安装到 `runtime/`。
 
-### 1. 基础服务启动
+### 1. 基础服务与受控 Chrome 启动
 
 - [ ] 确认 `uv --version` 可用；首次依赖同步会自动下载受管 Python 3.12：
 
@@ -82,62 +83,23 @@ New-Item -ItemType Directory -Force runtime | Out-Null
 if (-not (Test-Path runtime/.env)) { Copy-Item .env.example runtime/.env }
 ```
 
-- [ ] 应用迁移、收集静态资源并执行校验：
+- [ ] 首次部署先应用迁移并创建本地管理员账号：
 
 ```bash
 uv run python manage.py migrate
-uv run python manage.py ensure_default_policy
-uv run python manage.py collectstatic --noinput
-uv run python manage.py check
+uv run python manage.py createsuperuser
 ```
 
-- [ ] 若尚未存在管理员账号，人工执行 `uv run python manage.py createsuperuser`。该步骤不影响健康检查，但登录工作台前必须完成。
-- [ ] 启动单进程 Web 服务并等待健康检查成功。macOS/Linux：
+- [ ] 首次部署若尚未存在管理员账号，必须在继续启动流程前由执行 Agent 人工执行 `uv run python manage.py createsuperuser`。该账号是进入系统配置与初始化 Pipeline 的前置条件；Agent 不得跳过、自动生成或记录其密码。
+- [ ] 启动 Supervisor。它会自动执行迁移、静态资源收集和默认策略检查，再启动 Web；日常运行不再分别启动 Web 或 Worker：
 
 ```bash
-nohup uv run python manage.py runserver 127.0.0.1:8000 --noreload > runtime/web.log 2>&1 &
-ready=false
-for _ in {1..20}; do
-  if curl -fsS http://127.0.0.1:8000/healthz; then ready=true; break; fi
-  sleep 1
-done
-$ready || { echo 'Web 服务未在 20 秒内启动；请检查 runtime/web.log' >&2; exit 1; }
+uv run python -m service_supervisor
 ```
 
-Windows PowerShell：
+Supervisor 必须保持运行。健康检查应返回 `{"status": "ok"}`；启动失败时先查看 `runtime/supervisor/logs/preflight.log`，不要再以独立 `runserver` 进程抢占端口 `8000`。
 
-```powershell
-Start-Process -FilePath uv -ArgumentList @('run','python','manage.py','runserver','127.0.0.1:8000','--noreload') -WorkingDirectory (Get-Location) -RedirectStandardOutput 'runtime/web.log' -RedirectStandardError 'runtime/web-error.log'
-$deadline = (Get-Date).AddSeconds(20)
-do { try { $response = Invoke-WebRequest http://127.0.0.1:8000/healthz } catch { Start-Sleep -Seconds 1 } } while ((-not $response) -and (Get-Date -lt $deadline))
-if (-not $response -or $response.StatusCode -ne 200) { throw 'Web 服务未在 20 秒内启动；请检查 runtime/web-error.log' }
-$response.Content
-```
-
-健康检查必须返回 `{"status": "ok"}`。若端口 `8000` 已被本服务占用，不要重复启动；直接执行健康检查。若被其他进程占用，先停止该进程或改用其他端口，并在后续命令中保持一致。
-
-### 2. 配置 AI 与 OCR
-
-编辑 `runtime/.env`。AI 审核必须配置 `AI_BASE_URL`、`AI_API_KEY` 和 `AI_MODEL`；图片 OCR 功能还必须配置 `OCR_BASE_URL`、`OCR_API_KEY` 和 `OCR_MODEL`。缺少 AI 配置时，AI Worker 虽能启动但评估任务会失败；缺少 OCR 配置时，图片 OCR 会记录失败并继续后续 AI 评估。
-
-```dotenv
-AI_BASE_URL=https://your-ai-endpoint/v1
-AI_API_KEY=replace-with-secret
-AI_MODEL=your-model
-AI_TIMEOUT_SECONDS=30
-
-OCR_BASE_URL=https://your-ocr-endpoint/v1
-OCR_API_KEY=replace-with-secret
-OCR_MODEL=your-vision-model
-```
-
-上游写操作开关保持默认 `false`。只有完成接口验证且运营人员明确批准后，才在同一文件启用总开关和所需单项开关；AI 永远不会自动执行处置。
-
-运行时配置由进程启动时读取：本步骤后再启动 AI Worker 即可使 AI/OCR 配置生效；若修改了上游写操作开关，必须重启 Web 服务后再执行人工处置。
-
-### 3. CDP 扫码登录
-
-采集器通过 Chrome DevTools Protocol（CDP）使用独立 Chrome 的已登录插件页。启动命令如下；普通 Chrome 进程不能在启动后补加调试端口。
+- [ ] 启动受控 Chrome 并开启 CDP。使用独立用户目录，避免读取或影响日常浏览器会话：
 
 macOS：
 
@@ -160,29 +122,31 @@ $profilePath = Join-Path $env:LOCALAPPDATA 'WechatOperationChrome'
 Start-Process chrome.exe -ArgumentList '--remote-debugging-port=9222', "--user-data-dir=$profilePath"
 ```
 
-- [ ] 在独立 Chrome 打开以下插件页。二维码出现后，必须由运营人员使用微信扫码并完成确认；Agent 不得读取、记录或伪造 Cookie、令牌、二维码内容或 `openid`。
+- [ ] 验证 CDP 端口已就绪：macOS/Linux 执行 `curl -fsS http://127.0.0.1:9222/json/version`；Windows PowerShell 执行 `(Invoke-WebRequest http://127.0.0.1:9222/json/version).Content`。成功时会返回浏览器版本与 `webSocketDebuggerUrl`，但此时尚未完成微信登录。
 
-```text
-https://mp.weixin.qq.com/wxamp/frame/pluginRedirect/pluginRedirect?title=&action=plugin_redirect&lang=zh_CN&plugin_uin=1029&simple=1&nosidebar=1&custom=path%3D%2Fminigame%40community%2Fminigame%2Fpage%2Fhome
-```
+完成本步骤后登录 `http://127.0.0.1:8000/admin/`。后续步骤均从首页“初始化与运行状态”操作：配置 AI/OCR、打开固定登录页并扫码、启停 Scheduler 与 Worker、管理人工处置授权和查看日志。扫码动作仍由运营人员在受控 Chrome 中完成。
 
-- [ ] 保持已登录插件页打开，并验证登录态。macOS/Linux：`curl -fsS http://127.0.0.1:8000/auth/status`；Windows PowerShell：`(Invoke-WebRequest http://127.0.0.1:8000/auth/status).Content`。响应必须包含 `"valid": true`。
+### 2. 配置 AI 与 OCR
 
-若工作台顶部的 `CDP` 状态胶囊显示红色“未登录，去登录”，已登录本系统的运营人员可点击它。服务只会在带调试端口的受控 Chrome 中打开固定、未认证的插件页，随后仍须由运营人员手动扫码；不会在当前工作台浏览器跳转，也不会接收或保存登录 URL、Cookie 或令牌。
+登录 `http://127.0.0.1:8000/admin/` 后，在首页顶部“初始化与运行状态”点击“配置 AI 审核”和“配置 OCR”。AI 审核必须填写服务地址、访问密钥和模型名称；图片 OCR 还需填写对应的 OCR 服务地址、访问密钥和模型名称。密钥只可写入、不会回显。
+
+保存配置后按页面提示重启 AI 审核 Worker，使其加载新配置。`runtime/.env` 仅保留给无法进入后台时的运维恢复，不应作为日常配置入口；AI 永远不会自动执行处置。
+
+### 3. CDP 扫码登录
+
+采集器通过步骤 1 已启动的 Chrome DevTools Protocol（CDP）使用独立 Chrome 的已登录插件页。此步骤仅完成扫码和登录态验证。
+
+- [ ] 在 `/admin/` 的“CDP 登录态”节点点击“打开登录页”。服务只会在带调试端口的受控 Chrome 中打开固定、未认证的插件页；二维码出现后，必须由运营人员使用微信扫码并完成确认。Agent 不得读取、记录或伪造 Cookie、令牌、二维码内容或 `openid`。
+- [ ] 保持已登录插件页打开，直到 Pipeline 的“CDP 登录态”显示绿色“已就绪”。`GET /auth/status` 仅作为无法进入后台时的诊断接口，成功响应包含 `"valid": true`。
+
+若工作台顶部的 `CDP` 状态胶囊显示红色“未登录，去登录”，已登录本系统的运营人员也可点击它打开固定登录页；不会在当前工作台浏览器跳转，也不会接收或保存登录 URL、Cookie 或令牌。
 
 ### 4. 启动 Worker 并完成验证
 
-- [ ] 在三个独立终端启动 Scheduler、采集 Worker 和 AI Worker：
+- [ ] 返回系统配置首页的“初始化与运行状态”，依次启动 Scheduler、帖子采集 Worker 与 AI Worker。“帖子采集 Worker”的一次启动会同时启动实时采集和人工补采两个进程。Supervisor 会持久化期望状态，后续重启后自动恢复此前启用的 Worker。
+- [ ] 确认 Pipeline 的核心能力均显示“已就绪”。至此帖子采集、状态巡检、OCR 与 AI 评估已启用；`/healthz` 与 `/auth/status` 仅用于后台不可用时的诊断。
 
-```bash
-uv run python manage.py run_scheduler --loop
-uv run python manage.py run_ingestion_worker --loop
-uv run python manage.py run_review_worker --loop
-```
-
-- [ ] 确认三个进程持续运行，`/healthz` 返回 `{"status": "ok"}`，`/auth/status` 返回 `"valid": true`。至此核心数据能力，即帖子采集、状态巡检、OCR 与 AI 评估已启用。
-
-SQLite 部署中每类 Worker 只能运行一个实例；重复启动同类 Worker 会主动退出，不会恢复或执行正在由另一实例处理的任务。
+SQLite 部署中每类 Worker 只能运行一个实例。页面只能控制固定服务，不能执行任意命令；`run_scheduler`、`run_realtime_ingestion_worker`、`run_backfill_ingestion_worker` 和 `run_review_worker` 仅用于开发或故障诊断。`run_ingestion_worker` 保留为实时采集命令的兼容别名。
 
 ### 启动完成判定
 
@@ -190,58 +154,55 @@ SQLite 部署中每类 Worker 只能运行一个实例；重复启动同类 Work
 
 | 项目 | 检查方式 | 预期结果 |
 | --- | --- | --- |
-| Web 服务 | `GET /healthz` | 返回 `{"status": "ok"}`。 |
-| 受控微信会话 | `GET /auth/status` | 返回中包含 `"valid": true`。 |
-| 自动调度 | `run_scheduler --loop` 进程持续运行 | 每 15 分钟只创建任务，不直接访问 Chrome。 |
-| 数据采集与状态巡检 | `run_ingestion_worker --loop` 进程持续运行 | 消费 `INGEST_WINDOW`、`STATUS_SYNC`、`METRICS_REFRESH_WINDOW`。 |
-| OCR 与 AI 评估 | `run_review_worker --loop` 进程持续运行 | 消费 `OCR_EXTRACT`、`AI_EVALUATE`；要求相应配置完整。 |
+| Web 服务 | Pipeline 中 Web 服务显示运行 | 由 Supervisor 托管且状态正常；`GET /healthz` 仅用于诊断。 |
+| 受控微信会话 | Pipeline 中 CDP 登录态显示已就绪 | 受控 Chrome 会话有效；`GET /auth/status` 仅用于诊断。 |
+| 自动调度 | Pipeline 中 Scheduler 显示运行 | 每 15 分钟只创建任务，不直接访问 Chrome。 |
+| 数据采集与状态巡检 | Pipeline 中帖子采集显示两个子 Worker 都在运行 | 实时采集消费 `SCHEDULED_INGEST_WINDOW`、`STATUS_SYNC`；人工补采消费 `MANUAL_INGEST_WINDOW`、`METRICS_REFRESH_WINDOW` 和历史 `INGEST_WINDOW`。 |
+| OCR 与 AI 评估 | Pipeline 中 AI Worker 显示运行 | 消费 `OCR_EXTRACT`、`AI_EVALUATE`；要求相应配置完整。 |
 
-若工作台没有新数据，先确认 Chrome 插件页仍打开且 `/auth/status` 有效，再确认 Scheduler 与采集 Worker 均在运行。任务状态、脱敏错误摘要和重试次数可在系统后台的 `Background jobs` 查看；详细恢复步骤见[运行与恢复手册](docs/guides/operations-runbook.md)。
+若工作台没有新数据，先确认 Pipeline 中“CDP 登录态”、Scheduler 与帖子采集 Worker 均显示运行或已就绪。任务状态、脱敏错误摘要和重试次数可在系统后台的“后台任务”查看；详细恢复步骤见[运行与恢复手册](docs/guides/operations-runbook.md)。
 
 ### 5. 可选：启用人工上游处置
 
-默认不得开启此步骤。仅在上游接口已验证、运营负责人明确批准并完成风险评估后，才在 `runtime/.env` 设置总开关和所需动作开关：
+默认不得开启此步骤。仅在上游接口已验证、运营负责人明确批准并完成风险评估后，才在 `/admin/` 的“初始化与运行状态”点击“管理授权”，启用总开关和所需动作授权。未选择的动作会保持关闭。
 
-```dotenv
-ENABLE_UPSTREAM_WRITES=true
-ENABLE_SINK_WRITES=true
-ENABLE_BLOCK_WRITES=true
-ENABLE_MUTE_WRITES=true
-ENABLE_UNMUTE_WRITES=true
-ENABLE_RESTORE_WRITES=true
-```
-
-不需要的动作必须保持 `false`。修改任一 `ENABLE_*_WRITES` 配置后重启 Web 服务；即使开关开启，沉底、屏蔽、禁言、解除禁言和恢复正常仍只能由已登录运营人员在工作台人工确认后执行，AI、Scheduler 和 Worker 永远不会自动调用上游写接口。
+保存授权后按页面提示重启 Web 服务。`runtime/.env` 中的 `ENABLE_*_WRITES` 仅用于紧急恢复；即使开关开启，沉底、屏蔽、禁言、解除禁言和恢复正常仍只能由已登录运营人员在工作台人工确认后执行，AI、Scheduler 和 Worker 永远不会自动调用上游写接口。
 
 完成对应步骤后访问：健康检查 `http://127.0.0.1:8000/healthz`，内容管理台 `http://127.0.0.1:8000/`，运营分析 `http://127.0.0.1:8000/reports/`，系统后台 `http://127.0.0.1:8000/admin/`。
 
-## 只读帖子采集
+### 日常操作入口
+
+| 入口 | 用途 |
+| --- | --- |
+| 内容管理台 `/` | 筛选和查看原创帖，人工确认后执行审核处置。 |
+| 运营分析 `/reports/` | 查看指定日期范围的实时聚合数据，并异步刷新该范围内已采集原创帖的互动指标。 |
+| 系统后台 `/admin/` | 配置 AI、OCR 和人工处置授权；查看 Pipeline、启停或重启固定服务、查看服务日志和后台任务。 |
+| 终端 | 仅用于首次初始化、启动 Supervisor/受控 Chrome，以及故障诊断和人工历史补采。 |
+
+## 手动补采和故障诊断
 
 采集器不读取或保存 Cookie、外层令牌、插件令牌或 `openid`。它通过本机已登录 Chrome 的 CDP，在 `gamemp.weixin.qq.com` 插件 iframe 内发起只读请求；请先以调试端口 `9222` 启动并登录受控 Chrome。
 
 ```bash
-# 创建最近 12 小时采集任务。请替换为目标游戏 appid。
+# 创建最近 12 小时的人工历史补采任务。请替换为目标游戏 appid。
 uv run python manage.py enqueue_ingestion --appid wx6d2454a8afcd9706 --hours 12
-
-# 可选：刷新已采集原创帖的浏览、点赞、评论和分享数量；不会保存评论正文。
-uv run python manage.py refresh_post_metrics --appid wx6d2454a8afcd9706
 ```
 
-完成后在内容管理台查看：`http://127.0.0.1:8000/`。采集与 AI 审核分别由专用 Worker 消费；SQLite 会串行化它们的写入阶段，因此不要为同一类任务额外启动多个实例。需要更高并发或持续出现写锁竞争时，应迁移 PostgreSQL。沉底、屏蔽、禁言、解除禁言和恢复正常仅能在工作台二次确认、全局开关和对应操作开关同时启用后执行。
+日常历史补采请在 `/admin/` 的“帖子采集 Worker”点击“创建历史补采”，选择可管理游戏并输入最近小时数；该任务由人工补采 Worker 异步处理。上面的命令仅用于故障诊断。日常的互动指标刷新请在运营分析页点击“刷新本范围数据”；该操作不会保存评论正文。采集与 AI 审核分别由专用 Worker 消费；SQLite 会串行化它们的写入阶段，因此不要为同一类任务额外启动多个实例。需要更高并发或持续出现写锁竞争时，应迁移 PostgreSQL。沉底、屏蔽、禁言、解除禁言和恢复正常仅能在工作台二次确认、全局开关和对应操作开关同时启用后执行。
 
-工作台默认显示“城主别慌张”的帖子，并在标题旁单选切换本地缓存的游戏目录。管理员可在 `/admin/` 的 `Managed games` 选择“从受控微信同步可管理游戏”更新列表；同步失败不会影响本地帖子查看。自动采集仍固定为城主别慌张。
+工作台默认显示“城主别慌张”的帖子，并在标题旁单选切换本地缓存的游戏目录。管理员可在 `/admin/` 的“可管理游戏”中选择“从受控微信同步可管理游戏”更新列表；同步失败不会影响本地帖子查看。自动采集仍固定为城主别慌张。
 
 敏感会话信息不得写入 `runtime/.env`、数据库或日志。
 
 ## 自动采集调度
 
-城主别慌张（`wx6d2454a8afcd9706`）由项目内部的 `run_scheduler --loop` 自动入队：每 15 分钟时间桶创建一项状态巡检和一个最近 30 分钟的采集窗口。因此相邻窗口重叠 15 分钟，边界帖子由 `topic_id` 幂等更新。Scheduler 只创建任务，不连接 Chrome CDP、不执行 AI 或上游写操作；采集和 AI 仍由前述两个专用 Worker 消费。
+城主别慌张（`wx6d2454a8afcd9706`）由 Supervisor 托管的 Scheduler 自动入队：每 15 分钟时间桶创建一项状态巡检和一个最近 30 分钟的 `SCHEDULED_INGEST_WINDOW`。因此相邻窗口重叠 15 分钟，边界帖子由 `topic_id` 幂等更新。Scheduler 只创建任务，不连接 Chrome CDP、不执行 AI 或上游写操作；实时采集 Worker 独立消费自动任务，人工补采 Worker 不会阻塞它。
 
 SQLite 部署仅启动一个 Scheduler Worker。`run_scheduler --once` 仅用于诊断；不再需要 cron 或 macOS `launchd`。Worker 启动顺序、故障恢复和超过 30 分钟空洞的人工补采方式见[运行与恢复手册](docs/guides/operations-runbook.md)。
 
 ## 运营分析
 
-访问 `http://127.0.0.1:8000/reports/` 查看“运营分析”。页面按北京时间起止日期和单选游戏实时聚合数据，默认最近 7 天（含当天），单次范围最多 31 天。点击“刷新本范围数据”只会创建 `METRICS_REFRESH_WINDOW` 后台任务；保持 `run_ingestion_worker --loop` 运行后，它会异步回读范围内原创帖的浏览、点赞、评论和分享，并新增互动快照。刷新不修改正文、媒体、投票、审核或原平台状态。
+访问 `http://127.0.0.1:8000/reports/` 查看“运营分析”。页面按北京时间起止日期和单选游戏实时聚合数据，默认最近 7 天（含当天），单次范围最多 31 天。点击“刷新本范围数据”只会创建 `METRICS_REFRESH_WINDOW` 后台任务；保持 Pipeline 中的人工补采 Worker 运行后，它会异步回读范围内原创帖的浏览、点赞、评论和分享，并新增互动快照。刷新不修改正文、媒体、投票、审核或原平台状态。
 
 ## 文档
 

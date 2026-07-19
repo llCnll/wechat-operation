@@ -17,7 +17,9 @@ from .models import OriginalPost, mark_post_deleted
 from .services import store_post_interaction_metrics, store_post_metrics
 from .source_client import CdpGameCircleClient
 
-INGEST_WINDOW_TASK = "INGEST_WINDOW"
+LEGACY_INGEST_WINDOW_TASK = "INGEST_WINDOW"
+SCHEDULED_INGEST_WINDOW_TASK = "SCHEDULED_INGEST_WINDOW"
+MANUAL_INGEST_WINDOW_TASK = "MANUAL_INGEST_WINDOW"
 STATUS_SYNC_TASK = "STATUS_SYNC"
 METRICS_REFRESH_WINDOW_TASK = "METRICS_REFRESH_WINDOW"
 MAX_METRICS_REFRESH_FAILURE_SAMPLES = 20
@@ -189,8 +191,13 @@ def refresh_metrics_window_handler(job: BackgroundJob) -> None:
         client.close()
 
 
-WORKER_HANDLERS = {
-    INGEST_WINDOW_TASK: ingest_window_handler,
+REALTIME_INGESTION_WORKER_HANDLERS = {
+    SCHEDULED_INGEST_WINDOW_TASK: ingest_window_handler,
     STATUS_SYNC_TASK: sync_pending_status_handler,
+}
+
+BACKFILL_INGESTION_WORKER_HANDLERS = {
+    LEGACY_INGEST_WINDOW_TASK: ingest_window_handler,
+    MANUAL_INGEST_WINDOW_TASK: ingest_window_handler,
     METRICS_REFRESH_WINDOW_TASK: refresh_metrics_window_handler,
 }

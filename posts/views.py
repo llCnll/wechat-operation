@@ -36,6 +36,7 @@ from .models import (
     POST_STATUS_BLOCKED,
     POST_STATUS_DELETED,
     POST_STATUS_NORMAL,
+    POST_STATUS_SELF_VISIBLE,
     POST_STATUS_SUNK,
     CandidatePost,
     InteractionSnapshot,
@@ -44,6 +45,7 @@ from .models import (
     is_post_blocked,
     is_post_deleted,
     is_post_normal,
+    is_post_self_visible,
     is_post_sunk,
 )
 from .services import refresh_original_post
@@ -63,6 +65,7 @@ POST_STATUS_FILTER_OPTIONS = (
     ("NORMAL", "正常"),
     ("BLOCKED", "已屏蔽"),
     ("SUNK", "已沉底"),
+    ("SELF_VISIBLE", "仅自己可见"),
     ("DELETED", "原平台已删除"),
     ("UNSYNCED", "未同步"),
 )
@@ -70,6 +73,7 @@ POST_STATUS_FILTER_OPTIONS = (
 POST_STATUS_FILTER_FLAGS = {
     "BLOCKED": POST_STATUS_BLOCKED,
     "SUNK": POST_STATUS_SUNK,
+    "SELF_VISIBLE": POST_STATUS_SELF_VISIBLE,
     "DELETED": POST_STATUS_DELETED,
 }
 
@@ -109,6 +113,7 @@ def _set_status_context(post: OriginalPost) -> None:
     post.is_deleted = is_post_deleted(post.status)
     post.is_blocked = is_post_blocked(post.status)
     post.is_sunk = is_post_sunk(post.status)
+    post.is_self_visible = is_post_self_visible(post.status)
     post.is_normal = is_post_normal(post.status)
     if post.is_deleted:
         labels = ["原平台已删除"]
@@ -123,6 +128,8 @@ def _set_status_context(post: OriginalPost) -> None:
         post.status_label = "已屏蔽"
     elif post.is_sunk:
         post.status_label = "已沉底"
+    elif post.is_self_visible:
+        post.status_label = "仅自己可见"
     elif post.is_normal:
         post.status_label = "正常"
     else:
@@ -471,14 +478,17 @@ def confirm_dashboard_operation(request, topic_id: int, action: str):
     """Execute a human-confirmed dashboard action through the audited service boundary."""
     post = get_object_or_404(OriginalPost, topic_id=topic_id)
     redirect_url = _dashboard_return_url(request, post.topic_id)
+    action = action.upper()
     if is_post_deleted(post.status):
         messages.error(request, "帖子已从原平台管理队列删除，不能执行处置。")
+        return redirect(redirect_url)
+    if is_post_self_visible(post.status) and action != "SKIP":
+        messages.error(request, "帖子当前仅自己可见，不能覆盖原平台可见性状态。")
         return redirect(redirect_url)
     task, _ = ReviewTask.objects.get_or_create(
         post=post,
         defaults={"suggested_action": RecommendedAction.HUMAN_REVIEW},
     )
-    action = action.upper()
     reason = request.POST.get("reason", "").strip()
     if not reason:
         messages.error(request, "必须填写业务原因。")

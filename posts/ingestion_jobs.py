@@ -12,7 +12,12 @@ from django.conf import settings
 from jobs.models import BackgroundJob, JobStatus
 from jobs.services import enqueue_job_with_result
 
-from .tasks import INGEST_WINDOW_TASK, METRICS_REFRESH_WINDOW_TASK, STATUS_SYNC_TASK
+from .tasks import (
+    MANUAL_INGEST_WINDOW_TASK,
+    METRICS_REFRESH_WINDOW_TASK,
+    SCHEDULED_INGEST_WINDOW_TASK,
+    STATUS_SYNC_TASK,
+)
 
 SHANGHAI = ZoneInfo("Asia/Shanghai")
 
@@ -77,17 +82,24 @@ def validate_ingestion_window(
     return normalized_appid, IngestionWindow(start, end), normalized_page_size
 
 
-def enqueue_ingestion_window(
-    *, appid: object, start_time: object, end_time: object, page_size: object
+def _enqueue_ingestion_window(
+    *,
+    appid: object,
+    start_time: object,
+    end_time: object,
+    page_size: object,
+    task_type: str,
+    idempotency_prefix: str,
 ) -> IngestionEnqueueResult:
-    """Create one checkpointed ingestion window with a stable idempotency key."""
+    """Create one checkpointed ingestion window for an explicit consumer lane."""
     normalized_appid, window, normalized_page_size = validate_ingestion_window(
         appid=appid, start_time=start_time, end_time=end_time, page_size=page_size
     )
     result = enqueue_job_with_result(
-        task_type=INGEST_WINDOW_TASK,
+        task_type=task_type,
         idempotency_key=(
-            f"ingest-window:{normalized_appid}:{window.start_time}:{window.end_time}:{normalized_page_size}"
+            f"{idempotency_prefix}:{normalized_appid}:{window.start_time}:"
+            f"{window.end_time}:{normalized_page_size}"
         ),
         parameter_summary={
             "appid": normalized_appid,
@@ -97,6 +109,32 @@ def enqueue_ingestion_window(
         },
     )
     return IngestionEnqueueResult(job=result.job, created=result.created)
+
+
+def enqueue_manual_ingestion_window(
+    *, appid: object, start_time: object, end_time: object, page_size: object
+) -> IngestionEnqueueResult:
+    """Create a checkpointed historical ingestion task for the manual lane."""
+    return _enqueue_ingestion_window(
+        appid=appid,
+        start_time=start_time,
+        end_time=end_time,
+        page_size=page_size,
+        task_type=MANUAL_INGEST_WINDOW_TASK,
+        idempotency_prefix="manual-ingest-window",
+    )
+
+
+def enqueue_ingestion_window(
+    *, appid: object, start_time: object, end_time: object, page_size: object
+) -> IngestionEnqueueResult:
+    """Compatibility name for creating a new manual historical ingestion task."""
+    return enqueue_manual_ingestion_window(
+        appid=appid,
+        start_time=start_time,
+        end_time=end_time,
+        page_size=page_size,
+    )
 
 
 def scheduled_ingestion_window(now: datetime) -> IngestionWindow:
@@ -124,11 +162,13 @@ def enqueue_scheduled_ingestion(now: datetime) -> IngestionEnqueueResult:
     if page_size != 20:
         raise ValueError("自动采集默认页面大小必须为20")
     window = scheduled_ingestion_window(now)
-    return enqueue_ingestion_window(
+    return _enqueue_ingestion_window(
         appid=appid,
         start_time=window.start_time,
         end_time=window.end_time,
         page_size=page_size,
+        task_type=SCHEDULED_INGEST_WINDOW_TASK,
+        idempotency_prefix="scheduled-ingest-window",
     )
 
 

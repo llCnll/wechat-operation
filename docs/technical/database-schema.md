@@ -68,13 +68,14 @@
 | `2` | 正常。 |
 | `4` | 屏蔽。 |
 | `8` | 沉底。 |
+| `16` | 仅自己可见；原平台可见性状态，不是本系统可写的审核动作。 |
 | `128` | 原平台已删除；仅本地派生，不会写回原平台。 |
 | `132` | 原平台已删除且屏蔽（`128 | 4`）。 |
 | `136` | 原平台已删除且沉底（`128 | 8`）。 |
 | `140` | 原平台已删除、屏蔽且沉底（`128 | 4 | 8`）。 |
 | `NULL` 或其他值 | 尚未同步或原平台未知状态。 |
 
-`2` 是唯一正常基值，不参与按位组合。屏蔽、沉底和删除使用按位与判定；例如 `status & 128 != 0` 表示原平台已删除。删除确认时间不再独立保存，可通过 `updated_at` 与后台任务记录辅助追溯。
+`2` 是唯一正常基值，不参与按位组合。屏蔽、沉底和删除使用按位与判定；例如 `status & 128 != 0` 表示原平台已删除。`16` 是独立的上游仅自己可见状态：可在工作台筛选、查看和刷新，但系统不会发送沉底、屏蔽、恢复或禁言操作覆盖该状态。删除确认时间不再独立保存，可通过 `updated_at` 与后台任务记录辅助追溯。
 
 ## `posts_postmedia`（帖子媒体）
 
@@ -335,13 +336,19 @@ AI 评估中的单项风险证据，可保存多段命中内容。
 
 当前 `task_type` 取值：
 
-| 值 | 含义 | 默认消费者 |
+| 值 | 含义 | 默认消费者服务 |
 | --- | --- | --- |
-| `INGEST_WINDOW` | 指定游戏和时间窗口的断点帖子采集。 | `run_ingestion_worker` |
-| `STATUS_SYNC` | 回读一批待审核帖的上游状态与互动数据。 | `run_ingestion_worker` |
-| `METRICS_REFRESH_WINDOW` | 人工触发的日期范围原创帖互动回读，只新增浏览、点赞、评论和分享快照；单帖传输或契约失败会记录到 checkpoint 样本并继续。 | `run_ingestion_worker` |
-| `OCR_EXTRACT` | 原创帖图片 OCR。 | `run_review_worker` |
-| `AI_EVALUATE` | 原创帖 AI 内容评估。 | `run_review_worker` |
+| `SCHEDULED_INGEST_WINDOW` | Scheduler 创建的 30 分钟断点帖子采集。 | 实时采集 Worker（Supervisor 服务 `ingestion`） |
+| `STATUS_SYNC` | 回读一批待审核帖的上游状态与互动数据。 | 实时采集 Worker（Supervisor 服务 `ingestion`） |
+| `MANUAL_INGEST_WINDOW` | 从系统配置首页创建的指定游戏和最近小时数断点帖子采集。 | 人工补采 Worker（Supervisor 服务 `backfill_ingestion`） |
+| `METRICS_REFRESH_WINDOW` | 人工触发的日期范围原创帖互动回读，只新增浏览、点赞、评论和分享快照；单帖传输或契约失败会记录到 checkpoint 样本并继续。 | 人工补采 Worker（Supervisor 服务 `backfill_ingestion`） |
+| `INGEST_WINDOW` | 升级前遗留的采集任务；新版本不再创建。 | 人工补采 Worker（Supervisor 服务 `backfill_ingestion`） |
+| `OCR_EXTRACT` | 原创帖图片 OCR。 | AI 审核 Worker（Supervisor 服务 `review`） |
+| `AI_EVALUATE` | 原创帖 AI 内容评估。 | AI 审核 Worker（Supervisor 服务 `review`） |
+
+## Supervisor 运行态文件
+
+Supervisor 不新增数据库表。它在 `runtime/supervisor/` 保存独占锁、仅本机使用的控制令牌、回环控制端点、每个服务的 PID/创建时间/期望状态/退出码、Worker 心跳及脱敏日志。这些文件不纳入版本控制，且不得人工编辑或复制到其他机器。
 
 ## Django 框架表
 
