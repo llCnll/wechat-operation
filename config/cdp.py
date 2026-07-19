@@ -83,6 +83,12 @@ class CdpGameFrame:
         self._sequence = 0
 
     def _find_page(self) -> dict[str, Any]:
+        pages = self._find_pages()
+        if not pages:
+            raise CdpUnavailableError("未找到受控微信页面")
+        return pages[0]
+
+    def _find_pages(self) -> list[dict[str, Any]]:
         try:
             with httpx.Client(timeout=self.timeout, trust_env=False) as client:
                 response = client.get(f"{self.cdp_url}/json/list")
@@ -91,17 +97,16 @@ class CdpGameFrame:
         except (httpx.HTTPError, ValueError) as exc:
             raise CdpUnavailableError("Chrome CDP 不可用") from exc
 
-        page = next(
-            (
-                item
-                for item in pages
-                if item.get("type") == "page" and "mp.weixin.qq.com" in item.get("url", "")
-            ),
-            None,
-        )
-        if not isinstance(page, dict) or not page.get("webSocketDebuggerUrl"):
+        if not isinstance(pages, list):
             raise CdpUnavailableError("未找到受控微信页面")
-        return page
+        return [
+            item
+            for item in pages
+            if isinstance(item, dict)
+            and item.get("type") == "page"
+            and urlsplit(str(item.get("url", ""))).netloc == "mp.weixin.qq.com"
+            and item.get("webSocketDebuggerUrl")
+        ]
 
     @staticmethod
     def _find_gamemp_frame(frame_tree: dict[str, Any]) -> str | None:
@@ -133,27 +138,32 @@ class CdpGameFrame:
     def _ensure_context(self) -> int:
         if self._context_id is not None:
             return self._context_id
-        page = self._find_page()
-        try:
-            self._websocket = connect(
-                page["webSocketDebuggerUrl"], proxy=None, close_timeout=self.timeout
-            )
-            tree = self._call("Page.getFrameTree")
-            frame_id = self._find_gamemp_frame(tree.get("frameTree", {}))
-            if not frame_id:
-                raise CdpUnavailableError("未找到游戏圈插件 iframe")
-            world = self._call(
-                "Page.createIsolatedWorld",
-                {"frameId": frame_id, "worldName": "wechat-operations-readonly"},
-            )
-            context_id = world.get("executionContextId")
-            if not context_id:
-                raise CdpUnavailableError("无法创建游戏圈 iframe 执行上下文")
-            self._context_id = int(context_id)
-            return self._context_id
-        except (OSError, ValueError, WebSocketException) as exc:
-            self.close()
-            raise CdpUnavailableError("Chrome CDP 通信失败") from exc
+        for page in self._find_pages():
+            try:
+                self._websocket = connect(
+                    page["webSocketDebuggerUrl"], proxy=None, close_timeout=self.timeout
+                )
+                tree = self._call("Page.getFrameTree")
+                frame_id = self._find_gamemp_frame(tree.get("frameTree", {}))
+                if not frame_id:
+                    self.close()
+                    continue
+                world = self._call(
+                    "Page.createIsolatedWorld",
+                    {"frameId": frame_id, "worldName": "wechat-operations-readonly"},
+                )
+                context_id = world.get("executionContextId")
+                if not context_id:
+                    raise CdpUnavailableError("无法创建游戏圈 iframe 执行上下文")
+                self._context_id = int(context_id)
+                return self._context_id
+            except (OSError, ValueError, WebSocketException) as exc:
+                self.close()
+                raise CdpUnavailableError("Chrome CDP 通信失败") from exc
+            except CdpUnavailableError:
+                self.close()
+                raise
+        raise CdpUnavailableError("未找到游戏圈插件 iframe")
 
     def close(self) -> None:
         if self._websocket is not None:
@@ -270,14 +280,41 @@ def get_browser_login_status(cdp_url: str = "http://127.0.0.1:9222") -> BrowserL
     except (httpx.HTTPError, ValueError) as exc:
         raise CdpUnavailableError("Chrome CDP 不可用") from exc
 
-    for page in pages:
-        target = urlsplit(page.get("url", ""))
-        if page.get("type") == "page" and target.netloc == "mp.weixin.qq.com":
-            title = str(page.get("title", ""))
-            if title and title not in {"微信公众平台", "登录"}:
-                return BrowserLoginStatus(True, "已检测到受控微信插件页", title)
-            return BrowserLoginStatus(False, "微信页面等待扫码登录", title)
-    return BrowserLoginStatus(False, "未找到微信受控页面")
+    if not isinstance(pages, list):
+        raise CdpUnavailableError("Chrome CDP 返回无效页面列表")
+    mp_pages = [
+        page
+        for page in pages
+        if isinstance(page, dict)
+        and page.get("type") == "page"
+        and urlsplit(str(page.get("url", ""))).netloc == "mp.weixin.qq.com"
+    ]
+    if not mp_pages:
+        return BrowserLoginStatus(False, "未找到微信受控页面")
+    title = next(
+        (
+            str(page.get("title", ""))
+            for page in mp_pages
+            if str(page.get("title", "")) not in {"", "微信公众平台", "登录"}
+        ),
+        str(mp_pages[0].get("title", "")),
+    )
+    if not title or title in {"微信公众平台", "登录"}:
+        return BrowserLoginStatus(False, "微信页面等待扫码登录", title)
+
+    frame = CdpGameFrame(cdp_url, timeout=2)
+    try:
+        value = frame.evaluate("(() => ({text: document.body ? document.body.innerText : ''}))()")
+    except CdpUnavailableError:
+        return BrowserLoginStatus(False, "游戏圈插件页已退出或登录超时，请重新登录", title)
+    finally:
+        frame.close()
+    if not isinstance(value, dict):
+        return BrowserLoginStatus(False, "游戏圈插件页状态无效，请重新登录", title)
+    text = value.get("text", "")
+    if isinstance(text, str) and ("登录超时" in text or "请重新登录" in text):
+        return BrowserLoginStatus(False, "游戏圈登录超时，请重新登录", title)
+    return BrowserLoginStatus(True, "已检测到有效的受控微信插件页", title)
 
 
 def bind_game_identity(appid: str, cdp_url: str = "http://127.0.0.1:9222") -> str:
@@ -294,13 +331,20 @@ def bind_game_identity(appid: str, cdp_url: str = "http://127.0.0.1:9222") -> st
             body: JSON.stringify({json.dumps(body)})
         }});
         const payload = await response.json();
-        return {{errcode: payload.errcode, token: payload.data && payload.data.token}};
+        const pageText = document.body ? document.body.innerText : '';
+        return {{
+            errcode: payload.errcode,
+            token: payload.data && payload.data.token,
+            loginExpired: pageText.includes('登录超时') || pageText.includes('请重新登录')
+        }};
     }})()"""
     frame = CdpGameFrame(cdp_url)
     try:
         value = frame.evaluate(expression)
     finally:
         frame.close()
+    if isinstance(value, dict) and value.get("loginExpired") is True:
+        raise CdpUnavailableError("游戏圈登录态已失效，请重新登录")
     if not isinstance(value, dict) or value.get("errcode") != 0 or not value.get("token"):
         raise CdpUnavailableError("插件身份绑定失败或未返回 token")
     return str(value["token"])
