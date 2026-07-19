@@ -2,6 +2,7 @@
   <a class="brand" href="{% url 'operations-dashboard' %}"><span>O</span> 游戏圈运营</a>
   <nav aria-label="主导航">
     <a {% if request.resolver_match.url_name == 'operations-dashboard' %}class="active"{% endif %} href="{% url 'operations-dashboard' %}">内容管理</a>
+    <a {% if request.resolver_match.url_name == 'ai-operation-reviews' %}class="active"{% endif %} href="{% url 'ai-operation-reviews' %}">AI 操作复审</a>
     <a {% if request.resolver_match.url_name == 'live-operations-analysis' %}class="active"{% endif %} href="{% url 'live-operations-analysis' %}">运营分析</a>
     <a {% if request.resolver_match.namespace == 'admin' %}class="active"{% endif %} href="{% url 'admin:index' %}">系统配置</a>
   </nav>

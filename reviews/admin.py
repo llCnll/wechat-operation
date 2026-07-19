@@ -6,6 +6,7 @@ from config.admin_support import ReadOnlyAdmin, ReadOnlyTabularInline, operation
 
 from .models import (
     AiAssessment,
+    AiOperationReview,
     OcrExtraction,
     OperationAudit,
     PolicyRule,
@@ -41,8 +42,9 @@ class PolicyRuleAdmin(admin.ModelAdmin):
         "min_confidence",
         "priority",
         "enabled",
+        "auto_execution_enabled",
     )
-    list_filter = ("enabled", "recommended_action", "policy_version")
+    list_filter = ("enabled", "auto_execution_enabled", "recommended_action", "policy_version")
     search_fields = ("risk_label", "policy_version__name", "policy_version__version")
     ordering = ("policy_version", "-priority", "risk_label")
 
@@ -91,6 +93,7 @@ class AiAssessmentAdmin(ReadOnlyAdmin):
         "recommended_action",
         "overall_confidence",
         "needs_human_review",
+        "deciding_policy_rule",
         "created_at",
     )
     list_filter = ("category", "recommended_action", "needs_human_review")
@@ -157,7 +160,23 @@ class ReplyDraftAdmin(ReadOnlyAdmin):
 
 @admin.register(OperationAudit)
 class OperationAuditAdmin(ReadOnlyAdmin):
-    list_display = ("operation_id", "task", "action", "result_code", "executor", "executed_at")
-    list_filter = ("action", "result_code")
+    list_display = (
+        "operation_id",
+        "task",
+        "action",
+        "execution_source",
+        "result_code",
+        "executor",
+        "executed_at",
+    )
+    list_filter = ("action", "execution_source", "result_code")
     search_fields = ("operation_id", "task__post__topic_id", "reason", "error_summary")
+    date_hierarchy = "created_at"
+
+
+@admin.register(AiOperationReview)
+class AiOperationReviewAdmin(ReadOnlyAdmin):
+    list_display = ("audit", "status", "reviewer", "reviewed_at", "created_at")
+    list_filter = ("status",)
+    search_fields = ("audit__operation_id", "audit__task__post__topic_id", "reason")
     date_hierarchy = "created_at"

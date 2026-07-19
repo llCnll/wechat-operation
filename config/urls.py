@@ -57,6 +57,12 @@ urlpatterns = [
         name="save-runtime-configuration",
     ),
     path("", post_views.operations_dashboard, name="operations-dashboard"),
+    path("ai-operation-reviews/", post_views.ai_operation_reviews, name="ai-operation-reviews"),
+    path(
+        "ai-operation-reviews/<int:review_id>/<str:decision>/",
+        post_views.update_ai_operation_review,
+        name="update-ai-operation-review",
+    ),
     path("reports/", reporting_views.live_operations_analysis, name="live-operations-analysis"),
     path(
         "reports/refresh-metrics/",

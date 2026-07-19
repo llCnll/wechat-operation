@@ -11,6 +11,10 @@ from .models import BackgroundJob, JobStatus
 class JobDeferred(RuntimeError):
     """A dependency is still running; reschedule without consuming a retry."""
 
+    def __init__(self, reason: str, *, delay_seconds: int = 5):
+        super().__init__(reason)
+        self.delay_seconds = delay_seconds
+
 
 @dataclass(frozen=True)
 class EnqueueResult:
@@ -136,7 +140,7 @@ def execute_next_job(
     try:
         handler(job)
     except JobDeferred as exc:
-        defer_job(job, str(exc))
+        defer_job(job, str(exc), delay_seconds=exc.delay_seconds)
     except Exception as exc:  # The task error is intentionally persisted without a traceback.
         fail_job(job, str(exc))
     else:

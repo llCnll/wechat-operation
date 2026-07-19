@@ -19,7 +19,7 @@ flowchart LR
   F --> L[运营分析 Tab 实时聚合]
 ```
 
-核心原则：AI 不会自动操作原平台；单帖处置需要运营人员确认并记录原因。批量处置也必须由运营人员在工作台显式触发，且仅限带风险依据的 AI 沉底/屏蔽建议。Cookie、令牌、完整已认证 URL、作者 `openid` 和评论正文均不持久化。
+核心原则：AI 自动处置默认关闭；只有人工与 AI 双重开关、策略规则逐条授权、严格证据/置信度检查同时满足时，才可自动沉底或屏蔽，并必须进入人工事后复审。禁言、恢复、回复和所有其他上游写入仍需人工确认。Cookie、令牌、完整已认证 URL、作者 `openid` 和评论正文均不持久化。
 
 ## 模块
 
@@ -33,7 +33,7 @@ flowchart LR
 
 ## 运行架构与任务流
 
-日常只启动 Supervisor。它托管一个 Web、一个自动调度器、一个实时采集 Worker、一个人工补采 Worker、一个 AI 审核 Worker 和一个可选视频提取 Worker；各 Worker 职责严格分离。SQLite 部署不允许启动同一 Worker 职责的第二个实例。
+日常只启动 Supervisor。它托管一个 Web、一个自动调度器、一个实时采集 Worker、一个人工补采 Worker、一个 AI 审核 Worker、一个可选视频提取 Worker 和一个默认停止的 AI 自动处置 Worker；各 Worker 职责严格分离。SQLite 部署不允许启动同一 Worker 职责的第二个实例。
 
 ```mermaid
 flowchart LR
@@ -43,6 +43,7 @@ flowchart LR
   S --> BF[人工补采 Worker]
   S --> REV[AI 审核 Worker]
   S --> VID[视频提取 Worker]
+  S --> AUTO[AI 自动处置 Worker]
 
   SCH -->|每 15 分钟创建| Q1[(SCHEDULED_INGEST_WINDOW)]
   SCH -->|每 15 分钟创建| Q2[(STATUS_SYNC)]
@@ -63,6 +64,8 @@ flowchart LR
   REV -->|消费| Q5
   REV -->|消费| Q6
   REV --> AI[OCR / AI 服务]
+  REV -->|授权结论| Q8[(AI_AUTOMATED_MODERATION)]
+  AUTO -->|消费并复核| Q8
   RT -->|原创视频入库后创建| Q7[(VIDEO_EXTRACT)]
   BF -->|原创视频入库后创建| Q7
   VID -->|消费| Q7
@@ -77,6 +80,7 @@ flowchart LR
 | 实时采集 Worker（Supervisor 服务 `ingestion`） | 1 | 消费自动采集与状态巡检任务；通过 CDP 读取微信并写入帖子、状态与互动快照；原创帖入库后创建 OCR/AI 任务。 | 不消费人工补采、范围互动刷新或旧采集任务；不调用 AI，不执行上游写处置。 |
 | 人工补采 Worker（Supervisor 服务 `backfill_ingestion`） | 1 | 消费人工历史补采、范围互动刷新和旧 `INGEST_WINDOW` 任务；复用相同的 CDP 分页与 checkpoint 逻辑。 | 不消费 Scheduler 创建的实时任务；不调用 AI，不执行上游写处置。 |
 | AI 审核 Worker（Supervisor 服务 `review`） | 1 | 串行消费 OCR 与 AI 评估任务，写入 OCR、风险证据、审核建议和本地草案。 | 不创建定时任务，不直接读取微信，不执行上游写处置。 |
+| AI 自动处置 Worker（Supervisor 服务 `ai_moderation`） | 1 | 仅消费已授权 AI 结论创建的自动沉底/屏蔽任务，写前后回读并建立事后复审记录。 | 不处理 OCR/AI 评估；不处理禁言、恢复、回复或未授权结论。 |
 | 视频提取 Worker（Supervisor 服务 `video_extraction`） | 1 | 可选地消费 `VIDEO_EXTRACT`，在本机临时目录提取视频时间证据。 | 不使用 CDP Cookie，不保存视频/帧/音频，不向模型传视频 URL 或二维码目标。 |
 
 实时采集与人工补采各自串行处理所属任务。首次补采近几天数据或人工范围互动刷新耗时较长时，自动创建的 15 分钟采集和状态巡检仍由实时采集 Worker 独立处理；AI 审核 Worker 同样独立。调度器的同一时间桶使用幂等键复用任务，避免重复创建。旧 `INGEST_WINDOW` 因无法可靠判断来源，始终由人工补采 Worker 兼容消费。
@@ -91,7 +95,8 @@ flowchart LR
 | `METRICS_REFRESH_WINDOW` | 运营分析页“刷新本范围数据”。 | 人工补采 Worker | 仅按当前时间范围内已入库原创帖的 `topic_id` 回读浏览、点赞、评论和分享；不采集转发帖，不更新正文或状态。 |
 | `INGEST_WINDOW` | 升级前历史存量。 | 人工补采 Worker | 兼容旧采集窗口及其已有 checkpoint；新代码不再创建此类型。 |
 | `OCR_EXTRACT` | 原创帖采集完成、单帖刷新、人工重新评估或诊断命令。 | AI 审核 Worker | 提取原创帖图片文字，供后续 AI 评估使用。 |
-| `AI_EVALUATE` | 与 `OCR_EXTRACT` 成对创建。 | AI 审核 Worker | 基于正文、投票和 OCR 输出分类、风险依据、置信度与人工审核建议；不自动执行处置。 |
+| `AI_EVALUATE` | 与 `OCR_EXTRACT` 成对创建。 | AI 审核 Worker | 基于正文、投票和 OCR 输出分类、风险依据、置信度与审核建议；仅在独立自动处置授权全部满足时，同一事务创建后续自动处置任务。 |
+| `AI_AUTOMATED_MODERATION` | AI 审核 Worker 在同一事务内创建。 | AI 自动处置 Worker | 仅对授权且高置信度的沉底/屏蔽结论执行一次；成功后进入 AI 操作复审。 |
 | `VIDEO_EXTRACT` | 启用视频审核后，原创帖的视频媒体。 | 视频提取 Worker | 受限 HTTPS 本地读取、抽帧二维码检测/OCR 和可选 ASR；失败不阻塞 AI，但要求人工重点核验。 |
 
 ## 系统配置与追溯台
@@ -153,7 +158,9 @@ AI 评估会输出内容类别、风险证据、置信度与建议动作，但�
 
 工作台还提供人工触发的批量执行入口：只从当前队列取最多 20 条同时满足“原创、状态正常、待审核、AI 建议为沉底或屏蔽、存在风险依据”的帖子。每条都会独立回读上游状态、写入审计并完成本地审核；任一条失败不会中断其他帖子。批量屏蔽固定使用上游违规原因“其他”（`1`），沉底与屏蔽的业务原因均由可读的 AI 风险依据摘要生成。禁言、人工判断、屏蔽并禁言和无风险依据的建议不会进入批量操作。
 
-真实上游写入需同时启用 `ENABLE_UPSTREAM_WRITES=true` 与对应的单项开关。所有单项开关默认关闭；开启仅允许人工确认路径使用，AI、scheduler 和 worker 不可调用写适配器。
+真实上游写入需同时启用 `ENABLE_UPSTREAM_WRITES=true` 与对应的单项开关。人工确认始终可按既有流程使用；AI 自动沉底/屏蔽还要求 `ENABLE_AI_AUTOMATED_MODERATION=true`、对应 AI 动作开关和策略规则逐条授权。AI 自动 Worker 不可执行禁言、恢复、回复或任何其他动作。
+
+AI 写入成功后不会伪装为人工审核完成：审核任务进入“AI 已执行待复审”，并以不可变的模型、策略、规则、依据与授权快照创建独立复审记录。人工确认正确才完成审核；标记异常进入人工跟进，只有既有人工恢复正常操作成功后才将复审记录标为已恢复。
 
 ## 日常运行
 

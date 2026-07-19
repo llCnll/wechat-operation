@@ -55,8 +55,22 @@ def risk_label_display(label: str) -> str:
 
 class ReviewStatus(models.TextChoices):
     PENDING = "PENDING", "待审核"
+    AUTO_EXECUTED_PENDING_REVIEW = "AUTO_EXECUTED_PENDING_REVIEW", "AI 已执行待复审"
+    AUTO_REVIEW_ESCALATED = "AUTO_REVIEW_ESCALATED", "AI 复审异常待跟进"
     REVIEWED = "REVIEWED", "已审核"
     CANCELED = "CANCELED", "已取消"
+
+
+class OperationExecutionSource(models.TextChoices):
+    HUMAN = "HUMAN", "人工"
+    AI_AUTOMATED = "AI_AUTOMATED", "AI 自动"
+
+
+class AiOperationReviewStatus(models.TextChoices):
+    PENDING = "PENDING", "待复审"
+    CONFIRMED = "CONFIRMED", "已确认正确"
+    ESCALATED = "ESCALATED", "已升级人工跟进"
+    RESTORED = "RESTORED", "已人工恢复"
 
 
 class OcrExtraction(models.Model):
@@ -167,6 +181,7 @@ class PolicyRule(models.Model):
     priority = models.PositiveSmallIntegerField(default=50)
     exceptions = models.JSONField(default=list, blank=True)
     enabled = models.BooleanField(default=True)
+    auto_execution_enabled = models.BooleanField(default=False)
 
     class Meta:
         verbose_name = "审核策略规则"
@@ -186,6 +201,13 @@ class AiAssessment(models.Model):
     prompt_version = models.CharField(max_length=100, blank=True)
     policy_version = models.ForeignKey(
         PolicyVersion, null=True, blank=True, on_delete=models.SET_NULL
+    )
+    deciding_policy_rule = models.ForeignKey(
+        PolicyRule,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="deciding_assessments",
     )
     raw_error_summary = models.CharField(max_length=500, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
@@ -214,7 +236,7 @@ class ReviewTask(models.Model):
     suggested_action = models.CharField(max_length=32, choices=RecommendedAction.choices)
     priority = models.PositiveSmallIntegerField(default=50)
     status = models.CharField(
-        max_length=16, choices=ReviewStatus.choices, default=ReviewStatus.PENDING
+        max_length=32, choices=ReviewStatus.choices, default=ReviewStatus.PENDING
     )
     needs_focus = models.BooleanField(default=False)
     final_action = models.CharField(max_length=32, choices=RecommendedAction.choices, blank=True)
@@ -263,9 +285,47 @@ class OperationAudit(models.Model):
     result_code = models.CharField(max_length=100, blank=True)
     error_summary = models.CharField(max_length=500, blank=True)
     executor = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, on_delete=models.SET_NULL)
+    execution_source = models.CharField(
+        max_length=16,
+        choices=OperationExecutionSource.choices,
+        default=OperationExecutionSource.HUMAN,
+    )
+    automation_snapshot = models.JSONField(default=dict, blank=True)
     executed_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=("task",),
+                condition=models.Q(result_code="EXECUTING"),
+                name="one_executing_operation_per_task",
+            )
+        ]
         verbose_name = "上游操作审计"
         verbose_name_plural = "上游操作审计"
+
+
+class AiOperationReview(models.Model):
+    audit = models.OneToOneField(
+        OperationAudit, on_delete=models.PROTECT, related_name="ai_operation_review"
+    )
+    status = models.CharField(
+        max_length=16,
+        choices=AiOperationReviewStatus.choices,
+        default=AiOperationReviewStatus.PENDING,
+    )
+    reviewer = models.ForeignKey(
+        settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL
+    )
+    reviewed_at = models.DateTimeField(null=True, blank=True)
+    reason = models.TextField(blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        indexes = [
+            models.Index(fields=("status", "created_at"), name="reviews_aio_status_43c5da_idx")
+        ]
+        verbose_name = "AI 操作复审"
+        verbose_name_plural = "AI 操作复审"

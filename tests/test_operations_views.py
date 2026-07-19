@@ -21,6 +21,10 @@ from posts.models import (
 )
 from reviews.adapters import AssessmentOutput, ReplyOutput, RiskOutput
 from reviews.models import (
+    AiOperationReview,
+    AiOperationReviewStatus,
+    OperationAudit,
+    OperationExecutionSource,
     RecommendedAction,
     ReviewStatus,
     ReviewTask,
@@ -564,6 +568,95 @@ def test_dashboard_successful_single_operation_completes_human_review(monkeypatc
     assert task.status == ReviewStatus.REVIEWED
     assert task.final_action == RecommendedAction.SINK
     assert task.reason == "无价值灌水"
+
+
+@pytest.mark.django_db
+def test_escalated_ai_operation_can_restore_and_apply_final_action_in_one_flow(monkeypatch):
+    monkeypatch.setattr(runtime, "enable_upstream_writes", True)
+    monkeypatch.setattr(runtime, "enable_restore_writes", True)
+    monkeypatch.setattr(runtime, "enable_sink_writes", True)
+    user = get_user_model().objects.create_user(username="escalation-correction")
+    post = OriginalPost.objects.create(
+        topic_id=110,
+        content_id="escalation-correction-content",
+        source_appid="wx-escalation-correction",
+        status=POST_STATUS_BLOCKED,
+    )
+    CandidatePost.objects.create(
+        topic_id=post.topic_id,
+        content_id=post.content_id,
+        source_appid=post.source_appid,
+        origin_type=OriginType.ORIGINAL,
+    )
+    _, task = persist_assessment(
+        post,
+        AssessmentOutput(
+            content_category="OTHER",
+            recommended_action=RecommendedAction.BLOCK,
+            overall_confidence=0.99,
+        ),
+    )
+    task.status = ReviewStatus.AUTO_REVIEW_ESCALATED
+    task.save(update_fields=["status", "updated_at"])
+    ai_audit = OperationAudit.objects.create(
+        task=task,
+        operation_id="ai-escalation-original",
+        idempotency_key="ai-escalation-original",
+        action=RecommendedAction.BLOCK,
+        reason="AI 自动屏蔽",
+        result_code="OK",
+        execution_source=OperationExecutionSource.AI_AUTOMATED,
+    )
+    ai_review = AiOperationReview.objects.create(
+        audit=ai_audit,
+        status=AiOperationReviewStatus.ESCALATED,
+        reviewer=user,
+    )
+
+    class Source:
+        def __init__(self, **_kwargs):
+            self.status = POST_STATUS_BLOCKED
+            self.operations = []
+
+        def get_post_metrics(self, topic_id):
+            return {"data": {"topic": {"topic_id": topic_id, "status": self.status}}}
+
+        def perform_confirmed_operation(self, *, topic_id, action, payload):
+            assert topic_id == post.topic_id
+            self.operations.append((action, payload))
+            self.status = 2 if action == RecommendedAction.RESTORE else POST_STATUS_SUNK
+            return {"errcode": 0}
+
+        def close(self):
+            pass
+
+    source = Source()
+    monkeypatch.setattr("posts.views.CdpGameCircleClient", lambda **_kwargs: source)
+    client = Client()
+    client.force_login(user)
+
+    page = client.get(f"/?appid={post.source_appid}&topic={post.topic_id}")
+    body = page.content.decode()
+    assert "纠正 AI 操作" in body
+    assert "恢复后沉底" in body
+
+    response = client.post(
+        f"/posts/{post.topic_id}/operate/SINK/",
+        {"reason": "应降级处理", "confirmation_key": "escalation-correction-sink"},
+    )
+
+    assert response.status_code == 302
+    assert source.operations == [(RecommendedAction.RESTORE, {}), (RecommendedAction.SINK, {})]
+    task.refresh_from_db()
+    ai_review.refresh_from_db()
+    post.refresh_from_db()
+    assert task.status == ReviewStatus.REVIEWED
+    assert task.final_action == RecommendedAction.SINK
+    assert ai_review.status == AiOperationReviewStatus.RESTORED
+    assert post.status == POST_STATUS_SUNK
+    assert list(
+        task.operation_audits.exclude(pk=ai_audit.pk).values_list("action", flat=True)
+    ) == [RecommendedAction.RESTORE, RecommendedAction.SINK]
 
 
 @pytest.mark.django_db

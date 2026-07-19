@@ -4,7 +4,7 @@
 
 - 日常只启动一个 `uv run python -m service_supervisor`。Supervisor 是 Web、Scheduler、实时采集 Worker、人工补采 Worker 与 AI Worker 的唯一进程所有者；它使用独占文件锁防止第二个实例接管同一运行态。
 - 所有可变运行态均位于 `runtime/`：`runtime/.env`、`runtime/operations.sqlite3`、收集后的 `runtime/static/`、`runtime/worker-locks/`、`runtime/supervisor/` 与日志。`runtime/supervisor/` 包含控制令牌、服务状态、心跳和日志，代码包和版本控制均应排除整个目录。
-- 数据库位于 `runtime/operations.sqlite3`。离线文件备份前必须停止 Web、Scheduler、实时采集 Worker、人工补采 Worker 和 AI Worker，再复制数据库文件及可能存在的 `-wal`、`-shm` 文件；只停止 Worker 不能保证没有 Web 写入。
+- 数据库位于 `runtime/operations.sqlite3`。离线文件备份前必须停止 Web、Scheduler、实时采集 Worker、人工补采 Worker、AI Worker 和 AI 自动处置 Worker，再复制数据库文件及可能存在的 `-wal`、`-shm` 文件；只停止 Worker 不能保证没有 Web 写入。
 - 首次部署在启动 Supervisor 前，执行 Agent 必须手工运行 `uv run python manage.py migrate` 和 `uv run python manage.py createsuperuser`；不得记录管理员密码。后续迁移、静态资源收集和默认策略检查由 Supervisor 幂等执行。
 
 ### 打包
@@ -60,7 +60,10 @@ Compress-Archive -Path $items.FullName -DestinationPath ../wechat-operation.zip 
 | 任务长期 `PENDING` | 任务的 `task_type` 与 Pipeline 对应 Worker | 在 Pipeline 启动帖子采集 Worker（会同时启动两个采集服务）或 AI Worker；不要并行启动第二个相同职责实例。 |
 | 任务 `FAILED` | 系统配置与追溯台“后台任务”的脱敏 `error_summary` 与 checkpoint | 修复会话、配置或上游契约后重新入队；不要修改会话字段。 |
 | AI/OCR 任务失败 | Pipeline 中的 AI/OCR 配置和 AI Worker 日志 | 在配置弹窗修正对应配置并重启 AI Worker；已采集帖子数据不受影响。 |
-| 上游处置未执行 | 总开关、动作开关、会话与人工确认 | 确认批准配置后重启 Web，再由运营人员重新确认；不得通过 Worker 重试写操作。 |
+| 人工上游处置未执行 | 总开关、动作开关、会话与人工确认 | 确认批准配置后重启 Web，再由运营人员重新确认；不得通过 Worker 重试写操作。 |
+| AI 自动处置未执行 | AI/人工双重开关、规则自动许可、`ai_moderation` Worker、24 小时配额 | 未授权结论保留人工审核；已授权任务保持队列，恢复 Worker 后会重新复核。不得手工重试已发出的写请求。 |
+
+AI 自动沉底或屏蔽成功后，运营人员必须在内容管理的“AI 操作复审”中填写说明并确认正确，或标记异常。标记异常只会升级人工跟进，不会自动回滚；确需纠正时，进入原有工作台执行“恢复正常”的人工二次确认。只有该恢复成功且完成状态回读后，复审记录才会标记为“已人工恢复”。
 
 ## 自动采集调度
 

@@ -122,6 +122,12 @@ VIDEO_EVIDENCE_PROMPT = (
     "- 孤立奖励数值不得定性私服或引流，可低置信度标记 CONTENT_ANOMALY。系统不验证官方活动；"
     "高额奖励仍须设置 needs_focus 供人工复核，但不得覆盖上述强引流组合的 BLOCK 建议。\n"
 )
+REVIEW_PROMPT_VERSION = "review-v4"
+
+
+def review_prompt_version(*, has_video_evidence: bool) -> str:
+    """Version the effective system-prompt variant used for a persisted assessment."""
+    return f"{REVIEW_PROMPT_VERSION}-video" if has_video_evidence else REVIEW_PROMPT_VERSION
 
 
 def review_system_prompt(*, has_video_evidence: bool) -> str:

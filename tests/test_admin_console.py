@@ -84,6 +84,7 @@ def test_admin_pipeline_follows_the_content_flow(admin_client):
         "policy",
         "review",
         "writes",
+        "ai_moderation",
     ]
 
 

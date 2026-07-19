@@ -21,8 +21,23 @@ import psutil
 
 from .runtime import RuntimeStore, SupervisorLockedError, utc_now
 
-SERVICE_NAMES = ("web", "scheduler", "ingestion", "backfill_ingestion", "review", "video_extraction")
-WORKER_NAMES = ("scheduler", "ingestion", "backfill_ingestion", "review", "video_extraction")
+SERVICE_NAMES = (
+    "web",
+    "scheduler",
+    "ingestion",
+    "backfill_ingestion",
+    "review",
+    "video_extraction",
+    "ai_moderation",
+)
+WORKER_NAMES = (
+    "scheduler",
+    "ingestion",
+    "backfill_ingestion",
+    "review",
+    "video_extraction",
+    "ai_moderation",
+)
 CONTROL_VERSION = "v1"
 WEB_PORT = 8000
 MAX_LOG_BYTES = 1_000_000
@@ -93,6 +108,11 @@ class Supervisor:
             "video_extraction": ServiceDefinition(
                 "video_extraction",
                 (python, manage, "run_video_extraction_worker", "--loop"),
+                frozenset(("start", "stop", "restart", "status", "logs")),
+            ),
+            "ai_moderation": ServiceDefinition(
+                "ai_moderation",
+                (python, manage, "run_ai_moderation_worker", "--loop"),
                 frozenset(("start", "stop", "restart", "status", "logs")),
             ),
         }
@@ -307,9 +327,11 @@ class Supervisor:
             raise SupervisorError("未知服务")
         safe_lines = max(1, min(lines, 200))
         try:
-            content = self.store.log_path(service).read_text(
-                encoding="utf-8", errors="replace"
-            ).splitlines()
+            content = (
+                self.store.log_path(service)
+                .read_text(encoding="utf-8", errors="replace")
+                .splitlines()
+            )
         except FileNotFoundError:
             return []
         return [redact(line) for line in content[-safe_lines:]]

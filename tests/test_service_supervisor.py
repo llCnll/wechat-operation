@@ -52,9 +52,10 @@ def test_supervisor_control_server_requires_token_and_reports_status(tmp_path):
             "web",
             "scheduler",
             "ingestion",
-                "backfill_ingestion",
-                "review",
-                "video_extraction",
+            "backfill_ingestion",
+            "review",
+            "video_extraction",
+            "ai_moderation",
         }
     finally:
         supervisor.release()

@@ -38,6 +38,9 @@ EDITABLE_KEYS = (
     "ENABLE_MUTE_WRITES",
     "ENABLE_UNMUTE_WRITES",
     "ENABLE_RESTORE_WRITES",
+    "ENABLE_AI_AUTOMATED_MODERATION",
+    "ENABLE_AI_SINK_WRITES",
+    "ENABLE_AI_BLOCK_WRITES",
 )
 BOOLEAN_KEYS = frozenset(key for key in EDITABLE_KEYS if key.startswith("ENABLE_")) | {
     "ASR_ENABLED",
@@ -56,6 +59,10 @@ VIDEO_DEFAULTS = {
     "VIDEO_CONNECT_TIMEOUT_SECONDS": "10",
     "VIDEO_READ_TIMEOUT_SECONDS": "30",
     "VIDEO_PROCESSING_TIMEOUT_SECONDS": "120",
+}
+RUNTIME_DEFAULTS = {
+    **VIDEO_DEFAULTS,
+    **{key: "false" for key in BOOLEAN_KEYS},
 }
 NUMERIC_BOUNDS = {
     "ASR_TIMEOUT_SECONDS": (float, 1, 300),
@@ -102,7 +109,7 @@ def _validated_numeric_value(key: str, value: str) -> str:
 def public_runtime_config(path: Path = RUNTIME_DIR / ".env") -> dict[str, object]:
     values = _values(_read_lines(path))
     result: dict[str, object] = {
-        key.lower(): values.get(key) or VIDEO_DEFAULTS.get(key, "")
+        key.lower(): values.get(key) or RUNTIME_DEFAULTS.get(key, "")
         for key in EDITABLE_KEYS
         if key not in SECRET_KEYS
     }
@@ -191,5 +198,5 @@ def affected_services(changed: set[str]) -> set[str]:
     if changed & video_keys:
         services.add("video_extraction")
     if changed & BOOLEAN_KEYS:
-        services.add("web")
+        services.update(("web", "ai_moderation"))
     return services

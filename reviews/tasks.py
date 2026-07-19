@@ -1,8 +1,13 @@
+from config.settings import runtime
 from jobs.models import BackgroundJob, JobStatus
 from jobs.services import JobDeferred
 from posts.models import OriginalPost
 
-from .adapters import OpenAiCompatibleOcrClient, OpenAiCompatibleReviewClient
+from .adapters import (
+    OpenAiCompatibleOcrClient,
+    OpenAiCompatibleReviewClient,
+    review_prompt_version,
+)
 from .models import OcrExtraction, PolicyVersion
 from .services import (
     OCR_EXTRACT_TASK,
@@ -33,6 +38,8 @@ def evaluate_post_handler(job: BackgroundJob) -> None:
         video_job = BackgroundJob.objects.get(pk=video_job_id)
         if video_job.status in {JobStatus.PENDING, JobStatus.RUNNING}:
             raise JobDeferred("等待视频提取任务完成")
+    if not (runtime.ai_base_url and runtime.ai_api_key and runtime.ai_model):
+        raise JobDeferred("等待 AI 服务地址、密钥和模型配置", delay_seconds=60)
     policy = PolicyVersion.objects.filter(is_active=True).order_by("-created_at").first()
     content, ocr_text, fingerprint = build_evaluation_input(post)
     expected_fingerprint = job.parameter_summary.get("input_fingerprint")
@@ -42,7 +49,12 @@ def evaluate_post_handler(job: BackgroundJob) -> None:
     output = OpenAiCompatibleReviewClient().evaluate(
         content, ocr_text, has_video_evidence=has_video_evidence
     )
-    persist_assessment(post, output, policy)
+    persist_assessment(
+        post,
+        output,
+        policy,
+        prompt_version=review_prompt_version(has_video_evidence=has_video_evidence),
+    )
 
 
 def extract_post_ocr_handler(job: BackgroundJob) -> None:

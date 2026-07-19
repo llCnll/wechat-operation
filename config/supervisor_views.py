@@ -11,7 +11,7 @@ from django.shortcuts import redirect
 from django.utils import timezone
 from django.views.decorators.http import require_GET, require_POST
 
-from config.runtime_config import BOOLEAN_KEYS, affected_services, update_runtime_config
+from config.runtime_config import affected_services, update_runtime_config
 from config.supervisor import SupervisorClient, SupervisorUnavailableError
 from posts.game_catalog import ensure_default_game
 from posts.ingestion_jobs import SHANGHAI, enqueue_manual_ingestion_window
@@ -115,7 +115,11 @@ def service_logs(request, service: str):
 def save_runtime_configuration(request):
     values = {key: value for key, value in request.POST.items()}
     if request.POST.get("config_scope") == "writes":
-        for key in BOOLEAN_KEYS - {"VIDEO_ENABLED"}:
+        for key in (
+            "ENABLE_UPSTREAM_WRITES", "ENABLE_SINK_WRITES", "ENABLE_BLOCK_WRITES",
+            "ENABLE_MUTE_WRITES", "ENABLE_UNMUTE_WRITES", "ENABLE_RESTORE_WRITES",
+            "ENABLE_AI_AUTOMATED_MODERATION", "ENABLE_AI_SINK_WRITES", "ENABLE_AI_BLOCK_WRITES",
+        ):
             values.setdefault(key, "false")
     if request.POST.get("config_scope") == "video":
         values.setdefault("VIDEO_ENABLED", "false")

@@ -8,7 +8,7 @@ from difflib import SequenceMatcher
 from hashlib import sha256
 from uuid import uuid4
 
-from django.db import transaction
+from django.db import IntegrityError, transaction
 from django.utils import timezone
 
 from config.settings import runtime
@@ -27,8 +27,11 @@ from posts.models import (
 from .adapters import AssessmentOutput
 from .models import (
     AiAssessment,
+    AiOperationReview,
+    AiOperationReviewStatus,
     ContentCategory,
     OperationAudit,
+    OperationExecutionSource,
     PolicyVersion,
     RecommendedAction,
     ReplyDraft,
@@ -56,6 +59,7 @@ BLOCK_REASON_OPTIONS = (
 )
 OCR_EXTRACT_TASK = "OCR_EXTRACT"
 AI_EVALUATE_TASK = "AI_EVALUATE"
+AI_AUTOMATED_MODERATION_TASK = "AI_AUTOMATED_MODERATION"
 EVALUATION_PIPELINE_VERSION = "v3"
 MAX_REPLY_DRAFT_LENGTH = 4000
 VIDEO_OCR_SUMMARY_GAP_MS = 1_500
@@ -66,6 +70,16 @@ MAX_EVALUATION_CONTENT_CHARS = 12_000
 MAX_IMAGE_OCR_CHARS = 8_000
 MAX_VIDEO_EVIDENCE_CHARS = 12_000
 MAX_EVALUATION_OCR_CHARS = 20_000
+AI_AUTOMATED_DAILY_LIMIT = 100
+AI_AUTOMATED_MIN_CONFIDENCE = {
+    RecommendedAction.SINK: 0.98,
+    RecommendedAction.BLOCK: 0.99,
+}
+DEFAULT_REVIEW_PROMPT_VERSION = "review-v4"
+
+
+class OperationExecutionConflict(ValueError):
+    """Another human or AI operation has already reserved this review task."""
 
 
 def is_operation_enabled(action: str) -> bool:
@@ -77,6 +91,23 @@ def is_operation_enabled(action: str) -> bool:
         RecommendedAction.UNMUTE: runtime.enable_unmute_writes,
         RecommendedAction.RESTORE: runtime.enable_restore_writes,
     }.get(action, False)
+
+
+def ai_automation_enabled(action: str) -> tuple[bool, str]:
+    """Return the complete, explicit authorization decision for an AI write."""
+    if action not in AI_AUTOMATED_MIN_CONFIDENCE:
+        return False, "AI 自动处置仅支持沉底或屏蔽"
+    if not runtime.enable_ai_automated_moderation:
+        return False, "AI 自动处置总开关未启用"
+    ai_action_enabled = {
+        RecommendedAction.SINK: runtime.enable_ai_sink_writes,
+        RecommendedAction.BLOCK: runtime.enable_ai_block_writes,
+    }[action]
+    if not ai_action_enabled:
+        return False, "AI 对应动作开关未启用"
+    if not is_operation_enabled(action):
+        return False, "对应人工上游写入授权未启用"
+    return True, ""
 
 
 def _operation_state(payload: dict) -> dict:
@@ -129,22 +160,24 @@ def _operation_idempotency_key(task: ReviewTask, action: str, confirmation_key: 
 
 def policy_recommendation(
     output: AssessmentOutput, policy: PolicyVersion | None
-) -> tuple[str, int]:
+) -> tuple[str, int, object | None]:
     action, priority = output.recommended_action, 50
+    deciding_rule = None
     if policy:
         for risk in output.risk_labels:
             for rule in policy.rules.filter(risk_label=risk.label, enabled=True):
                 if any(item and item in " ".join(risk.evidence) for item in rule.exceptions):
                     continue
                 if risk.confidence >= rule.min_confidence and rule.priority >= priority:
-                    action, priority = rule.recommended_action, rule.priority
+                    action, priority, deciding_rule = rule.recommended_action, rule.priority, rule
     if output.content_category in {ContentCategory.FEEDBACK, ContentCategory.SUGGESTION}:
         if action == RecommendedAction.SINK and output.feedback_value.upper() in {
             "HIGH",
             "VALUABLE",
         }:
             action = RecommendedAction.KEEP
-    return action, priority
+            deciding_rule = None
+    return action, priority, deciding_rule
 
 
 def _video_timestamp(start_ms: int, end_ms: int | None = None) -> str:
@@ -444,9 +477,13 @@ def enqueue_evaluation_pipeline(
 
 @transaction.atomic
 def persist_assessment(
-    post: OriginalPost, output: AssessmentOutput, policy: PolicyVersion | None = None
+    post: OriginalPost,
+    output: AssessmentOutput,
+    policy: PolicyVersion | None = None,
+    *,
+    prompt_version: str = DEFAULT_REVIEW_PROMPT_VERSION,
 ):
-    action, priority = policy_recommendation(output, policy)
+    action, priority, deciding_rule = policy_recommendation(output, policy)
     assessment = AiAssessment.objects.create(
         post=post,
         category=output.content_category,
@@ -457,7 +494,9 @@ def persist_assessment(
         overall_confidence=output.overall_confidence,
         needs_human_review=True,
         model_version=runtime.ai_model or "unconfigured",
+        prompt_version=prompt_version,
         policy_version=policy,
+        deciding_policy_rule=deciding_rule,
     )
     for risk in output.risk_labels:
         RiskEvidence.objects.create(
@@ -475,23 +514,38 @@ def persist_assessment(
         extraction.status != VideoExtractionStatus.SUCCEEDED
         for extraction in current_video_extractions(post)
     )
-    task, _ = ReviewTask.objects.update_or_create(
-        post=post,
-        defaults={
-            "assessment": assessment,
-            "suggested_action": action,
-            "priority": priority,
-            "status": ReviewStatus.PENDING,
-            "needs_focus": (
-                not output.needs_human_review
-                or not post.content_text
-                or post.ocr_extractions.filter(error_summary__gt="").exists()
-                or any(not risk.evidence for risk in output.risk_labels)
-                or video_incomplete
-                or high_reward
-            ),
-        },
+    needs_focus = (
+        not output.needs_human_review
+        or not post.content_text
+        or post.ocr_extractions.filter(error_summary__gt="").exists()
+        or any(not risk.evidence for risk in output.risk_labels)
+        or video_incomplete
+        or high_reward
     )
+    task = ReviewTask.objects.select_for_update().filter(post=post).first()
+    if task is None:
+        task = ReviewTask.objects.create(
+            post=post,
+            assessment=assessment,
+            suggested_action=action,
+            priority=priority,
+            status=ReviewStatus.PENDING,
+            needs_focus=needs_focus,
+        )
+    elif task.status not in {
+        ReviewStatus.AUTO_EXECUTED_PENDING_REVIEW,
+        ReviewStatus.AUTO_REVIEW_ESCALATED,
+    }:
+        task.assessment = assessment
+        task.suggested_action = action
+        task.priority = priority
+        task.status = ReviewStatus.PENDING
+        task.needs_focus = needs_focus
+        task.final_action = ""
+        task.reviewed_by = None
+        task.reviewed_at = None
+        task.reason = ""
+        task.save()
     risky = action in {
         RecommendedAction.BLOCK,
         RecommendedAction.MUTE,
@@ -513,7 +567,127 @@ def persist_assessment(
                 "risk_notice": output.reply_suggestion.risk_notice,
             },
         )
+    eligible, _, _ = ai_automation_eligibility(task, assessment=assessment)
+    if eligible:
+        enqueue_job(
+            task_type=AI_AUTOMATED_MODERATION_TASK,
+            idempotency_key=f"ai-auto:{task.pk}:{assessment.pk}:{action}",
+            parameter_summary={
+                "task_id": task.pk,
+                "assessment_id": assessment.pk,
+                "action": action,
+            },
+            max_retries=0,
+        )
     return assessment, task
+
+
+def _automation_evidence(assessment: AiAssessment, rule) -> list[dict]:
+    rows = []
+    for risk in assessment.risk_evidence.filter(label=rule.risk_label).order_by("pk"):
+        snippets = risk.evidence if isinstance(risk.evidence, list) else []
+        normalized = []
+        for snippet in snippets:
+            if isinstance(snippet, str):
+                value = " ".join(snippet.split())
+                if value and value not in normalized:
+                    normalized.append(value[:180])
+        if normalized:
+            rows.append(
+                {"label": risk.label, "confidence": risk.confidence, "evidence": normalized[:3]}
+            )
+    return rows
+
+
+def ai_automation_eligibility(
+    task: ReviewTask, *, assessment: AiAssessment | None = None
+) -> tuple[bool, str, dict]:
+    """Recheck every automatic-write condition without creating any side effect."""
+    assessment = assessment or task.assessment
+    snapshot: dict = {"task_id": task.pk, "assessment_id": getattr(assessment, "pk", None)}
+    if assessment is None or task.assessment_id != assessment.pk:
+        return False, "审核任务不是当前 AI 评估", snapshot
+    if task.status != ReviewStatus.PENDING:
+        return False, "审核任务当前不允许 AI 自动处置", snapshot
+    candidate = CandidatePost.objects.filter(topic_id=task.post.topic_id).first()
+    if candidate is None or candidate.origin_type != OriginType.ORIGINAL:
+        return False, "操作前原创状态复核失败", snapshot
+    if (
+        task.post.status != POST_STATUS_NORMAL
+        or is_post_deleted(task.post.status)
+        or is_post_self_visible(task.post.status)
+    ):
+        return False, "帖子不是可处置的正常状态", snapshot
+    enabled, reason = ai_automation_enabled(task.suggested_action)
+    if not enabled:
+        return False, reason, snapshot
+    rule = assessment.deciding_policy_rule
+    if (
+        rule is None
+        or not rule.enabled
+        or not rule.auto_execution_enabled
+        or rule.policy_version_id != assessment.policy_version_id
+        or rule.recommended_action != task.suggested_action
+    ):
+        return False, "决定规则未授权 AI 自动执行", snapshot
+    minimum = max(rule.min_confidence, AI_AUTOMATED_MIN_CONFIDENCE[task.suggested_action])
+    evidence = _automation_evidence(assessment, rule)
+    if not evidence or task.needs_focus:
+        return False, "风险依据不完整或需重点人工核验", snapshot
+    if assessment.overall_confidence < minimum or any(
+        row["confidence"] < minimum for row in evidence
+    ):
+        return False, "置信度未达到自动处置下限", snapshot
+    since = timezone.now() - timedelta(hours=24)
+    if (
+        OperationAudit.objects.filter(
+            execution_source=OperationExecutionSource.AI_AUTOMATED,
+            result_code="OK",
+            created_at__gte=since,
+        ).count()
+        >= AI_AUTOMATED_DAILY_LIMIT
+    ):
+        return False, "AI 自动处置 24 小时配额已用尽", snapshot
+    snapshot.update(
+        {
+            "action": task.suggested_action,
+            "overall_confidence": assessment.overall_confidence,
+            "risk_evidence": evidence,
+            "model_version": assessment.model_version,
+            "prompt_version": assessment.prompt_version,
+            "policy_version": assessment.policy_version.version
+            if assessment.policy_version
+            else "",
+            "policy_rule_id": rule.pk,
+            "rule_min_confidence": rule.min_confidence,
+            "rule_auto_execution_enabled": rule.auto_execution_enabled,
+            "authorization": {
+                "enable_ai_automated_moderation": runtime.enable_ai_automated_moderation,
+                "enable_ai_sink_writes": runtime.enable_ai_sink_writes,
+                "enable_ai_block_writes": runtime.enable_ai_block_writes,
+                "enable_upstream_writes": runtime.enable_upstream_writes,
+                "enable_sink_writes": runtime.enable_sink_writes,
+                "enable_block_writes": runtime.enable_block_writes,
+            },
+            "daily_success_count": OperationAudit.objects.filter(
+                execution_source=OperationExecutionSource.AI_AUTOMATED,
+                result_code="OK",
+                created_at__gte=since,
+            ).count(),
+        }
+    )
+    return True, "", snapshot
+
+
+def ai_automation_reason(snapshot: dict, action: str) -> str:
+    snippets = []
+    for item in snapshot.get("risk_evidence", []):
+        for evidence in item.get("evidence", []):
+            if evidence not in snippets:
+                snippets.append(evidence)
+    summary = "；".join(snippets[:3]) or "已验证的风险依据"
+    action_label = "沉底" if action == RecommendedAction.SINK else "屏蔽"
+    return f"AI 风险依据：{summary}；执行{action_label}。"[:500]
 
 
 @transaction.atomic
@@ -563,6 +737,41 @@ def create_confirmed_operation(
     )
 
 
+def _reserve_operation_audit(
+    task: ReviewTask,
+    *,
+    user,
+    action: str,
+    reason: str,
+    confirmation_key: str | None,
+    execution_source: str,
+    automation_snapshot: dict | None,
+) -> tuple[OperationAudit, bool]:
+    """Reserve the only in-flight upstream write for a task before contacting CDP."""
+    idempotency_key = _operation_idempotency_key(task, action, confirmation_key)
+    try:
+        audit, created = OperationAudit.objects.get_or_create(
+            idempotency_key=idempotency_key,
+            defaults={
+                "task": task,
+                "operation_id": str(uuid4()),
+                "action": action,
+                "reason": reason,
+                "executor": user,
+                "execution_source": execution_source,
+                "automation_snapshot": automation_snapshot or {},
+                "policy_version": task.assessment.policy_version if task.assessment_id else None,
+                "result_code": "EXECUTING",
+            },
+        )
+    except IntegrityError as exc:
+        active = OperationAudit.objects.filter(task=task, result_code="EXECUTING").first()
+        if active is not None:
+            raise OperationExecutionConflict("该帖子已有处置正在执行，请等待结果") from exc
+        raise
+    return audit, created
+
+
 def execute_confirmed_operation(
     task: ReviewTask,
     *,
@@ -572,8 +781,11 @@ def execute_confirmed_operation(
     source,
     upstream_payload: dict | None = None,
     confirmation_key: str | None = None,
+    execution_source: str = OperationExecutionSource.HUMAN,
+    automation_snapshot: dict | None = None,
+    reserved_audit: OperationAudit | None = None,
 ) -> OperationAudit:
-    """Human-only operation boundary; disabled capabilities never reach the source adapter."""
+    """Execute one verified upstream operation with an explicit actor source."""
     payload = _prepare_upstream_payload(action, reason, upstream_payload)
     if is_post_deleted(task.post.status):
         raise ValueError("帖子已从原平台管理队列删除，不能执行处置")
@@ -587,17 +799,19 @@ def execute_confirmed_operation(
     # stops after an upstream write, a repeated confirmation returns this audit rather
     # than sending the same moderation request again.
     with transaction.atomic():
-        audit, created = OperationAudit.objects.get_or_create(
-            idempotency_key=_operation_idempotency_key(task, action, confirmation_key),
-            defaults={
-                "task": task,
-                "operation_id": str(uuid4()),
-                "action": action,
-                "reason": reason,
-                "executor": user,
-                "result_code": "EXECUTING",
-            },
-        )
+        if reserved_audit is None:
+            audit, created = _reserve_operation_audit(
+                task,
+                user=user,
+                action=action,
+                reason=reason,
+                confirmation_key=confirmation_key,
+                execution_source=execution_source,
+                automation_snapshot=automation_snapshot,
+            )
+        else:
+            audit = OperationAudit.objects.select_for_update().get(pk=reserved_audit.pk)
+            created = audit.result_code == "EXECUTING"
         if not created:
             return audit
         if not is_operation_enabled(action):
@@ -652,8 +866,8 @@ def execute_confirmed_operation(
             else:
                 result_code = "OK"
                 error_summary = ""
-    except Exception:
-        pass
+    except Exception as exc:
+        error_summary = f"上游调用或状态验证失败：{type(exc).__name__}"[:500]
 
     with transaction.atomic():
         audit = OperationAudit.objects.select_for_update().get(pk=audit.pk)
@@ -675,4 +889,195 @@ def execute_confirmed_operation(
             OriginalPost.objects.filter(pk=task.post.pk).update(
                 status=after_state["status"], updated_at=timezone.now()
             )
+    return audit
+
+
+def record_ai_automation_rejection(
+    task: ReviewTask, assessment: AiAssessment, reason: str, snapshot: dict
+) -> OperationAudit:
+    """Keep a bounded, non-writing trace when an already enqueued AI event becomes ineligible."""
+    key = _operation_idempotency_key(
+        task, task.suggested_action, f"ai:{task.pk}:{assessment.pk}:{task.suggested_action}"
+    )
+    audit, _ = OperationAudit.objects.get_or_create(
+        idempotency_key=key,
+        defaults={
+            "task": task,
+            "operation_id": str(uuid4()),
+            "action": task.suggested_action,
+            "reason": "AI 自动处置资格复核未通过。",
+            "execution_source": OperationExecutionSource.AI_AUTOMATED,
+            "automation_snapshot": {**snapshot, "eligibility_reason": reason},
+            "policy_version": assessment.policy_version,
+            "result_code": "AUTO_ELIGIBILITY_REJECTED",
+            "error_summary": reason[:500],
+            "executed_at": timezone.now(),
+        },
+    )
+    return audit
+
+
+@transaction.atomic
+def reserve_ai_automated_moderation(
+    task_id: int, assessment_id: int, action: str
+) -> OperationAudit | None:
+    """Atomically claim a qualified AI write before opening its controlled CDP session."""
+    task = (
+        ReviewTask.objects.select_for_update()
+        .select_related("post", "assessment", "assessment__deciding_policy_rule")
+        .get(pk=task_id)
+    )
+    assessment = AiAssessment.objects.get(pk=assessment_id)
+    if action != task.suggested_action:
+        record_ai_automation_rejection(task, assessment, "自动处置动作与当前建议不一致", {})
+        return None
+    eligible, rejection, snapshot = ai_automation_eligibility(task, assessment=assessment)
+    if not eligible:
+        record_ai_automation_rejection(task, assessment, rejection, snapshot)
+        return None
+    reason = ai_automation_reason(snapshot, action)
+    snapshot["reason"] = reason
+    try:
+        audit, created = _reserve_operation_audit(
+            task,
+            user=None,
+            action=action,
+            reason=reason,
+            confirmation_key=f"ai:{task.pk}:{assessment.pk}:{action}",
+            execution_source=OperationExecutionSource.AI_AUTOMATED,
+            automation_snapshot=snapshot,
+        )
+    except OperationExecutionConflict:
+        record_ai_automation_rejection(task, assessment, "已有操作正在执行", snapshot)
+        return None
+    return audit if created and audit.result_code == "EXECUTING" else None
+
+
+def complete_ai_automation_review(audit: OperationAudit) -> AiOperationReview:
+    """Atomically expose a successful AI write to the human post-action review queue."""
+    with transaction.atomic():
+        audit = OperationAudit.objects.select_for_update().select_related("task").get(pk=audit.pk)
+        task = ReviewTask.objects.select_for_update().get(pk=audit.task_id)
+        review, _ = AiOperationReview.objects.get_or_create(audit=audit)
+        if audit.result_code == "OK":
+            task.status = ReviewStatus.AUTO_EXECUTED_PENDING_REVIEW
+            task.final_action = ""
+            task.reviewed_by = None
+            task.reviewed_at = None
+            task.reason = ""
+            task.save()
+        return review
+
+
+@transaction.atomic
+def confirm_ai_operation_review(
+    review: AiOperationReview, *, user, reason: str
+) -> AiOperationReview:
+    reason = reason.strip()
+    review = (
+        AiOperationReview.objects.select_for_update()
+        .select_related("audit__task")
+        .get(pk=review.pk)
+    )
+    if review.status != AiOperationReviewStatus.PENDING:
+        raise ValueError("该 AI 操作不再等待复审")
+    task = review.audit.task
+    review.status = AiOperationReviewStatus.CONFIRMED
+    review.reviewer = user
+    review.reviewed_at = timezone.now()
+    review.reason = reason
+    review.save()
+    task.status = ReviewStatus.REVIEWED
+    task.final_action = review.audit.action
+    task.reviewed_by = user
+    task.reviewed_at = review.reviewed_at
+    task.reason = reason
+    task.save()
+    return review
+
+
+@transaction.atomic
+def escalate_ai_operation_review(
+    review: AiOperationReview, *, user, reason: str
+) -> AiOperationReview:
+    reason = reason.strip()
+    review = (
+        AiOperationReview.objects.select_for_update()
+        .select_related("audit__task")
+        .get(pk=review.pk)
+    )
+    if review.status != AiOperationReviewStatus.PENDING:
+        raise ValueError("该 AI 操作不再等待复审")
+    task = review.audit.task
+    review.status = AiOperationReviewStatus.ESCALATED
+    review.reviewer = user
+    review.reviewed_at = timezone.now()
+    review.reason = reason
+    review.save()
+    task.status = ReviewStatus.AUTO_REVIEW_ESCALATED
+    task.needs_focus = True
+    task.save(update_fields=["status", "needs_focus", "updated_at"])
+    return review
+
+
+@transaction.atomic
+def mark_ai_review_restored(task: ReviewTask, *, audit: OperationAudit) -> None:
+    """Only a successful manual RESTORE can close an escalated AI operation review."""
+    review = (
+        AiOperationReview.objects.select_for_update()
+        .filter(audit__task=task, status=AiOperationReviewStatus.ESCALATED)
+        .order_by("-created_at")
+        .first()
+    )
+    if review is None:
+        return
+    if (
+        review.status != AiOperationReviewStatus.ESCALATED
+        or audit.action != RecommendedAction.RESTORE
+    ):
+        return
+    review.status = AiOperationReviewStatus.RESTORED
+    review.save(update_fields=["status", "updated_at"])
+
+
+def execute_ai_automated_moderation(
+    task_id: int,
+    assessment_id: int,
+    action: str,
+    source,
+    *,
+    reserved_audit: OperationAudit | None = None,
+) -> OperationAudit:
+    """Run one outbox event; callers own the controlled CDP client lifecycle."""
+    if reserved_audit is None:
+        reserved_audit = reserve_ai_automated_moderation(task_id, assessment_id, action)
+        if reserved_audit is None:
+            audit = (
+                OperationAudit.objects.filter(
+                    task_id=task_id,
+                    execution_source=OperationExecutionSource.AI_AUTOMATED,
+                )
+                .order_by("-created_at")
+                .first()
+            )
+            if audit is None:
+                raise ValueError("自动处置未创建可追溯审计记录")
+            if audit.result_code == "OK":
+                complete_ai_automation_review(audit)
+            return audit
+    task = ReviewTask.objects.select_related("post").get(pk=task_id)
+    payload = {} if action == RecommendedAction.SINK else {"block_reason_code": 1}
+    audit = execute_confirmed_operation(
+        task,
+        user=None,
+        action=action,
+        reason=reserved_audit.reason,
+        source=source,
+        upstream_payload=payload,
+        confirmation_key=f"ai:{task.pk}:{assessment_id}:{action}",
+        execution_source=OperationExecutionSource.AI_AUTOMATED,
+        reserved_audit=reserved_audit,
+    )
+    if audit.result_code == "OK":
+        complete_ai_automation_review(audit)
     return audit

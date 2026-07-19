@@ -18,6 +18,7 @@ MANAGED_SERVICE_NAMES = (
     "backfill_ingestion",
     "review",
     "video_extraction",
+    "ai_moderation",
 )
 
 
@@ -66,6 +67,7 @@ def admin_console_overview(request):
                 "recommended_action": rule.get_recommended_action_display(),
                 "action_code": rule.recommended_action.lower(),
                 "priority": rule.priority,
+                "auto_execution_enabled": rule.auto_execution_enabled,
             }
             for rule in active_policy.rules.filter(enabled=True).order_by("-priority", "risk_label")
         ]
@@ -139,6 +141,21 @@ def admin_console_overview(request):
             ("ENABLE_MUTE_WRITES", "允许禁言"),
             ("ENABLE_UNMUTE_WRITES", "允许解除禁言"),
             ("ENABLE_RESTORE_WRITES", "允许恢复正常"),
+            ("ENABLE_AI_AUTOMATED_MODERATION", "启用 AI 自动处置总开关"),
+            ("ENABLE_AI_SINK_WRITES", "允许 AI 自动沉底"),
+            ("ENABLE_AI_BLOCK_WRITES", "允许 AI 自动屏蔽"),
+        )
+    )
+    ai_moderation_authorized = runtime_config["enable_ai_automated_moderation"] == "true" and (
+        (
+            runtime_config["enable_ai_sink_writes"] == "true"
+            and runtime_config["enable_upstream_writes"] == "true"
+            and runtime_config["enable_sink_writes"] == "true"
+        )
+        or (
+            runtime_config["enable_ai_block_writes"] == "true"
+            and runtime_config["enable_upstream_writes"] == "true"
+            and runtime_config["enable_block_writes"] == "true"
         )
     )
     checked_at = timezone.now()
@@ -286,7 +303,27 @@ def admin_console_overview(request):
                 else "保持关闭，不会向上游执行处置",
                 checked_at,
                 optional=True,
-                description="仅授权人工确认后的沉底、屏蔽、禁言、解除禁言和恢复正常请求。",
+                description="人工确认写入与默认关闭的 AI 自动沉底/屏蔽授权。",
+            ),
+            _pipeline_node(
+                "ai_moderation",
+                "AI 自动处置 Worker（可选）",
+                (
+                    ai_moderation_authorized
+                    and bool(services["ai_moderation"]["running"])
+                ),
+                "完成 AI 自动处置授权后启动 Worker",
+                (
+                    "AI 自动处置 Worker 已运行；固定上限为 100 条/24 小时"
+                    if ai_moderation_authorized
+                    and services["ai_moderation"]["running"]
+                    else "默认关闭；需同时完成 AI、人工动作和规则级授权"
+                ),
+                checked_at,
+                optional=True,
+                service="ai_moderation",
+                running=bool(services["ai_moderation"]["running"]),
+                description="独立受 Supervisor 托管；未授权结论直接保留人工审核。",
             ),
         )
     )

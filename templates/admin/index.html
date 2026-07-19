@@ -41,7 +41,7 @@
         </div>
         <div class="console-pipeline-node-indicators">
           <i aria-hidden="true"></i>
-          {% if node.key == "ocr" or node.key == "video_extraction" or node.key == "writes" %}
+          {% if node.key == "ocr" or node.key == "video_extraction" or node.key == "writes" or node.key == "ai_moderation" %}
           <button class="console-pipeline-info" type="button" aria-describedby="pipeline-info-{{ node.key }}" aria-label="查看{{ node.label }}说明">i<span id="pipeline-info-{{ node.key }}" class="console-pipeline-tooltip" role="tooltip">{{ node.description }}</span></button>
           {% endif %}
         </div>
@@ -198,13 +198,19 @@
 <dialog class="console-config-dialog console-config-dialog-risk" data-config-dialog-panel="writes" aria-labelledby="writes-config-title">
   <form method="post" action="{% url 'save-runtime-configuration' %}">{% csrf_token %}<input type="hidden" name="return_to" value="/admin/"><input type="hidden" name="config_scope" value="writes">
     <header><div><p>UPSTREAM AUTHORIZATION</p><h2 id="writes-config-title">人工处置授权</h2></div><button type="button" class="console-dialog-close" data-config-dialog-close aria-label="关闭">关闭</button></header>
-    <p class="console-dialog-intro">开启后，运营人员仍需在帖子工作台逐帖确认，系统不会自动执行沉底、屏蔽或禁言。</p>
+    <p class="console-dialog-intro">人工确认与 AI 自动处置分属不同授权。AI 仅可自动沉底或屏蔽，仍会进入独立人工复审；禁言、恢复和组合操作始终只能人工确认。</p>
     <fieldset class="console-write-switches"><legend>允许写入上游平台</legend>
-      {% for key, label in admin_console.write_switches %}
+      {% for key, label in admin_console.write_switches|slice:":6" %}
       <label><input type="checkbox" name="{{ key }}" value="true" {% if label.enabled %}checked{% endif %}> {{ label.name }}</label>
       {% endfor %}
     </fieldset>
-    <footer><span>未勾选的授权会在保存时关闭。</span><button class="console-config-submit" type="submit">保存授权</button></footer>
+    <fieldset class="console-write-switches"><legend>AI 自动处置（高风险，默认关闭）</legend>
+      {% for key, label in admin_console.write_switches|slice:"6:" %}
+      <label><input type="checkbox" name="{{ key }}" value="true" {% if label.enabled %}checked{% endif %}> {{ label.name }}</label>
+      {% endfor %}
+      <small>还需对应人工开关和策略规则逐条授权；固定上限 100 条/24 小时。</small>
+    </fieldset>
+    <footer><span>未勾选的授权会在保存时关闭；保存后重启 web、ai_moderation。</span><button class="console-config-submit" type="submit">保存授权</button></footer>
   </form>
 </dialog>
 
@@ -254,6 +260,7 @@
         <dl>
           <div><dt>最低置信度</dt><dd>{{ rule.min_confidence }}</dd></div>
           <div><dt>优先级</dt><dd><span class="console-rule-priority">{{ rule.priority }}</span></dd></div>
+          <div><dt>AI 自动</dt><dd>{% if rule.auto_execution_enabled %}已授权{% else %}未授权{% endif %}</dd></div>
         </dl>
       </article>
       {% endfor %}
@@ -293,7 +300,7 @@
     </article>
     <article class="console-trace-card">
       <div><p>REVIEW RECORDS</p><h3>审核与模型</h3><span>优先核验人工审核与处置留痕，再按需查看模型判定细节。</span></div>
-      <div class="console-trace-links"><a href="{% url 'admin:reviews_reviewtask_changelist' %}">人工审核</a><a href="{% url 'admin:reviews_operationaudit_changelist' %}">操作审计</a></div>
+      <div class="console-trace-links"><a href="{% url 'admin:reviews_reviewtask_changelist' %}">人工审核</a><a href="{% url 'admin:reviews_operationaudit_changelist' %}">操作审计</a><a href="{% url 'admin:reviews_aioperationreview_changelist' %}">AI 操作复审</a></div>
       <div class="console-trace-secondary"><a href="{% url 'admin:reviews_aiassessment_changelist' %}">AI 评估</a><a href="{% url 'admin:reviews_ocrextraction_changelist' %}">OCR 提取</a><a href="{% url 'admin:reviews_riskevidence_changelist' %}">风险证据</a><a href="{% url 'admin:reviews_replydraft_changelist' %}">回复草案</a></div>
     </article>
   </div>

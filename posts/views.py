@@ -8,6 +8,8 @@ from django.db.models import F, OuterRef, Q, Subquery, Value
 from django.http import QueryDict
 from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse
+from django.utils import timezone
+from django.utils.dateparse import parse_datetime
 from django.utils.http import url_has_allowed_host_and_scheme
 from django.views.decorators.http import require_POST
 
@@ -15,6 +17,8 @@ from config.cdp import CdpUnavailableError, open_controlled_login_page
 from jobs.models import BackgroundJob, JobStatus
 from reviews.models import (
     RISK_LABEL_DISPLAY,
+    AiOperationReview,
+    AiOperationReviewStatus,
     ContentCategory,
     RecommendedAction,
     ReplyDraft,
@@ -24,11 +28,15 @@ from reviews.models import (
 )
 from reviews.services import (
     BLOCK_REASON_OPTIONS,
+    OperationExecutionConflict,
     complete_review,
+    confirm_ai_operation_review,
     current_video_extractions,
     enqueue_evaluation_pipeline,
+    escalate_ai_operation_review,
     execute_confirmed_operation,
     is_operation_enabled,
+    mark_ai_review_restored,
     save_reply_draft,
     video_evidence_summaries,
 )
@@ -89,6 +97,40 @@ def _safe_dashboard_return_url(request) -> str:
     return reverse("operations-dashboard")
 
 
+def _safe_ai_operation_reviews_return_url(request) -> str:
+    """Keep review actions in the filtered review workspace, never an external URL."""
+    return_to = request.POST.get("return_to", "")
+    if url_has_allowed_host_and_scheme(
+        return_to, allowed_hosts={request.get_host()}, require_https=request.is_secure()
+    ):
+        return return_to
+    return reverse("ai-operation-reviews")
+
+
+def _safe_ai_operation_reviews_dashboard_return_url(request) -> str:
+    """Only retain a same-site review workspace return path while viewing a post."""
+    return_to = request.GET.get("return_to", "")
+    if url_has_allowed_host_and_scheme(
+        return_to, allowed_hosts={request.get_host()}, require_https=request.is_secure()
+    ):
+        return return_to
+    return ""
+
+
+def _escalated_review_dashboard_url(request, review: AiOperationReview) -> str:
+    """Take an escalated review directly to its actionable content-management task."""
+    review_return_params = QueryDict(mutable=True)
+    review_return_params["appid"] = review.audit.task.post.source_appid
+    review_return_params["status"] = AiOperationReviewStatus.ESCALATED
+    review_return_url = f"{reverse('ai-operation-reviews')}?{review_return_params.urlencode()}"
+    params = QueryDict(mutable=True)
+    params["appid"] = review.audit.task.post.source_appid
+    params["review_status"] = ReviewStatus.AUTO_REVIEW_ESCALATED
+    params["topic"] = str(review.audit.task.post.topic_id)
+    params["return_to"] = review_return_url
+    return f"{reverse('operations-dashboard')}?{params.urlencode()}"
+
+
 @login_required
 @require_POST
 def open_controlled_login(request):
@@ -117,25 +159,28 @@ def _set_status_context(post: OriginalPost) -> None:
     post.is_sunk = is_post_sunk(post.status)
     post.is_self_visible = is_post_self_visible(post.status)
     post.is_normal = is_post_normal(post.status)
-    if post.is_deleted:
+    post.status_label = _post_status_label(post.status)
+
+
+def _post_status_label(status: int | None) -> str:
+    if is_post_deleted(status):
         labels = ["原平台已删除"]
-        if post.is_blocked:
+        if is_post_blocked(status):
             labels.append("已屏蔽")
-        if post.is_sunk:
+        if is_post_sunk(status):
             labels.append("已沉底")
-        post.status_label = "、".join(labels)
-    elif post.is_blocked and post.is_sunk:
-        post.status_label = "已屏蔽、已沉底"
-    elif post.is_blocked:
-        post.status_label = "已屏蔽"
-    elif post.is_sunk:
-        post.status_label = "已沉底"
-    elif post.is_self_visible:
-        post.status_label = "仅自己可见"
-    elif post.is_normal:
-        post.status_label = "正常"
-    else:
-        post.status_label = "未同步" if post.status is None else f"未知状态（{post.status}）"
+        return "、".join(labels)
+    if is_post_blocked(status) and is_post_sunk(status):
+        return "已屏蔽、已沉底"
+    if is_post_blocked(status):
+        return "已屏蔽"
+    if is_post_sunk(status):
+        return "已沉底"
+    if is_post_self_visible(status):
+        return "仅自己可见"
+    if is_post_normal(status):
+        return "正常"
+    return "未同步" if status is None else f"未知状态（{status}）"
 
 
 def _operation_reason_suggestion(post: OriginalPost) -> str:
@@ -223,6 +268,7 @@ def operations_dashboard(request):
     if filters["sort"] not in valid_sorts:
         # Keep previously shared URLs working after replacing the old one-purpose control.
         filters["sort"] = "priority_asc" if filters["priority_order"] == "asc" else "priority_desc"
+    selected_topic_id = request.GET.get("topic", "").strip()
     posts = _with_latest_metrics(
         OriginalPost.objects.select_related(
             "review_task", "review_task__assessment", "reply_draft"
@@ -248,6 +294,8 @@ def operations_dashboard(request):
         posts = posts.filter(review_task__suggested_action__in=filters["suggested_action"])
     if filters["review_status"]:
         posts = posts.filter(review_task__status__in=filters["review_status"])
+    else:
+        posts = posts.exclude(review_task__status=ReviewStatus.AUTO_EXECUTED_PENDING_REVIEW)
     if filters["post_status"]:
         selected_statuses = set(filters["post_status"])
         status_query = Q()
@@ -281,9 +329,17 @@ def operations_dashboard(request):
         "publish_time_desc": ("-publish_time", "-updated_at"),
         "publish_time_asc": ("publish_time", "updated_at"),
     }[filters["sort"]]
-    posts = posts.distinct().order_by(*ordering)
-
-    posts = list(posts[:100])
+    ordered_posts = posts.distinct().order_by(*ordering)
+    posts = list(ordered_posts[:100])
+    if selected_topic_id:
+        try:
+            selected_topic = int(selected_topic_id)
+        except ValueError:
+            selected_topic = None
+        if selected_topic is not None and all(post.topic_id != selected_topic for post in posts):
+            selected_post = ordered_posts.filter(topic_id=selected_topic).first()
+            if selected_post is not None:
+                posts = [selected_post, *posts][:100]
     for post in posts:
         _set_status_context(post)
     batch_candidates = _batch_ai_candidates(posts)
@@ -308,7 +364,6 @@ def operations_dashboard(request):
         quick_filter.appendlist("suggested_action", action)
     quick_filter.appendlist("review_status", ReviewStatus.PENDING)
     quick_filter.appendlist("post_status", "NORMAL")
-    selected_topic_id = request.GET.get("topic")
     selected_index = 0
     if selected_topic_id:
         try:
@@ -358,6 +413,22 @@ def operations_dashboard(request):
             pk__in=current_extraction_ids
         ).count()
         selected_post.operation_reason_suggestion = _operation_reason_suggestion(selected_post)
+        selected_post.ai_operation_reviews = (
+            list(
+                AiOperationReview.objects.filter(audit__task=selected_post.review)
+                .select_related("audit")
+                .order_by("-created_at")
+            )
+            if selected_post.review
+            else []
+        )
+        # A task may have historical review records. The dashboard should link
+        # to the latest record's actual review state, not the default queue.
+        selected_post.latest_ai_operation_review = (
+            selected_post.ai_operation_reviews[0]
+            if selected_post.ai_operation_reviews
+            else None
+        )
         latest_jobs = list(
             BackgroundJob.objects.filter(parameter_summary__topic_id=selected_post.topic_id)
             .filter(task_type__in=("OCR_EXTRACT", "AI_EVALUATE"))
@@ -392,6 +463,7 @@ def operations_dashboard(request):
         "game_context_query": _game_context_query(request),
         "navigation_query": _navigation_query(request),
         "return_query": _navigation_query(request),
+        "ai_operation_reviews_return_url": _safe_ai_operation_reviews_dashboard_return_url(request),
         "quick_filter_query": quick_filter.urlencode(),
         "filters": filters,
         "categories": ContentCategory.choices,
@@ -507,6 +579,89 @@ def refresh_dashboard_post(request, topic_id: int):
     return redirect(redirect_url)
 
 
+def _resolve_escalated_ai_operation(
+    request, *, task: ReviewTask, post: OriginalPost, action: str, reason: str, redirect_url: str
+):
+    """Correct an escalated AI write and apply the human's final decision in one flow."""
+    supported_actions = {
+        RecommendedAction.RESTORE,
+        RecommendedAction.SINK,
+        RecommendedAction.BLOCK,
+        RecommendedAction.MUTE,
+        RecommendedAction.BLOCK_AND_MUTE,
+    }
+    if action not in supported_actions:
+        messages.error(request, "AI 异常跟进仅支持恢复正常或恢复后执行沉底、屏蔽、禁言。")
+        return redirect(redirect_url)
+
+    target_payload = {}
+    if action == RecommendedAction.BLOCK_AND_MUTE:
+        target_payload = _dashboard_operation_payload(request, RecommendedAction.MUTE)
+    elif action not in {RecommendedAction.RESTORE, RecommendedAction.SINK}:
+        target_payload = _dashboard_operation_payload(request, action)
+    if target_payload is None:
+        return redirect(redirect_url)
+
+    operation_plan = [(RecommendedAction.RESTORE, {})]
+    if action == RecommendedAction.BLOCK_AND_MUTE:
+        operation_plan.extend(
+            (
+                (
+                    RecommendedAction.BLOCK,
+                    {"block_reason_code": target_payload["block_reason_code"]},
+                ),
+                (RecommendedAction.MUTE, target_payload),
+            )
+        )
+    elif action != RecommendedAction.RESTORE:
+        operation_plan.append((action, target_payload))
+
+    unavailable = [
+        operation for operation, _ in operation_plan if not is_operation_enabled(operation)
+    ]
+    if unavailable:
+        labels = "、".join(dict(RecommendedAction.choices)[operation] for operation in unavailable)
+        messages.error(request, f"请先在系统配置中启用上游写操作：{labels}。")
+        return redirect(redirect_url)
+
+    source = None
+    try:
+        if post.source_appid:
+            source = CdpGameCircleClient(appid=post.source_appid)
+        confirmation_key = request.POST.get("confirmation_key")
+        audits = [
+            execute_confirmed_operation(
+                task,
+                user=request.user,
+                action=operation,
+                reason=reason,
+                source=source,
+                upstream_payload=payload,
+                confirmation_key=f"{confirmation_key}:ai-correction:{index}:{operation.lower()}",
+            )
+            for index, (operation, payload) in enumerate(operation_plan, start=1)
+        ]
+    except OperationExecutionConflict as exc:
+        messages.warning(request, str(exc))
+        return redirect(redirect_url)
+    except Exception:
+        messages.error(request, "无法建立上游操作会话，未执行纠正处置。")
+        return redirect(redirect_url)
+    finally:
+        if source is not None:
+            source.close()
+
+    result_summary = "，".join(f"{audit.action}={audit.result_code}" for audit in audits)
+    if not all(audit.result_code == "OK" for audit in audits):
+        messages.warning(request, f"纠正处置未全部成功，AI 异常仍待跟进：{result_summary}")
+        return redirect(redirect_url)
+
+    complete_review(task, user=request.user, action=action, reason=reason)
+    mark_ai_review_restored(task, audit=audits[0])
+    messages.success(request, f"已纠正 AI 操作并完成最终处置：{result_summary}")
+    return redirect(redirect_url)
+
+
 @login_required
 @require_POST
 def confirm_dashboard_operation(request, topic_id: int, action: str):
@@ -524,10 +679,22 @@ def confirm_dashboard_operation(request, topic_id: int, action: str):
         post=post,
         defaults={"suggested_action": RecommendedAction.HUMAN_REVIEW},
     )
+    if task.status == ReviewStatus.AUTO_EXECUTED_PENDING_REVIEW:
+        messages.error(request, "该帖 AI 操作仍等待复审，请先在“AI 操作复审”中确认或标记异常。")
+        return redirect(redirect_url)
     reason = request.POST.get("reason", "").strip()
     if not reason:
         messages.error(request, "必须填写业务原因。")
         return redirect(redirect_url)
+    if task.status == ReviewStatus.AUTO_REVIEW_ESCALATED:
+        return _resolve_escalated_ai_operation(
+            request,
+            task=task,
+            post=post,
+            action=action,
+            reason=reason,
+            redirect_url=redirect_url,
+        )
     if action == "SKIP":
         complete_review(
             task,
@@ -560,6 +727,9 @@ def confirm_dashboard_operation(request, topic_id: int, action: str):
                 )
                 for operation in (RecommendedAction.BLOCK, RecommendedAction.MUTE)
             ]
+        except OperationExecutionConflict as exc:
+            messages.warning(request, str(exc))
+            return redirect(redirect_url)
         except Exception:
             messages.error(request, "无法建立上游操作会话，未执行处置。")
             return redirect(redirect_url)
@@ -601,6 +771,9 @@ def confirm_dashboard_operation(request, topic_id: int, action: str):
             upstream_payload=payload,
             confirmation_key=request.POST.get("confirmation_key"),
         )
+    except OperationExecutionConflict as exc:
+        messages.warning(request, str(exc))
+        return redirect(redirect_url)
     except Exception:
         messages.error(request, "无法建立上游操作会话，未执行处置。")
         return redirect(redirect_url)
@@ -609,9 +782,127 @@ def confirm_dashboard_operation(request, topic_id: int, action: str):
             source.close()
     if audit.result_code == "OK":
         complete_review(task, user=request.user, action=action, reason=reason)
+        if action == RecommendedAction.RESTORE:
+            mark_ai_review_restored(task, audit=audit)
         messages.success(request, f"处置成功，审核已完成：{audit.result_code}。")
     else:
         messages.warning(request, f"处置未成功，审核保持待处理：{audit.result_code}。")
+    return redirect(redirect_url)
+
+
+@login_required
+def ai_operation_reviews(request):
+    appid = active_game_appid(request.GET.get("appid", "").strip())
+    reviews = AiOperationReview.objects.select_related(
+        "audit__task__post", "audit__task__assessment", "audit__policy_version", "reviewer"
+    ).prefetch_related("audit__task__assessment__risk_evidence")
+    reviews = reviews.filter(
+        audit__task__post__in=OriginalPost.objects.filter(_dashboard_game_filter(appid))
+    )
+    status = request.GET.get("status", AiOperationReviewStatus.PENDING)
+    action = request.GET.get("action", "")
+    risk = request.GET.get("risk", "")
+    valid_statuses = {value for value, _ in AiOperationReviewStatus.choices}
+    valid_actions = {RecommendedAction.SINK, RecommendedAction.BLOCK}
+    if status not in valid_statuses and status:
+        status = AiOperationReviewStatus.PENDING
+    if action not in valid_actions:
+        action = ""
+    if risk not in RISK_LABEL_DISPLAY:
+        risk = ""
+    start_at = parse_datetime(request.GET.get("start_at", ""))
+    end_at = parse_datetime(request.GET.get("end_at", ""))
+    if status:
+        reviews = reviews.filter(status=status)
+    if action:
+        reviews = reviews.filter(audit__action=action)
+    if risk:
+        reviews = reviews.filter(audit__task__assessment__risk_evidence__label=risk).distinct()
+    if start_at:
+        reviews = reviews.filter(
+            created_at__gte=timezone.make_aware(start_at)
+            if timezone.is_naive(start_at)
+            else start_at
+        )
+    if end_at:
+        reviews = reviews.filter(
+            created_at__lte=timezone.make_aware(end_at) if timezone.is_naive(end_at) else end_at
+        )
+    reviews = list(reviews.order_by("-created_at")[:100])
+    for review in reviews:
+        review.before_status_label = _post_status_label(review.audit.before_state.get("status"))
+        review.after_status_label = _post_status_label(review.audit.after_state.get("status"))
+    return render(
+        request,
+        "posts/ai_operation_reviews.html",
+        {
+            "reviews": reviews,
+            "appid": appid,
+            "managed_games": managed_game_options(),
+            "statuses": AiOperationReviewStatus.choices,
+            "actions": ((RecommendedAction.SINK, "沉底"), (RecommendedAction.BLOCK, "屏蔽")),
+            "risk_labels": RISK_LABEL_DISPLAY.items(),
+            "selected_status": status,
+            "selected_action": action,
+            "selected_risk": risk,
+            "start_at": request.GET.get("start_at", ""),
+            "end_at": request.GET.get("end_at", ""),
+            "return_to": request.get_full_path(),
+            "operation_capabilities": {
+                "SINK": is_operation_enabled(RecommendedAction.SINK),
+                "BLOCK": is_operation_enabled(RecommendedAction.BLOCK),
+                "MUTE": is_operation_enabled(RecommendedAction.MUTE),
+                "RESTORE": is_operation_enabled(RecommendedAction.RESTORE),
+            },
+            "block_reasons": BLOCK_REASON_OPTIONS,
+            "mute_durations": ((1, "1 天"), (3, "3 天"), (7, "7 天"), (30, "1 个月（30 天）")),
+        },
+    )
+
+
+@login_required
+@require_POST
+def update_ai_operation_review(request, review_id: int, decision: str):
+    review = get_object_or_404(
+        AiOperationReview.objects.select_related("audit__task__post"), pk=review_id
+    )
+    redirect_url = _safe_ai_operation_reviews_return_url(request)
+    reason = request.POST.get("reason", "")
+    final_action = request.POST.get("final_action", "").upper()
+    try:
+        if decision == "confirm":
+            confirm_ai_operation_review(review, user=request.user, reason=reason)
+            messages.success(request, "已确认 AI 操作正确。")
+        elif decision == "escalate":
+            escalate_ai_operation_review(review, user=request.user, reason=reason)
+            if final_action:
+                return _resolve_escalated_ai_operation(
+                    request,
+                    task=review.audit.task,
+                    post=review.audit.task.post,
+                    action=final_action,
+                    reason=reason or "人工复审核验：AI 原处置不正确。",
+                    redirect_url=redirect_url,
+                )
+            messages.warning(request, "已标记异常，请在内容管理中人工跟进。")
+            redirect_url = _escalated_review_dashboard_url(request, review)
+        elif decision == "correct":
+            if review.status != AiOperationReviewStatus.ESCALATED:
+                raise ValueError("该 AI 操作当前不需要异常纠正")
+            if not final_action:
+                raise ValueError("请选择异常纠正后的最终处置")
+            return _resolve_escalated_ai_operation(
+                request,
+                task=review.audit.task,
+                post=review.audit.task.post,
+                action=final_action,
+                reason=reason or "人工复审核验：继续纠正 AI 原处置。",
+                redirect_url=redirect_url,
+            )
+        else:
+            messages.error(request, "不支持的复审操作。")
+    except ValueError as exc:
+        messages.error(request, str(exc))
     return redirect(redirect_url)
 
 

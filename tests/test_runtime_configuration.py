@@ -50,7 +50,8 @@ def test_runtime_configuration_rejects_out_of_range_video_values(tmp_path):
 
 def test_runtime_configuration_maps_restarts_to_affected_services():
     assert affected_services({"AI_MODEL"}) == {"review"}
-    assert affected_services({"ENABLE_BLOCK_WRITES"}) == {"web"}
+    assert affected_services({"ENABLE_BLOCK_WRITES"}) == {"web", "ai_moderation"}
+    assert affected_services({"ENABLE_AI_SINK_WRITES"}) == {"web", "ai_moderation"}
 
 
 def test_runtime_configuration_explicitly_disables_unchecked_write_switches(tmp_path):
@@ -61,3 +62,11 @@ def test_runtime_configuration_explicitly_disables_unchecked_write_switches(tmp_
 
     assert changed == {"ENABLE_BLOCK_WRITES"}
     assert "ENABLE_BLOCK_WRITES=false" in path.read_text(encoding="utf-8")
+
+
+def test_ai_automation_switches_are_publicly_visible_but_default_to_disabled(tmp_path):
+    config = public_runtime_config(tmp_path / ".env")
+
+    assert config["enable_ai_automated_moderation"] == "false"
+    assert config["enable_ai_sink_writes"] == "false"
+    assert config["enable_ai_block_writes"] == "false"

@@ -57,6 +57,9 @@ class RuntimeSettings(BaseSettings):
     enable_mute_writes: bool = False
     enable_unmute_writes: bool = False
     enable_restore_writes: bool = False
+    enable_ai_automated_moderation: bool = False
+    enable_ai_sink_writes: bool = False
+    enable_ai_block_writes: bool = False
     scheduled_ingestion_appid: Literal["wx6d2454a8afcd9706"] = "wx6d2454a8afcd9706"
     scheduled_ingestion_interval_minutes: Literal[15] = 15
     scheduled_ingestion_lookback_minutes: Literal[30] = 30
