@@ -1,0 +1,161 @@
+"""Read-only aggregation for the operations dashboard's live operations analysis."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import date, datetime, time, timedelta
+from zoneinfo import ZoneInfo
+
+from django.db.models import Count, F, IntegerField, OuterRef, Q, Subquery, Sum, Value
+from django.db.models.functions import Coalesce
+
+from posts.models import CandidatePost, InteractionSnapshot, OriginalPost, OriginType
+from reviews.models import (
+    ContentCategory,
+    RecommendedAction,
+    ReviewStatus,
+    ReviewTask,
+    RiskEvidence,
+    risk_label_display,
+)
+
+SHANGHAI = ZoneInfo("Asia/Shanghai")
+ANALYSIS_MAX_DAYS = 31
+ANALYSIS_DEFAULT_DAYS = 7
+
+
+@dataclass(frozen=True)
+class ReportRow:
+    key: str
+    label: str
+    value: int
+
+
+@dataclass(frozen=True)
+class LiveOperationsAnalysis:
+    start_date: date
+    end_date: date
+    source_appid: str
+    metrics: dict[str, int]
+    categories: tuple[ReportRow, ...]
+    risks: tuple[ReportRow, ...]
+    final_actions: tuple[ReportRow, ...]
+
+
+def default_analysis_date_range(today: date) -> tuple[date, date]:
+    """Return the inclusive default range ending on the supplied Beijing date."""
+    return today - timedelta(days=ANALYSIS_DEFAULT_DAYS - 1), today
+
+
+def validate_analysis_date_range(start_day: date, end_day: date) -> tuple[date, date]:
+    """Validate the inclusive Beijing date range accepted by the analysis page."""
+    if start_day > end_day:
+        raise ValueError("开始日期不能晚于结束日期")
+    if (end_day - start_day).days + 1 > ANALYSIS_MAX_DAYS:
+        raise ValueError(f"分析范围最长为 {ANALYSIS_MAX_DAYS} 天")
+    return start_day, end_day
+
+
+def analysis_datetime_range(start_day: date, end_day: date) -> tuple[datetime, datetime]:
+    """Convert an inclusive Beijing date range into a half-open datetime interval."""
+    start_day, end_day = validate_analysis_date_range(start_day, end_day)
+    start = datetime.combine(start_day, time.min, tzinfo=SHANGHAI)
+    return start, datetime.combine(end_day + timedelta(days=1), time.min, tzinfo=SHANGHAI)
+
+
+def _labelled_rows(rows, labels: dict[str, str], fallback) -> tuple[ReportRow, ...]:
+    return tuple(
+        ReportRow(
+            key=row["key"],
+            label=labels.get(row["key"], fallback(row["key"])),
+            value=int(row["value"]),
+        )
+        for row in rows
+    )
+
+
+def _source_appid_filter(appid: str) -> Q:
+    """Include pre-attribution records in the original game's report scope."""
+    app_filter = Q(source_appid=appid)
+    if appid == "wx6d2454a8afcd9706":
+        app_filter |= Q(source_appid="")
+    return app_filter
+
+
+def build_live_operations_analysis(
+    start_day: date, end_day: date, appid: str
+) -> LiveOperationsAnalysis:
+    """Aggregate one game's current range data without persisting analysis output."""
+    start, end = analysis_datetime_range(start_day, end_day)
+    candidates = CandidatePost.objects.filter(
+        created_at__gte=start,
+        created_at__lt=end,
+    ).filter(_source_appid_filter(appid))
+    posts = OriginalPost.objects.filter(
+        publish_time__gte=start,
+        publish_time__lt=end,
+    ).filter(_source_appid_filter(appid))
+    latest_snapshot = InteractionSnapshot.objects.filter(post_id=OuterRef("pk")).order_by(
+        "-captured_at", "-pk"
+    )
+    posts_with_metrics = posts.annotate(
+        latest_view_count=Subquery(latest_snapshot.values("view_count")[:1]),
+        latest_love_count=Subquery(latest_snapshot.values("love_count")[:1]),
+        latest_reply_count=Subquery(latest_snapshot.values("reply_count")[:1]),
+        latest_share_count=Subquery(latest_snapshot.values("share_count")[:1]),
+    )
+    interaction_totals = posts_with_metrics.aggregate(
+        views=Sum(Coalesce("latest_view_count", Value(0), output_field=IntegerField())),
+        loves=Sum(Coalesce("latest_love_count", Value(0), output_field=IntegerField())),
+        replies=Sum(Coalesce("latest_reply_count", Value(0), output_field=IntegerField())),
+        shares=Sum(Coalesce("latest_share_count", Value(0), output_field=IntegerField())),
+    )
+    post_ids = posts.values_list("pk", flat=True)
+    review_tasks = ReviewTask.objects.filter(post_id__in=post_ids)
+    assessed_tasks = review_tasks.filter(assessment__isnull=False)
+    assessment_ids = assessed_tasks.values_list("assessment_id", flat=True)
+    category_rows = (
+        assessed_tasks.values("assessment__category")
+        .annotate(key=F("assessment__category"), value=Count("pk"))
+        .order_by("key")
+    )
+    risk_rows = (
+        RiskEvidence.objects.filter(assessment_id__in=assessment_ids)
+        .values("label")
+        .annotate(key=F("label"), value=Count("pk"))
+        .order_by("key")
+    )
+    action_rows = (
+        review_tasks.exclude(final_action="")
+        .values("final_action")
+        .annotate(key=F("final_action"), value=Count("pk"))
+        .order_by("key")
+    )
+    metrics = {
+        "candidate_count": candidates.count(),
+        "original_count": posts.count(),
+        "forward_excluded_count": candidates.filter(origin_type=OriginType.FORWARD).count(),
+        "pending_count": candidates.filter(
+            origin_type=OriginType.CLASSIFICATION_PENDING
+        ).count(),
+        "views": int(interaction_totals["views"] or 0),
+        "loves": int(interaction_totals["loves"] or 0),
+        "replies": int(interaction_totals["replies"] or 0),
+        "shares": int(interaction_totals["shares"] or 0),
+        "assessment_count": assessed_tasks.count(),
+        "review_pending": review_tasks.filter(status=ReviewStatus.PENDING).count(),
+        "reviewed_count": review_tasks.filter(status=ReviewStatus.REVIEWED).count(),
+        "reply_draft_count": posts.filter(reply_draft__isnull=False).count(),
+        "reply_adopted_count": posts.filter(reply_draft__adopted=True).count(),
+    }
+    return LiveOperationsAnalysis(
+        start_date=start_day,
+        end_date=end_day,
+        source_appid=appid,
+        metrics=metrics,
+        categories=_labelled_rows(category_rows, dict(ContentCategory.choices), lambda key: key),
+        risks=_labelled_rows(risk_rows, {}, risk_label_display),
+        final_actions=_labelled_rows(
+            action_rows, dict(RecommendedAction.choices), lambda key: key
+        ),
+    )

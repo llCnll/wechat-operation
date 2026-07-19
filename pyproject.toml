@@ -1,0 +1,33 @@
+[project]
+name = "wechat-content-operations"
+version = "0.1.0"
+description = "微信游戏圈内容运营服务"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "Django>=5.2,<5.3",
+    "httpx>=0.28,<0.29",
+    "pydantic-settings>=2.10,<3",
+    "websockets>=16.1.1",
+    "whitenoise>=6.12.0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.4,<9",
+    "pytest-django>=4.11,<5",
+    "ruff>=0.12,<0.13",
+]
+
+[tool.pytest.ini_options]
+DJANGO_SETTINGS_MODULE = "config.settings"
+python_files = ["test_*.py", "*_tests.py"]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+extend-exclude = [".venv", "**/migrations/*.py"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]

@@ -1,0 +1,30 @@
+{% extends "admin/base_site.html" %}
+{% block content %}
+<h1>确认{% if action == "BLOCK" %}屏蔽{% elif action == "MUTE" %}禁言作者{% elif action == "RESTORE" %}恢复正常{% else %}沉底{% endif %}</h1>
+<p>帖子 ID：{{ task.post.topic_id }}</p>
+<p>系统会重新核验原创状态、读取操作前后状态并创建审计记录。未同时开启全局和本操作开关时不会发送请求。</p>
+<form method="post">{% csrf_token %}
+  <input type="hidden" name="confirmation_key" value="{{ confirmation_key }}">
+  <label for="reason">业务原因</label><br>
+  <textarea id="reason" name="reason" rows="4" cols="60" required></textarea><br><br>
+  {% if action == "BLOCK" or action == "MUTE" %}
+    <fieldset>
+      <legend>屏蔽原因（可多选）</legend>
+      {% for code, label in block_reasons %}
+        <label><input type="checkbox" name="block_reason" value="{{ code }}"> {{ label }}</label><br>
+      {% endfor %}
+    </fieldset><br>
+  {% endif %}
+  {% if action == "MUTE" %}
+    <fieldset>
+      <legend>禁言期限</legend>
+      {% for days, label in mute_durations %}
+        <label><input type="radio" name="mute_days" value="{{ days }}" required> {{ label }}</label><br>
+      {% endfor %}
+    </fieldset><br>
+  {% endif %}
+  <label><input type="checkbox" name="confirmed" value="yes" required> 我确认该处置将影响原平台帖子状态。</label><br><br>
+  <button type="submit" class="default">确认{% if action == "BLOCK" %}屏蔽{% elif action == "MUTE" %}禁言{% elif action == "RESTORE" %}恢复正常{% else %}沉底{% endif %}</button>
+  <a href="{% url 'admin:reviews_reviewtask_change' task.pk %}">取消</a>
+</form>
+{% endblock %}

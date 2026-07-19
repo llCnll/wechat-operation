@@ -1,0 +1,27 @@
+<details class="reply-draft-card">
+  <summary>
+    <span>回复建议</span>
+    <small>{% if selected_post.reply_draft.adopted %}已标记本地采纳{% else %}仅本地，未发布{% endif %}</small>
+  </summary>
+  <div class="reply-draft-body">
+    <p class="reply-draft-notice">仅供运营准备回复，不会发送或发布到原平台。</p>
+    <dl class="reply-draft-context">
+      <div><dt>用户诉求</dt><dd>{{ selected_post.reply_draft.intent_summary|default:"未提供" }}</dd></div>
+      {% if selected_post.reply_draft.missing_information %}<div><dt>待补充信息</dt><dd>{% for item in selected_post.reply_draft.missing_information %}<span>{{ item }}</span>{% endfor %}</dd></div>{% endif %}
+      {% if selected_post.reply_draft.knowledge_sources %}<div><dt>参考来源</dt><dd>{% for item in selected_post.reply_draft.knowledge_sources %}<span>{{ item }}</span>{% endfor %}</dd></div>{% endif %}
+      {% if selected_post.reply_draft.risk_notice %}<div class="reply-risk-notice"><dt>风险提示</dt><dd>{{ selected_post.reply_draft.risk_notice }}</dd></div>{% endif %}
+    </dl>
+    <form method="post" action="{% url 'save-dashboard-reply-draft' selected_post.topic_id %}" class="reply-draft-form">
+      {% csrf_token %}
+      <input type="hidden" name="return_query" value="{{ return_query }}">
+      <label for="reply-draft-text">建议回复</label>
+      <textarea id="reply-draft-text" name="draft" rows="6" maxlength="4000" required>{{ selected_post.reply_draft.draft }}</textarea>
+      <div class="reply-draft-actions">
+        <button type="button" class="reply-copy" data-copy-reply-draft data-copy-target="reply-draft-text">复制文本</button>
+        <span class="reply-copy-status" aria-live="polite"></span>
+        <button type="submit" name="action" value="save">保存草案</button>
+        {% if not selected_post.reply_draft.adopted %}<button type="submit" name="action" value="adopt" class="reply-adopt">标记本地已采纳</button>{% else %}<span class="reply-adopted">已标记本地采纳{% if selected_post.reply_draft.adopted_with_edits %}（已修改）{% endif %}</span>{% endif %}
+      </div>
+    </form>
+  </div>
+</details>

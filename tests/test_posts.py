@@ -1,0 +1,239 @@
+import pytest
+from django.db import connection
+
+from jobs.adapters import SourceBusinessDeletedError
+from posts.models import (
+    POST_STATUS_BLOCKED,
+    POST_STATUS_DELETED,
+    POST_STATUS_NORMAL,
+    POST_STATUS_SUNK,
+    CandidatePost,
+    InteractionSnapshot,
+    MediaType,
+    OriginalPost,
+    OriginType,
+    PostMedia,
+    is_post_deleted,
+    mark_post_deleted,
+    normalize_post_status,
+)
+from posts.services import classify_content_card, refresh_original_post, store_post_metrics
+
+
+@pytest.mark.parametrize(
+    ("status", "expected"),
+    (
+        (None, POST_STATUS_DELETED),
+        (POST_STATUS_NORMAL, POST_STATUS_DELETED),
+        (POST_STATUS_BLOCKED, POST_STATUS_BLOCKED | POST_STATUS_DELETED),
+        (POST_STATUS_SUNK, POST_STATUS_SUNK | POST_STATUS_DELETED),
+        (
+            POST_STATUS_BLOCKED | POST_STATUS_SUNK,
+            POST_STATUS_BLOCKED | POST_STATUS_SUNK | POST_STATUS_DELETED,
+        ),
+    ),
+)
+def test_business_deletion_preserves_only_moderation_status_bits(status, expected):
+    assert mark_post_deleted(status) == expected
+
+
+@pytest.mark.parametrize(("value", "expected"), ((None, 2), ("", 2), ("8", 8), (16, 16)))
+def test_missing_or_invalid_upstream_status_uses_normal_base(value, expected):
+    assert normalize_post_status(value) == expected
+
+
+@pytest.mark.django_db
+def test_forward_card_is_excluded_without_original_post():
+    candidate = CandidatePost.objects.create(topic_id=1, content_id="forward")
+    assert classify_content_card(candidate, {"forward_topic_info": {"source_topic_id": 9}}) is None
+    candidate.refresh_from_db()
+    assert candidate.origin_type == OriginType.FORWARD
+    assert not OriginalPost.objects.exists()
+
+
+@pytest.mark.django_db
+def test_original_card_is_normalized():
+    candidate = CandidatePost.objects.create(
+        topic_id=2, content_id="original", source_appid="wx-game"
+    )
+    post = classify_content_card(
+        candidate,
+        {
+            "base_content": {
+                "title": "标题",
+                "content": "<p>正文<br>话题</p>",
+                "image_list": [{"url": "https://example.test/a.png", "width": 10, "height": 20}],
+            },
+            "reply_info": {"total_reply_count": 2},
+            "love_info": {"total_love_count": 3},
+            "share_info": {"total_share_count": 4},
+        },
+    )
+    assert post is not None
+    assert post.content_text == "正文\n话题"
+    assert post.status == POST_STATUS_NORMAL
+    candidate.refresh_from_db()
+    assert candidate.origin_type == OriginType.ORIGINAL
+    assert PostMedia.objects.filter(post=post).count() == 1
+    assert InteractionSnapshot.objects.get(post=post).love_count == 3
+
+
+@pytest.mark.django_db
+def test_video_attachment_is_projected_as_allowed_media():
+    candidate = CandidatePost.objects.create(topic_id=3, content_id="video", source_appid="wx-game")
+    post = classify_content_card(
+        candidate,
+        {
+            "base_content": {
+                "content": "视频帖子",
+                "video_info": [
+                    {"url": "https://example.test/post.mp4", "width": 1280, "height": 720}
+                ],
+            }
+        },
+    )
+    assert post is not None
+    media = PostMedia.objects.get(post=post)
+    assert media.media_type == MediaType.VIDEO
+
+
+@pytest.mark.django_db
+def test_ballot_title_and_option_text_are_normalized_for_review():
+    candidate = CandidatePost.objects.create(
+        topic_id=4, content_id="ballot", source_appid="wx-game"
+    )
+    post = classify_content_card(
+        candidate,
+        {
+            "base_content": {
+                "content": "普通正文",
+                "ballot_info_list": [
+                    {
+                        "content_id": "poll-id-must-not-be-saved",
+                        "title": "穿梭（竖着看第一个字）",
+                        "option_item_list": [
+                            {"content_id": "option-id-1", "text": "卫 护山河岁月长"},
+                            {"content_id": "option-id-2", "text": "收 藏万象入华章"},
+                        ],
+                    }
+                ],
+            }
+        },
+    )
+
+    assert post is not None
+    assert post.ballot_text == (
+        "投票 1：穿梭（竖着看第一个字）\n"
+        "选项 1：卫 护山河岁月长\n"
+        "选项 2：收 藏万象入华章"
+    )
+    assert "poll-id-must-not-be-saved" not in post.ballot_text
+    assert "option-id-1" not in post.ballot_text
+
+
+@pytest.mark.django_db
+def test_base_info_card_is_normalized():
+    candidate = CandidatePost.objects.create(
+        topic_id=10, content_id="content-10", source_appid="game"
+    )
+    post = classify_content_card(
+        candidate,
+        {
+            "base_info": {
+                "publish_time": 1,
+                "base_content": {"title": "标题", "content": "<p>正文</p>"},
+                "reply_info": {"total_reply_count": 2},
+            }
+        },
+    )
+    candidate.refresh_from_db()
+    assert post is not None
+    assert post.content_text == "正文"
+    assert post.publish_time is not None
+    assert candidate.origin_type == OriginType.ORIGINAL
+
+
+@pytest.mark.django_db
+def test_metrics_snapshot_discards_reply_payloads():
+    post = OriginalPost.objects.create(topic_id=11, content_id="content-11")
+    snapshot = store_post_metrics(
+        post,
+        {
+            "data": {
+                "topic": {"view_count": 12, "reply_count": 3, "love_count": 4},
+                "reply_list": [{"content": "不应保存"}],
+                "child_reply_list": [{"content": "不应保存"}],
+            }
+        },
+    )
+    assert snapshot.view_count == 12
+    assert snapshot.reply_count == 3
+    assert snapshot.love_count == 4
+
+
+@pytest.mark.django_db(transaction=True)
+def test_management_detail_deletion_marks_post_and_refreshes_cached_content():
+    post = OriginalPost.objects.create(
+        topic_id=12,
+        content_id="content-12",
+        content_text="历史缓存内容",
+        source_appid="wx-game",
+        status=POST_STATUS_SUNK,
+    )
+
+    class Source:
+        def get_post_metrics(self, topic_id):
+            assert topic_id == 12
+            assert not connection.in_atomic_block
+            raise SourceBusinessDeletedError("原平台帖子已从管理队列删除")
+
+        def get_content_card(self, content_id):
+            assert content_id == "content-12"
+            assert not connection.in_atomic_block
+            return {
+                "data": {
+                    "content_card": {
+                        "base_content": {
+                            "content": "更新后的历史内容",
+                            "ballot_info_list": [
+                                {
+                                    "title": "竖着看首字",
+                                    "option_item_list": [{"text": "卫 护山河岁月长"}],
+                                }
+                            ],
+                        }
+                    }
+                }
+            }
+
+    refreshed = refresh_original_post(Source(), post)
+
+    assert refreshed.status == POST_STATUS_SUNK | POST_STATUS_DELETED
+    assert is_post_deleted(refreshed.status)
+    assert refreshed.content_text == "更新后的历史内容"
+    assert "竖着看首字" in refreshed.ballot_text
+    assert "卫 护山河岁月长" in refreshed.ballot_text
+
+
+@pytest.mark.django_db
+def test_management_detail_recovery_clears_local_deletion_bit():
+    post = OriginalPost.objects.create(
+        topic_id=13,
+        content_id="content-13",
+        source_appid="wx-game",
+        status=POST_STATUS_SUNK | POST_STATUS_DELETED,
+    )
+
+    class Source:
+        def get_post_metrics(self, topic_id):
+            assert topic_id == 13
+            return {"data": {"topic": {"view_count": 2, "status": POST_STATUS_BLOCKED}}}
+
+        def get_content_card(self, content_id):
+            assert content_id == "content-13"
+            return {"data": {"content_card": {"base_content": {"content": "恢复可见", "status": 8}}}}
+
+    refreshed = refresh_original_post(Source(), post)
+
+    assert refreshed.status == POST_STATUS_BLOCKED
+    assert not is_post_deleted(refreshed.status)

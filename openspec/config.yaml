@@ -1,0 +1,28 @@
+schema: spec-driven
+
+# Project context (optional)
+# This is shown to AI when creating artifacts.
+# Add your tech stack, conventions, style guides, domain knowledge, etc.
+# Example:
+#   context: |
+#     Tech stack: TypeScript, React, Node.js
+#     We use conventional commits
+#     Domain: e-commerce platform
+
+# Per-artifact rules (optional)
+# Add custom rules for specific artifacts.
+# Example:
+#   rules:
+#     proposal:
+#       - Keep proposals under 500 words
+#       - Always include a "Non-goals" section
+#     tasks:
+#       - Break tasks into chunks of max 2 hours
+context: |
+  语言：中文（简体）
+  所有产出物必须用简体中文撰写。
+  文件格式：UTF-8
+  spec 组织原则：所有 spec 放在仓库根目录的 /openspec 下统一管理，不放到各端子项目内部。
+  specs 划分原则：按能力划分，不按平台划分。
+  实现组织原则：代码按平台和服务划分，平台内可再按能力组织实现。
+  发版原则：按交付物发版，不按能力发版；能力用于需求、设计和任务拆分。
