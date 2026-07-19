@@ -1,0 +1,14 @@
+{% extends "admin/base.html" %}
+{% load static %}
+
+{% block title %}{% if subtitle %}{{ subtitle }} | {% endif %}{{ title }} | 系统配置{% endblock %}
+
+{% block extrastyle %}{% get_static_prefix as STATIC_PREFIX %}{{ block.super }}<link rel="stylesheet" href="{{ STATIC_PREFIX }}posts/operations.css"><link rel="stylesheet" href="{{ STATIC_PREFIX }}posts/admin_console.css">{% endblock %}
+
+{% block header %}
+{% include "posts/includes/topbar.html" %}
+{% endblock %}
+
+{% block extrabody %}
+{% include "posts/includes/cdp_login_status_script.html" %}
+{% endblock %}

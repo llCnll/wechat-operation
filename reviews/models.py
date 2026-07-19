@@ -68,12 +68,20 @@ class OcrExtraction(models.Model):
     error_summary = models.CharField(max_length=500, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
+    class Meta:
+        verbose_name = "OCR 提取"
+        verbose_name_plural = "OCR 提取"
+
 
 class PolicyVersion(models.Model):
     name = models.CharField(max_length=100, unique=True)
     version = models.CharField(max_length=100)
     is_active = models.BooleanField(default=False)
     created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name = "审核策略版本"
+        verbose_name_plural = "审核策略版本"
 
 
 class PolicyRule(models.Model):
@@ -86,6 +94,10 @@ class PolicyRule(models.Model):
     priority = models.PositiveSmallIntegerField(default=50)
     exceptions = models.JSONField(default=list, blank=True)
     enabled = models.BooleanField(default=True)
+
+    class Meta:
+        verbose_name = "审核策略规则"
+        verbose_name_plural = "审核策略规则"
 
 
 class AiAssessment(models.Model):
@@ -105,6 +117,10 @@ class AiAssessment(models.Model):
     raw_error_summary = models.CharField(max_length=500, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
+    class Meta:
+        verbose_name = "AI 评估"
+        verbose_name_plural = "AI 评估"
+
 
 class RiskEvidence(models.Model):
     assessment = models.ForeignKey(
@@ -113,6 +129,10 @@ class RiskEvidence(models.Model):
     label = models.CharField(max_length=100)
     confidence = models.FloatField()
     evidence = models.JSONField(default=list)
+
+    class Meta:
+        verbose_name = "风险证据"
+        verbose_name_plural = "风险证据"
 
 
 class ReviewTask(models.Model):
@@ -133,6 +153,10 @@ class ReviewTask(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
+    class Meta:
+        verbose_name = "人工审核任务"
+        verbose_name_plural = "人工审核任务"
+
 
 class ReplyDraft(models.Model):
     post = models.OneToOneField(OriginalPost, on_delete=models.CASCADE, related_name="reply_draft")
@@ -146,6 +170,10 @@ class ReplyDraft(models.Model):
     adopted_with_edits = models.BooleanField(default=False)
     suppressed_reason = models.CharField(max_length=500, blank=True)
     updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = "回复草案"
+        verbose_name_plural = "回复草案"
 
 
 class OperationAudit(models.Model):
@@ -164,3 +192,7 @@ class OperationAudit(models.Model):
     executor = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, on_delete=models.SET_NULL)
     executed_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name = "上游操作审计"
+        verbose_name_plural = "上游操作审计"

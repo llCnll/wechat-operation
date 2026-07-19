@@ -1,0 +1,30 @@
+<script>
+  (() => {
+    const indicator = document.querySelector("[data-cdp-login-status]");
+    const label = document.querySelector("[data-cdp-login-label]");
+    const button = indicator?.querySelector("button");
+    if (!indicator || !label || !button) return;
+    const update = async () => {
+      try {
+        const response = await fetch("{% url 'browser-login-status' %}", {cache: "no-store"});
+        const status = await response.json();
+        const valid = response.ok && status.valid === true;
+        indicator.classList.toggle("is-valid", valid);
+        indicator.classList.toggle("is-invalid", !valid);
+        indicator.classList.remove("is-checking");
+        button.disabled = valid;
+        label.textContent = valid ? "已登录" : "未登录，去登录";
+        indicator.title = status.reason || (valid ? "受控 Chrome 登录态有效" : "受控 Chrome 登录态无效");
+      } catch (_) {
+        indicator.classList.remove("is-checking", "is-valid");
+        indicator.classList.add("is-invalid");
+        button.disabled = false;
+        label.textContent = "不可用，去登录";
+        indicator.title = "点击后仅会尝试在受控 Chrome 打开固定登录页";
+      }
+    };
+    update();
+    window.setInterval(update, 30000);
+    window.addEventListener("focus", update);
+  })();
+</script>

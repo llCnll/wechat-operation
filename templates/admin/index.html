@@ -1,0 +1,106 @@
+{% extends "admin/base_site.html" %}
+
+{% block bodyclass %}{{ block.super }} dashboard configuration-dashboard{% endblock %}
+{% block nav-breadcrumbs %}{% endblock %}
+{% block content_title %}{% endblock %}
+
+{% block content %}
+<section class="console-hero console-hero-compact">
+  <div>
+    <p>SYSTEM CONFIGURATION</p>
+    <h1>系统配置与追溯台</h1>
+    <span>维护审核策略与受控游戏目录；采集、审核、AI 和操作记录只用于追溯核验。</span>
+  </div>
+</section>
+
+<section class="console-section">
+  <div class="console-section-heading">
+    <div><p>CONFIGURATION</p><h2>核心配置</h2></div>
+    <span>仅此区域允许编辑</span>
+  </div>
+  <div class="console-config-grid">
+    <article class="console-card accent console-policy-card {{ admin_console.policy_status.tone }}">
+      <span>审核策略</span>
+      {% if admin_console.active_policy %}
+      <strong>{{ admin_console.active_policy.name }} · {{ admin_console.active_policy.version }}</strong>
+      {% else %}
+      <strong>{{ admin_console.policy_status.label }}</strong>
+      {% endif %}
+      <small>{{ admin_console.policy_status.description }}</small>
+      <div class="console-card-actions">
+        <a href="{% url 'admin:reviews_policyversion_changelist' %}">管理版本</a>
+        <a href="{% url 'admin:reviews_policyrule_changelist' %}">编辑规则</a>
+      </div>
+    </article>
+    <article class="console-card sync console-game-card">
+      <span>受控同步</span>
+      <strong>可管理游戏</strong>
+      <small>{{ admin_console.managed_game_count }} 个本地目录{% if admin_console.last_game_sync_at %} · 最近同步 {{ admin_console.last_game_sync_at|date:"m-d H:i" }}{% else %} · 尚未同步{% endif %}</small>
+      <a class="console-card-link" href="{% url 'admin:posts_managedgame_changelist' %}">查看并同步目录</a>
+    </article>
+  </div>
+  {% if admin_console.active_policy_rules %}
+  <details class="console-policy-rules">
+    <summary class="console-policy-rules-summary">
+      <div>
+        <p>ACTIVE RULES</p>
+        <h3>当前生效规则 · {{ admin_console.active_policy_rules|length }} 条</h3>
+        <span>风险达到对应置信度阈值时，提供人工审核处置建议。</span>
+      </div>
+      <span class="console-policy-disclosure" data-open="收起规则" data-closed="查看规则">查看规则</span>
+    </summary>
+    <div class="console-policy-rule-grid" aria-label="当前生效规则明细">
+      {% for rule in admin_console.active_policy_rules %}
+      <article class="console-policy-rule">
+        <div class="console-policy-rule-title">
+          <strong>{{ rule.risk_label }}</strong>
+          <span class="console-rule-action is-{{ rule.action_code }}">{{ rule.recommended_action }}</span>
+        </div>
+        <dl>
+          <div><dt>最低置信度</dt><dd>{{ rule.min_confidence }}</dd></div>
+          <div><dt>优先级</dt><dd><span class="console-rule-priority">{{ rule.priority }}</span></dd></div>
+        </dl>
+      </article>
+      {% endfor %}
+    </div>
+  </details>
+  {% endif %}
+</section>
+
+<section class="console-section">
+  <div class="console-section-heading">
+    <div><p>RUNTIME HEALTH</p><h2>运行健康</h2></div>
+    <span>只读概览，不在此处执行任务</span>
+  </div>
+  <div class="console-health-grid">
+    <a class="console-health-card" href="{% url 'admin:jobs_backgroundjob_changelist' %}?status__exact=PENDING">
+      <span>待执行任务</span><strong>{{ admin_console.pending_job_count }}</strong><small>等待对应 Worker 认领</small>
+    </a>
+    <a class="console-health-card is-running" href="{% url 'admin:jobs_backgroundjob_changelist' %}?status__exact=RUNNING">
+      <span>执行中任务</span><strong>{{ admin_console.running_job_count }}</strong><small>由 Worker 正在处理</small>
+    </a>
+    <a class="console-health-card {% if admin_console.failed_job_count %}is-alert{% endif %}" href="{% url 'admin:jobs_backgroundjob_changelist' %}?status__exact=FAILED">
+      <span>失败任务</span><strong>{{ admin_console.failed_job_count }}</strong><small>{% if admin_console.failed_job_count %}请查看脱敏错误摘要{% else %}当前没有失败任务{% endif %}</small>
+    </a>
+  </div>
+</section>
+
+<section class="console-section">
+  <div class="console-section-heading">
+    <div><p>READ ONLY TRACE</p><h2>数据追溯</h2></div>
+    <span>只读，不在此处执行审核或处置</span>
+  </div>
+  <div class="console-trace-grid">
+    <article class="console-trace-card">
+      <div><p>CONTENT RECORDS</p><h3>帖子与互动</h3><span>核验原创判定、正文、媒体、投票与互动快照。</span></div>
+      <div class="console-trace-links"><a href="{% url 'admin:posts_originalpost_changelist' %}">原创帖子</a><a href="{% url 'admin:posts_candidatepost_changelist' %}">候选帖子</a></div>
+      <div class="console-trace-secondary"><a href="{% url 'admin:posts_postmedia_changelist' %}">媒体</a><a href="{% url 'admin:posts_interactionsnapshot_changelist' %}">互动快照</a></div>
+    </article>
+    <article class="console-trace-card">
+      <div><p>REVIEW RECORDS</p><h3>审核与模型</h3><span>优先核验人工审核与处置留痕，再按需查看模型判定细节。</span></div>
+      <div class="console-trace-links"><a href="{% url 'admin:reviews_reviewtask_changelist' %}">人工审核</a><a href="{% url 'admin:reviews_operationaudit_changelist' %}">操作审计</a></div>
+      <div class="console-trace-secondary"><a href="{% url 'admin:reviews_aiassessment_changelist' %}">AI 评估</a><a href="{% url 'admin:reviews_ocrextraction_changelist' %}">OCR 提取</a><a href="{% url 'admin:reviews_riskevidence_changelist' %}">风险证据</a><a href="{% url 'admin:reviews_replydraft_changelist' %}">回复草案</a></div>
+    </article>
+  </div>
+</section>
+{% endblock %}

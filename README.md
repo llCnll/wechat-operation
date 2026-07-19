@@ -86,6 +86,7 @@ if (-not (Test-Path runtime/.env)) { Copy-Item .env.example runtime/.env }
 
 ```bash
 uv run python manage.py migrate
+uv run python manage.py ensure_default_policy
 uv run python manage.py collectstatic --noinput
 uv run python manage.py check
 ```

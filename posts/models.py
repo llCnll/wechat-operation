@@ -62,6 +62,8 @@ class ManagedGame(models.Model):
 
     class Meta:
         ordering = ("name", "appid")
+        verbose_name = "可管理游戏"
+        verbose_name_plural = "可管理游戏"
 
     def __str__(self) -> str:
         return f"{self.name} ({self.appid})"
@@ -79,6 +81,10 @@ class CandidatePost(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
+    class Meta:
+        verbose_name = "候选帖子"
+        verbose_name_plural = "候选帖子"
+
 
 class OriginalPost(models.Model):
     topic_id = models.BigIntegerField(unique=True)
@@ -94,6 +100,10 @@ class OriginalPost(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
+    class Meta:
+        verbose_name = "原创帖子"
+        verbose_name_plural = "原创帖子"
+
 
 class PostMedia(models.Model):
     post = models.ForeignKey(OriginalPost, on_delete=models.CASCADE, related_name="media")
@@ -102,6 +112,10 @@ class PostMedia(models.Model):
     width = models.PositiveIntegerField(null=True, blank=True)
     height = models.PositiveIntegerField(null=True, blank=True)
     is_gif = models.BooleanField(default=False)
+
+    class Meta:
+        verbose_name = "帖子媒体"
+        verbose_name_plural = "帖子媒体"
 
 
 class InteractionSnapshot(models.Model):
@@ -114,3 +128,7 @@ class InteractionSnapshot(models.Model):
     love_count = models.PositiveBigIntegerField(default=0)
     share_count = models.PositiveBigIntegerField(default=0)
     source = models.CharField(max_length=64)
+
+    class Meta:
+        verbose_name = "互动快照"
+        verbose_name_plural = "互动快照"

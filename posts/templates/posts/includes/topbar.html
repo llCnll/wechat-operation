@@ -1,0 +1,14 @@
+<header id="header" class="topbar{% if request.resolver_match.namespace == 'admin' %} admin-topbar{% endif %}">
+  <a class="brand" href="{% url 'operations-dashboard' %}"><span>O</span> 游戏圈运营</a>
+  <nav aria-label="主导航">
+    <a {% if request.resolver_match.url_name == 'operations-dashboard' %}class="active"{% endif %} href="{% url 'operations-dashboard' %}">内容管理</a>
+    <a {% if request.resolver_match.url_name == 'live-operations-analysis' %}class="active"{% endif %} href="{% url 'live-operations-analysis' %}">运营分析</a>
+    <a {% if request.resolver_match.namespace == 'admin' %}class="active"{% endif %} href="{% url 'admin:index' %}">系统配置</a>
+  </nav>
+  {% if request.user.is_authenticated %}
+  <div class="topbar-actions">
+    <form class="cdp-login-status is-checking" data-cdp-login-status method="post" action="{% url 'open-controlled-login' %}" title="正在检查受控 Chrome 登录态">{% csrf_token %}<input type="hidden" name="return_to" value="{{ request.get_full_path }}"><button type="submit" disabled aria-live="polite"><span class="cdp-mode">CDP</span><i></i><b data-cdp-login-label>检测中</b></button></form>
+    <div class="account">{{ request.user.username }} <a href="{% url 'admin:logout' %}">退出</a></div>
+  </div>
+  {% endif %}
+</header>

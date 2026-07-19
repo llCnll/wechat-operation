@@ -30,10 +30,11 @@ def test_operations_dashboard_requires_login():
     assert "/admin/login/" in response.url
 
 
-def test_legacy_original_post_admin_url_redirects_to_operations_dashboard():
+@pytest.mark.django_db
+def test_original_post_admin_url_requires_authenticated_trace_access():
     response = Client().get("/admin/posts/originalpost/")
     assert response.status_code == 302
-    assert response.url == "/"
+    assert response.url.startswith("/admin/login/")
 
 
 @pytest.mark.django_db
@@ -214,6 +215,9 @@ def test_dashboard_keyboard_navigation_uses_real_query_separators_and_repairs_le
     )
 
     assert response.status_code == 200
+    page = response.content.decode()
+    assert 'id="post-workspace"' in page
+    assert 'const postWorkspaceAnchor="#post-workspace"' in page
     assert repaired.status_code == 302
     assert repaired.url == f"/?appid=wx6d2454a8afcd9706&sort=publish_time_desc&topic={first.topic_id}"
 

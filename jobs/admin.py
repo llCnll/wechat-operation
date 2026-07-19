@@ -1,12 +1,20 @@
 from django.contrib import admin
 
+from config.admin_support import ReadOnlyAdmin
+
 from .models import BackgroundJob
 
 
 @admin.register(BackgroundJob)
-class BackgroundJobAdmin(admin.ModelAdmin):
-    list_display = ("task_type", "status", "retry_count", "next_run_at", "updated_at")
+class BackgroundJobAdmin(ReadOnlyAdmin):
+    list_display = (
+        "task_type",
+        "status",
+        "retry_count",
+        "max_retries",
+        "next_run_at",
+        "updated_at",
+    )
     list_filter = ("status", "task_type")
-    search_fields = ("idempotency_key",)
-    readonly_fields = ("created_at", "updated_at", "started_at", "finished_at")
-
+    search_fields = ("idempotency_key", "error_summary")
+    date_hierarchy = "updated_at"

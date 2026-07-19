@@ -1,11 +1,15 @@
 from django.contrib import admin
 from django.http import JsonResponse
 from django.urls import path
-from django.views.generic import RedirectView
 
 from config.cdp import CdpUnavailableError, get_browser_login_status
 from posts import views as post_views
 from reporting import views as reporting_views
+
+admin.site.site_header = "游戏圈运营"
+admin.site.site_title = "系统配置"
+admin.site.index_title = "系统配置与追溯台"
+admin.site.enable_nav_sidebar = False
 
 
 def health_check(request):
@@ -58,10 +62,6 @@ urlpatterns = [
         "posts/<int:topic_id>/reply-draft/",
         post_views.save_dashboard_reply_draft,
         name="save-dashboard-reply-draft",
-    ),
-    path(
-        "admin/posts/originalpost/",
-        RedirectView.as_view(pattern_name="operations-dashboard", permanent=False),
     ),
     path("admin/", admin.site.urls),
 ]

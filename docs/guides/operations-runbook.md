@@ -45,6 +45,7 @@ Compress-Archive -Path $items.FullName -DestinationPath ../wechat-operation.zip 
 
 - `run_scheduler` 只创建任务，不认领业务任务；`run_ingestion_worker` 认领采集、状态巡检与范围互动刷新任务，`run_review_worker` 只认领 OCR/AI 任务；采集任务可从 checkpoint 继续。
 - 契约变更或会话失效会保留已脱敏错误摘要。修复后重新排队，不应修改数据库中的会话字段。
+- `/admin/` 仅用于系统配置与运行追溯：策略版本与策略规则可编辑，游戏目录只能通过受控 Chrome 同步；帖子、审核、AI/OCR、审计和后台任务不可手工修改。所有上游处置均从内容管理工作台执行，不能以 Admin 或直接修改数据库的方式绕过。
 
 ### 排障顺序
 
@@ -53,7 +54,7 @@ Compress-Archive -Path $items.FullName -DestinationPath ../wechat-operation.zip 
 | 没有新增帖子 | `/auth/status`、Scheduler 与采集 Worker 是否持续运行 | 恢复受控 Chrome 登录后重启对应进程；停机超过 30 分钟再补采窗口。 |
 | 顶部 `CDP` 状态胶囊为红色 | Chrome 是否以 `9222` 调试端口启动 | 已登录本系统的运营人员可点击红色胶囊，只在受控 Chrome 打开固定插件登录页后手动扫码；若提示 CDP 不可用，先启动受控 Chrome，绝不在工作台浏览器直接登录。 |
 | 任务长期 `PENDING` | 任务的 `task_type` 与对应 Worker | 启动正确的唯一 Worker，不要并行启动第二个同类 Worker。 |
-| 任务 `FAILED` | `Background jobs` 的脱敏 `error_summary` 与 checkpoint | 修复会话、配置或上游契约后重新入队；不要修改会话字段。 |
+| 任务 `FAILED` | 系统配置与追溯台“后台任务”的脱敏 `error_summary` 与 checkpoint | 修复会话、配置或上游契约后重新入队；不要修改会话字段。 |
 | AI/OCR 任务失败 | `runtime/.env` 中对应 `AI_*` 或 `OCR_*` 配置 | 修正配置并重启 AI Worker；已采集帖子数据不受影响。 |
 | 上游处置未执行 | 总开关、动作开关、会话与人工确认 | 确认批准配置后重启 Web，再由运营人员重新确认；不得通过 Worker 重试写操作。 |
 

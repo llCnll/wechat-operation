@@ -26,6 +26,8 @@ class BackgroundJob(models.Model):
 
     class Meta:
         indexes = [models.Index(fields=["status", "next_run_at"])]
+        verbose_name = "后台任务"
+        verbose_name_plural = "后台任务"
 
     def __str__(self) -> str:
         return f"{self.task_type}:{self.idempotency_key}"
