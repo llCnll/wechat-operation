@@ -6,7 +6,7 @@
 
 将下列内容直接交给接手项目的 Agent。它覆盖基础 Web 的首次启动；Chrome 登录、外部 AI/OCR/ASR 服务配置和 Worker 启用见后文的完整初始化流程。
 
-> 在项目根目录按 README 快速启动基础服务。先执行 `uv --version`。若未安装，macOS/Linux 执行 `curl -LsSf https://astral.sh/uv/install.sh | sh` 并将 `$HOME/.local/bin:$HOME/.cargo/bin` 加入 `PATH`；Windows PowerShell 执行 `powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"`，再执行 `$env:Path = "$env:USERPROFILE\.local\bin;$env:Path"`。运行 `uv sync --python 3.12 --all-groups`。macOS/Linux 执行 `mkdir -p runtime` 和 `[ -f runtime/.env ] || cp .env.example runtime/.env`；Windows PowerShell 执行 `New-Item -ItemType Directory -Force runtime | Out-Null`，再执行 `if (-not (Test-Path runtime/.env)) { Copy-Item .env.example runtime/.env }`。随后执行 `uv run python manage.py migrate`，在本机交互终端执行 `uv run python manage.py createsuperuser`，由操作者输入凭据，Agent 不得生成、读取或记录密码。最后运行 `uv run python -m service_supervisor`，以 `http://127.0.0.1:8000/healthz` 返回 `{"status": "ok"}` 为启动成功；后台入口为 `http://127.0.0.1:8000/admin/`。基础 Web 不依赖外部模型服务；AI 审核、图片/视频 OCR 和可选 ASR 均依赖部署方提供的兼容服务地址、密钥和模型，Agent 不得编造或替换这些凭据。需要采集与审核时，再按 README 启动独立 Chrome CDP、人工扫码登录，在后台 Pipeline 配置外部 AI/OCR（需要语音时再配置 ASR），然后启动 Scheduler、采集 Worker、AI Worker 和可选视频 Worker。
+> 在项目根目录按 README 快速启动基础服务。先执行 `uv --version`。若未安装，macOS/Linux 执行 `curl -LsSf https://astral.sh/uv/install.sh | sh` 并将 `$HOME/.local/bin:$HOME/.cargo/bin` 加入 `PATH`；Windows PowerShell 执行 `powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"`，再执行 `$env:Path = "$env:USERPROFILE\.local\bin;$env:Path"`。运行 `uv sync --python 3.12 --all-groups`。macOS/Linux 执行 `mkdir -p runtime` 和 `[ -f runtime/.env ] || cp .env.example runtime/.env`；Windows PowerShell 执行 `New-Item -ItemType Directory -Force runtime | Out-Null`，再执行 `if (-not (Test-Path runtime/.env)) { Copy-Item .env.example runtime/.env }`。随后执行 `uv run python manage.py migrate`，在本机交互终端执行 `uv run python manage.py createsuperuser`，由操作者输入凭据，Agent 不得生成、读取或记录密码。最后运行 `uv run python -m service_supervisor`，以 `http://127.0.0.1:8000/healthz` 返回 `{"status": "ok"}` 为启动成功；后台入口为 `http://127.0.0.1:8000/admin/`。基础 Web 不依赖外部模型服务或媒体工具；AI 审核、图片/视频 OCR 和可选 ASR 均依赖部署方提供的兼容服务地址、密钥和模型，Agent 不得编造或替换这些凭据。只有启用视频审核时才需安装本机 `ffmpeg`、`ffprobe` 与 OpenCV，并完成无 Cookie 读取预检。需要采集与审核时，再按 README 启动独立 Chrome CDP、人工扫码登录，在后台 Pipeline 配置外部 AI/OCR（需要语音时再配置 ASR），然后启动 Scheduler、采集 Worker、AI Worker 和可选视频 Worker。
 
 ## 文档导航
 
@@ -28,6 +28,7 @@
 - `uv` 是唯一需要预先可用的开发工具；项目要求 Python 3.12，`uv sync --python 3.12 --all-groups` 会下载受管解释器。
 - 需要真实使用工作台时，先创建一个本地 Django 管理员账号。该账号只用于本系统登录，不是微信账号，也不应使用或记录微信会话信息。
 - 本项目不内置 AI、OCR 或 ASR 模型服务。基础 Web 可在未配置它们时启动；要启用 AI 审核、图片/视频文字识别或语音转写，部署方必须提供相应的 OpenAI 兼容服务地址、访问密钥和模型名称，并确认其数据处理边界。
+- 视频审核还依赖本机 `ffmpeg`、`ffprobe` 和 OpenCV；它们不随 Python 依赖自动安装。仅在准备启用视频审核时，按[可选：视频审核](#可选视频审核)安装并完成受控样本预检。
 
 ## 完整初始化流程（Agent 执行清单）
 
