@@ -9,6 +9,19 @@
 {% include "posts/includes/topbar.html" %}
 {% endblock %}
 
+{% block messages %}
+{% if messages %}
+<ul class="console-feedback" aria-label="操作反馈" aria-live="polite">
+  {% for message in messages %}
+  <li class="console-feedback-item {{ message.tags|default:'info' }}">
+    <span>{{ message|capfirst }}</span>
+    <button type="button" class="console-feedback-dismiss" data-console-feedback-dismiss aria-label="关闭提示">关闭</button>
+  </li>
+  {% endfor %}
+</ul>
+{% endif %}
+{% endblock messages %}
+
 {% block extrabody %}
 {% include "posts/includes/cdp_login_status_script.html" %}
 <script>
@@ -41,6 +54,9 @@
     });
     document.querySelectorAll("[data-supervisor-log-close]").forEach((button) => {
       button.addEventListener("click", () => button.closest("dialog")?.close());
+    });
+    document.querySelectorAll("[data-console-feedback-dismiss]").forEach((button) => {
+      button.addEventListener("click", () => button.closest(".console-feedback-item")?.remove());
     });
     document.querySelectorAll(".console-config-dialog").forEach((dialog) => {
       dialog.addEventListener("click", (event) => {

@@ -2,6 +2,21 @@
 
 内部内容运营服务，负责原创帖子采集、AI 审核建议、人工确认处置和实时运营分析。
 
+## Agent 快速启动提示词
+
+将下列内容直接交给接手项目的 Agent。它覆盖基础 Web 的首次启动；Chrome 登录、AI/OCR 配置和 Worker 启用见后文的完整初始化流程。
+
+> 在项目根目录按 README 快速启动基础服务。先执行 `uv --version`。若未安装，macOS/Linux 执行 `curl -LsSf https://astral.sh/uv/install.sh | sh` 并将 `$HOME/.local/bin:$HOME/.cargo/bin` 加入 `PATH`；Windows PowerShell 执行 `powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"`，再执行 `$env:Path = "$env:USERPROFILE\.local\bin;$env:Path"`。运行 `uv sync --python 3.12 --all-groups`。macOS/Linux 执行 `mkdir -p runtime` 和 `[ -f runtime/.env ] || cp .env.example runtime/.env`；Windows PowerShell 执行 `New-Item -ItemType Directory -Force runtime | Out-Null`，再执行 `if (-not (Test-Path runtime/.env)) { Copy-Item .env.example runtime/.env }`。随后执行 `uv run python manage.py migrate`，在本机交互终端执行 `uv run python manage.py createsuperuser`，由操作者输入凭据，Agent 不得生成、读取或记录密码。最后运行 `uv run python -m service_supervisor`，以 `http://127.0.0.1:8000/healthz` 返回 `{"status": "ok"}` 为启动成功；后台入口为 `http://127.0.0.1:8000/admin/`。如需采集功能，再按 README 启动独立 Chrome CDP、人工扫码登录，并在后台 Pipeline 配置 AI/OCR 后启动 Scheduler、采集 Worker 和 AI Worker。
+
+## 文档导航
+
+| 目标 | 首先阅读 |
+| --- | --- |
+| 首次启动或 Agent 接手 | 本节提示词；需要完整能力时继续阅读[完整初始化流程](#完整初始化流程agent-执行清单)。 |
+| 日常运营与故障恢复 | [运行与恢复手册](docs/guides/operations-runbook.md)。 |
+| 了解系统、数据流与安全边界 | [系统总览](docs/guides/system-overview.md)。 |
+| 查找产品、技术或接口资料 | [文档中心](docs/README.md)。 |
+
 ## 系统总览
 
 运营主入口是内容管理台，而不是 Django Admin：左侧浏览原创帖子队列，右侧查看正文、投票、媒体、互动指标与当前状态，并在人工二次确认后执行受控处置。完整模块、数据流、交互和安全边界见[系统总览](docs/guides/system-overview.md)；全部文档见[文档中心](docs/README.md)。
@@ -13,7 +28,7 @@
 - `uv` 是唯一需要预先可用的开发工具；项目要求 Python 3.12，`uv sync --python 3.12 --all-groups` 会下载受管解释器。
 - 需要真实使用工作台时，先创建一个本地 Django 管理员账号。该账号只用于本系统登录，不是微信账号，也不应使用或记录微信会话信息。
 
-## 启动流程（Agent 执行清单）
+## 完整初始化流程（Agent 执行清单）
 
 所有命令均在项目根目录执行。终端只负责依赖安装、首次初始化、启动 Supervisor 和受控 Chrome；步骤 2 至 5 均在 `/admin/` 的“初始化与运行状态”完成。Web、帖子采集、状态巡检、OCR 和 AI 评估均可用；原平台写操作默认保持关闭，只有完成步骤 5 的显式审批配置后才可人工执行。清单不会覆盖已有 `runtime/.env`、数据库或其他运行数据。
 

@@ -119,6 +119,25 @@ def test_runtime_control_is_staff_only_and_uses_fixed_proxy(admin_client, monkey
 
 
 @pytest.mark.django_db
+def test_runtime_control_feedback_is_rendered_as_a_dismissible_console_toast(
+    admin_client, monkeypatch
+):
+    monkeypatch.setattr(
+        "config.supervisor_views.SupervisorClient.control", lambda _self, _service, _action: {}
+    )
+
+    response = admin_client.post(
+        "/admin/runtime/services/review/start/", {"return_to": "/admin/"}, follow=True
+    )
+
+    assert response.status_code == 200
+    page = response.content.decode()
+    assert 'class="console-feedback"' in page
+    assert "已提交 review 的 start 操作。" in page
+    assert "data-console-feedback-dismiss" in page
+
+
+@pytest.mark.django_db
 def test_runtime_log_route_uses_the_read_only_log_proxy(admin_client, monkeypatch):
     monkeypatch.setattr(
         "config.supervisor_views.SupervisorClient.logs",
