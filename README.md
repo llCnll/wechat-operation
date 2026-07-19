@@ -4,9 +4,9 @@
 
 ## Agent 快速启动提示词
 
-将下列内容直接交给接手项目的 Agent。它覆盖基础 Web 的首次启动；Chrome 登录、AI/OCR 配置和 Worker 启用见后文的完整初始化流程。
+将下列内容直接交给接手项目的 Agent。它覆盖基础 Web 的首次启动；Chrome 登录、外部 AI/OCR/ASR 服务配置和 Worker 启用见后文的完整初始化流程。
 
-> 在项目根目录按 README 快速启动基础服务。先执行 `uv --version`。若未安装，macOS/Linux 执行 `curl -LsSf https://astral.sh/uv/install.sh | sh` 并将 `$HOME/.local/bin:$HOME/.cargo/bin` 加入 `PATH`；Windows PowerShell 执行 `powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"`，再执行 `$env:Path = "$env:USERPROFILE\.local\bin;$env:Path"`。运行 `uv sync --python 3.12 --all-groups`。macOS/Linux 执行 `mkdir -p runtime` 和 `[ -f runtime/.env ] || cp .env.example runtime/.env`；Windows PowerShell 执行 `New-Item -ItemType Directory -Force runtime | Out-Null`，再执行 `if (-not (Test-Path runtime/.env)) { Copy-Item .env.example runtime/.env }`。随后执行 `uv run python manage.py migrate`，在本机交互终端执行 `uv run python manage.py createsuperuser`，由操作者输入凭据，Agent 不得生成、读取或记录密码。最后运行 `uv run python -m service_supervisor`，以 `http://127.0.0.1:8000/healthz` 返回 `{"status": "ok"}` 为启动成功；后台入口为 `http://127.0.0.1:8000/admin/`。如需采集功能，再按 README 启动独立 Chrome CDP、人工扫码登录，并在后台 Pipeline 配置 AI/OCR 后启动 Scheduler、采集 Worker 和 AI Worker。
+> 在项目根目录按 README 快速启动基础服务。先执行 `uv --version`。若未安装，macOS/Linux 执行 `curl -LsSf https://astral.sh/uv/install.sh | sh` 并将 `$HOME/.local/bin:$HOME/.cargo/bin` 加入 `PATH`；Windows PowerShell 执行 `powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"`，再执行 `$env:Path = "$env:USERPROFILE\.local\bin;$env:Path"`。运行 `uv sync --python 3.12 --all-groups`。macOS/Linux 执行 `mkdir -p runtime` 和 `[ -f runtime/.env ] || cp .env.example runtime/.env`；Windows PowerShell 执行 `New-Item -ItemType Directory -Force runtime | Out-Null`，再执行 `if (-not (Test-Path runtime/.env)) { Copy-Item .env.example runtime/.env }`。随后执行 `uv run python manage.py migrate`，在本机交互终端执行 `uv run python manage.py createsuperuser`，由操作者输入凭据，Agent 不得生成、读取或记录密码。最后运行 `uv run python -m service_supervisor`，以 `http://127.0.0.1:8000/healthz` 返回 `{"status": "ok"}` 为启动成功；后台入口为 `http://127.0.0.1:8000/admin/`。基础 Web 不依赖外部模型服务；AI 审核、图片/视频 OCR 和可选 ASR 均依赖部署方提供的兼容服务地址、密钥和模型，Agent 不得编造或替换这些凭据。需要采集与审核时，再按 README 启动独立 Chrome CDP、人工扫码登录，在后台 Pipeline 配置外部 AI/OCR（需要语音时再配置 ASR），然后启动 Scheduler、采集 Worker、AI Worker 和可选视频 Worker。
 
 ## 文档导航
 
@@ -27,6 +27,7 @@
 - Chrome DevTools Protocol（CDP）无需单独安装：它是 Chrome/Chromium 自带的调试协议。必须预先安装 Chrome 或 Chromium，并以 `--remote-debugging-port=9222` 启动独立浏览器进程；普通已运行的 Chrome 无法在启动后补加该端口。
 - `uv` 是唯一需要预先可用的开发工具；项目要求 Python 3.12，`uv sync --python 3.12 --all-groups` 会下载受管解释器。
 - 需要真实使用工作台时，先创建一个本地 Django 管理员账号。该账号只用于本系统登录，不是微信账号，也不应使用或记录微信会话信息。
+- 本项目不内置 AI、OCR 或 ASR 模型服务。基础 Web 可在未配置它们时启动；要启用 AI 审核、图片/视频文字识别或语音转写，部署方必须提供相应的 OpenAI 兼容服务地址、访问密钥和模型名称，并确认其数据处理边界。
 
 ## 完整初始化流程（Agent 执行清单）
 
@@ -141,11 +142,11 @@ Start-Process chrome.exe -ArgumentList '--remote-debugging-port=9222', "--user-d
 
 完成本步骤后登录 `http://127.0.0.1:8000/admin/`。后续步骤均从首页“初始化与运行状态”操作：配置 AI/OCR、打开固定登录页并扫码、启停 Scheduler 与 Worker、管理人工处置授权和查看日志。扫码动作仍由运营人员在受控 Chrome 中完成。
 
-### 2. 配置 AI 与 OCR
+### 2. 配置外部 AI、OCR 与可选 ASR 服务
 
-登录 `http://127.0.0.1:8000/admin/` 后，在首页顶部“初始化与运行状态”点击“配置 AI 审核”和“配置 OCR”。AI 审核必须填写服务地址、访问密钥和模型名称；图片 OCR 还需填写对应的 OCR 服务地址、访问密钥和模型名称。密钥只可写入、不会回显。
+登录 `http://127.0.0.1:8000/admin/` 后，在首页顶部“初始化与运行状态”点击“配置 AI 审核”和“配置 OCR”。这些服务由部署方提供，项目不会下载、代管或自动猜测任何服务地址、密钥或模型。AI 审核必须填写外部服务地址、访问密钥和模型名称；图片 OCR 还需填写对应的 OCR 服务地址、访问密钥和模型名称。视频审核复用 OCR 服务处理本地抽取的帧；如需语音转写，在“配置视频审核”中另行填写兼容 ASR 服务、密钥和模型并显式启用。密钥只可写入、不会回显。
 
-保存配置后按页面提示重启 AI 审核 Worker，使其加载新配置。`runtime/.env` 仅保留给无法进入后台时的运维恢复，不应作为日常配置入口；AI 永远不会自动执行处置。
+保存配置后按页面提示重启 AI 审核 Worker；修改视频或 ASR 配置后重启视频审核 Worker，使其加载新配置。`runtime/.env` 仅保留给无法进入后台时的运维恢复，不应作为日常配置入口；AI 永远不会自动执行处置。
 
 ### 3. CDP 扫码登录
 
