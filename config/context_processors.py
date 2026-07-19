@@ -1,13 +1,24 @@
 """Small, read-only context used by the system configuration homepage."""
 
+from importlib.util import find_spec
+
 from django.db.models import Max
 from django.utils import timezone
+from django.utils.dateparse import parse_datetime
 
 from config.cdp import CdpUnavailableError, get_browser_login_status
 from config.runtime_config import public_runtime_config
 from config.supervisor import SupervisorClient, SupervisorUnavailableError
+from reviews.video import media_tools_available
 
-MANAGED_SERVICE_NAMES = ("web", "scheduler", "ingestion", "backfill_ingestion", "review")
+MANAGED_SERVICE_NAMES = (
+    "web",
+    "scheduler",
+    "ingestion",
+    "backfill_ingestion",
+    "review",
+    "video_extraction",
+)
 
 
 def _pipeline_node(
@@ -113,6 +124,12 @@ def admin_console_overview(request):
         and runtime_config["ocr_api_key_configured"]
         and runtime_config["ocr_model"]
     )
+    video_tools_ready = bool(media_tools_available() and find_spec("cv2"))
+    video_ready = (
+        runtime_config["video_enabled"] == "true"
+        and runtime_config["video_preflight_verified"] == "true"
+        and video_tools_ready
+    )
     write_switches = tuple(
         (key, {"name": label, "enabled": runtime_config[key.lower()] == "true"})
         for key, label in (
@@ -125,6 +142,9 @@ def admin_console_overview(request):
         )
     )
     checked_at = timezone.now()
+    # This is intentionally ordered by operational data flow. Configuration nodes sit
+    # immediately before the worker that consumes them, rather than by implementation
+    # module, so the next setup action is understandable from the console.
     pipeline = [
         _pipeline_node(
             "web",
@@ -138,46 +158,6 @@ def admin_console_overview(request):
             description="由本机 Supervisor 托管，提供工作台、系统配置和本地控制代理。",
         ),
         _pipeline_node(
-            "policy",
-            "默认审核策略",
-            bool(enabled_rule_count),
-            "初始化或启用审核策略",
-            policy_status["description"],
-            checked_at,
-            description="为 AI 审核建议提供唯一启用策略和规则阈值。",
-        ),
-        _pipeline_node(
-            "ai",
-            "AI 审核配置",
-            ai_ready,
-            "填写 AI 服务配置",
-            "AI 服务地址、模型和密钥均已配置" if ai_ready else "AI 配置尚不完整",
-            checked_at,
-            description="用于帖子内容分类、风险识别和人工审核建议。",
-        ),
-        _pipeline_node(
-            "ocr",
-            "OCR 配置（可选）",
-            ocr_ready,
-            "填写 OCR 服务配置",
-            "OCR 服务地址、模型和密钥均已配置" if ocr_ready else "未配置时跳过图片文字识别",
-            checked_at,
-            optional=True,
-            description="从图片中提取文字并纳入 AI 审核上下文；未配置不影响纯文本审核。",
-        ),
-        _pipeline_node(
-            "writes",
-            "人工处置授权（可选）",
-            runtime_config["enable_upstream_writes"] == "true",
-            "按需开启人工处置开关",
-            "人工处置总开关已开启"
-            if runtime_config["enable_upstream_writes"] == "true"
-            else "保持关闭，不会向上游执行处置",
-            checked_at,
-            optional=True,
-            description="仅授权人工确认后的沉底、屏蔽、禁言、解除禁言和恢复正常请求。",
-        ),
-        _pipeline_node(
             "cdp",
             "CDP 登录态",
             cdp_valid,
@@ -186,32 +166,18 @@ def admin_console_overview(request):
             checked_at,
             description="检查受控 Chrome 的微信插件会话；系统不保存 Cookie、令牌或二维码内容。",
         ),
-    ]
-    for service, label, description in (
-        (
+        _pipeline_node(
             "scheduler",
             "自动调度器",
-            "每 15 分钟创建采集和状态巡检任务；不读取微信，也不调用 AI。",
+            bool(services["scheduler"]["running"]),
+            "启动自动调度器",
+            _service_reason(services["scheduler"]),
+            checked_at,
+            service="scheduler",
+            running=bool(services["scheduler"]["running"]),
+            description="每 15 分钟创建采集和状态巡检任务；不读取微信，也不调用 AI。",
         ),
-        (
-            "review",
-            "AI 审核 Worker",
-            "执行图片 OCR 和 AI 评估任务；不创建任务，也不直接读取微信。",
-        ),
-    ):
-        pipeline.append(
-            _pipeline_node(
-                service,
-                label,
-                bool(services[service]["running"]),
-                f"启动{label}",
-                _service_reason(services[service]),
-                checked_at,
-                service=service,
-                running=bool(services[service]["running"]),
-                description=description,
-            )
-        )
+    ]
     ingestion_services = (
         (
             "ingestion",
@@ -234,8 +200,7 @@ def admin_console_overview(request):
         for service, label, description in ingestion_services
     )
     ingestion_ready = all(item["running"] for item in ingestion_subservices)
-    pipeline.insert(
-        -1,
+    pipeline.append(
         _pipeline_node(
             "ingestion",
             "帖子采集 Worker",
@@ -250,6 +215,80 @@ def admin_console_overview(request):
                 "人工补采 Worker 处理历史补采、互动刷新和旧任务。"
             ),
         ),
+    )
+    pipeline.extend(
+        (
+            _pipeline_node(
+                "ocr",
+                "OCR 配置（可选）",
+                ocr_ready,
+                "填写 OCR 服务配置",
+                "OCR 服务地址、模型和密钥均已配置" if ocr_ready else "未配置时跳过图片文字识别",
+                checked_at,
+                optional=True,
+                description="从图片中提取文字并纳入 AI 审核上下文；未配置不影响纯文本审核。",
+            ),
+            _pipeline_node(
+                "video_extraction",
+                "视频审核 Worker（可选）",
+                video_ready and bool(services["video_extraction"]["running"]),
+                "安装媒体工具、完成无凭据读取预检后启用",
+                (
+                    "视频提取 Worker 已运行"
+                    if video_ready and services["video_extraction"]["running"]
+                    else "默认关闭；需 ffmpeg、ffprobe、OpenCV 与已确认的受控样本预检"
+                ),
+                checked_at,
+                optional=True,
+                service="video_extraction",
+                running=bool(services["video_extraction"]["running"]),
+                description=(
+                    "本机抽帧并仅向 OCR/ASR 传帧或音频字节；"
+                    "不传视频 URL、Cookie 或二维码目标。"
+                ),
+            ),
+            _pipeline_node(
+                "ai",
+                "AI 审核配置",
+                ai_ready,
+                "填写 AI 服务配置",
+                "AI 服务地址、模型和密钥均已配置" if ai_ready else "AI 配置尚不完整",
+                checked_at,
+                description="用于帖子内容分类、风险识别和人工审核建议。",
+            ),
+            _pipeline_node(
+                "policy",
+                "默认审核策略",
+                bool(enabled_rule_count),
+                "初始化或启用审核策略",
+                policy_status["description"],
+                checked_at,
+                description="为 AI 审核建议提供唯一启用策略和规则阈值。",
+            ),
+            _pipeline_node(
+                "review",
+                "AI 审核 Worker",
+                bool(services["review"]["running"]),
+                "启动AI 审核 Worker",
+                _service_reason(services["review"]),
+                checked_at,
+                service="review",
+                running=bool(services["review"]["running"]),
+                description="消费图片 OCR、视频证据和 AI 评估任务；不创建任务，也不直接读取微信。",
+            ),
+            _pipeline_node(
+                "writes",
+                "人工处置授权（可选）",
+                runtime_config["enable_upstream_writes"] == "true",
+                "按需开启人工处置开关",
+                "人工处置总开关已开启"
+                if runtime_config["enable_upstream_writes"] == "true"
+                else "保持关闭，不会向上游执行处置",
+                checked_at,
+                optional=True,
+                description="仅授权人工确认后的沉底、屏蔽、禁言、解除禁言和恢复正常请求。",
+            ),
+        )
     )
     core_keys = {"web", "policy", "ai", "cdp", "scheduler", "ingestion", "review"}
     first_blocked = next(
@@ -282,9 +321,25 @@ def admin_console_overview(request):
 def _service_reason(service: dict) -> str:
     if service.get("running"):
         heartbeat = service.get("heartbeat_at")
-        state = f"运行中；最近心跳 {heartbeat}" if heartbeat else "运行中；尚未写入心跳"
+        state = (
+            f"运行中；最近心跳 {_display_heartbeat(heartbeat)}"
+            if heartbeat
+            else "运行中；尚未写入心跳"
+        )
     elif service.get("exit_code") is not None:
         state = f"未运行；最近退出码 {service['exit_code']}"
     else:
         state = "未运行；尚未启用"
     return state
+
+
+def _display_heartbeat(value: object) -> str:
+    """Present Supervisor's UTC timestamp in the operator's local time."""
+    if not isinstance(value, str):
+        return str(value)
+    parsed = parse_datetime(value)
+    if parsed is None:
+        return value
+    if timezone.is_naive(parsed):
+        parsed = timezone.make_aware(parsed, timezone.utc)
+    return timezone.localtime(parsed).strftime("%Y-%m-%d %H:%M:%S")

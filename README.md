@@ -163,6 +163,22 @@ Start-Process chrome.exe -ArgumentList '--remote-debugging-port=9222', "--user-d
 
 SQLite 部署中每类 Worker 只能运行一个实例。页面只能控制固定服务，不能执行任意命令；`run_scheduler`、`run_realtime_ingestion_worker`、`run_backfill_ingestion_worker` 和 `run_review_worker` 仅用于开发或故障诊断。`run_ingestion_worker` 保留为实时采集命令的兼容别名。
 
+### 可选：视频审核
+
+视频审核默认关闭。先安装本机 `ffmpeg`、`ffprobe` 和 OpenCV，再使用已获授权的真实视频样本验证“无 Cookie HTTPS 读取、重定向和临时文件清理”；预检失败不得启用，也不得回退到 CDP Cookie。随后在 Pipeline 的“视频审核 Worker”配置中设置 `VIDEO_ENABLED=true`（默认时长上限 30 秒，可提高至 60 秒）并启动该 Worker。
+
+macOS 12 Intel 没有当前 Homebrew FFmpeg bottle，`brew install ffmpeg` 会从源码构建。已验证可执行的替代方案是项目本地安装 Darwin x64 的 FFmpeg 4.1 与 ffprobe 4.0.2：
+
+```bash
+npm install --prefix runtime/video-tools @ffmpeg-installer/darwin-x64@4.1.0 ffprobe-static
+```
+
+程序优先使用系统 `PATH` 中的工具；仅当系统工具不存在时才使用上述 `runtime/video-tools` 路径。该目录被忽略，不提交二进制文件。安装后仍须完成受控样本预检，才可启用视频 Worker。系统配置首页的“视频审核 Worker”→“配置视频审核”可设置启用开关、预检确认、时长/字节/视频数量/分辨率/dHash/OCR 预算、各超时和 ASR 地址、模型、密钥、超时；密钥只可写入，不会回显。
+
+视频只在本机短生命周期目录中读取：开场和收尾每 250ms 抽帧、中段每秒抽帧，先本地检测二维码、再 dHash 去重。系统仅持久化带时间位置的 OCR/语音文本和固定的“检测到二维码”提示；不会保存原视频、帧、音频、完整视频 URL、Cookie 或二维码目标，也不会将它们传给 OCR、ASR 或 AI。
+
+当前部署明确关闭 `ASR_ENABLED`。这不会关闭视频审核：视频仍抽帧并执行二维码检测与 OCR；因为缺少语音来源，提取结果会以“部分完成”进入人工重点核验。待办：确认支持 `/audio/transcriptions` 的受控 ASR 模型与数据保留边界后，单独完成 ASR 成功链路验收，再启用 ASR。
+
 ### 启动完成判定
 
 完成步骤 0 至 4 后，应同时满足下表。未配置 AI/OCR 时，Web 与采集仍可工作，但对应评估任务会失败，不能视为完整启用。

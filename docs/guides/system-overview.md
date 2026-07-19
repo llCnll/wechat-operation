@@ -33,7 +33,7 @@ flowchart LR
 
 ## 运行架构与任务流
 
-日常只启动 Supervisor。它托管一个 Web、一个自动调度器、一个实时采集 Worker、一个人工补采 Worker 和一个 AI 审核 Worker；四个 Worker 职责严格分离。SQLite 部署不允许启动同一 Worker 职责的第二个实例。
+日常只启动 Supervisor。它托管一个 Web、一个自动调度器、一个实时采集 Worker、一个人工补采 Worker、一个 AI 审核 Worker 和一个可选视频提取 Worker；各 Worker 职责严格分离。SQLite 部署不允许启动同一 Worker 职责的第二个实例。
 
 ```mermaid
 flowchart LR
@@ -42,6 +42,7 @@ flowchart LR
   S --> RT[实时采集 Worker]
   S --> BF[人工补采 Worker]
   S --> REV[AI 审核 Worker]
+  S --> VID[视频提取 Worker]
 
   SCH -->|每 15 分钟创建| Q1[(SCHEDULED_INGEST_WINDOW)]
   SCH -->|每 15 分钟创建| Q2[(STATUS_SYNC)]
@@ -62,6 +63,10 @@ flowchart LR
   REV -->|消费| Q5
   REV -->|消费| Q6
   REV --> AI[OCR / AI 服务]
+  RT -->|原创视频入库后创建| Q7[(VIDEO_EXTRACT)]
+  BF -->|原创视频入库后创建| Q7
+  VID -->|消费| Q7
+  VID --> AI
 ```
 
 ### 进程角色
@@ -72,6 +77,7 @@ flowchart LR
 | 实时采集 Worker（Supervisor 服务 `ingestion`） | 1 | 消费自动采集与状态巡检任务；通过 CDP 读取微信并写入帖子、状态与互动快照；原创帖入库后创建 OCR/AI 任务。 | 不消费人工补采、范围互动刷新或旧采集任务；不调用 AI，不执行上游写处置。 |
 | 人工补采 Worker（Supervisor 服务 `backfill_ingestion`） | 1 | 消费人工历史补采、范围互动刷新和旧 `INGEST_WINDOW` 任务；复用相同的 CDP 分页与 checkpoint 逻辑。 | 不消费 Scheduler 创建的实时任务；不调用 AI，不执行上游写处置。 |
 | AI 审核 Worker（Supervisor 服务 `review`） | 1 | 串行消费 OCR 与 AI 评估任务，写入 OCR、风险证据、审核建议和本地草案。 | 不创建定时任务，不直接读取微信，不执行上游写处置。 |
+| 视频提取 Worker（Supervisor 服务 `video_extraction`） | 1 | 可选地消费 `VIDEO_EXTRACT`，在本机临时目录提取视频时间证据。 | 不使用 CDP Cookie，不保存视频/帧/音频，不向模型传视频 URL 或二维码目标。 |
 
 实时采集与人工补采各自串行处理所属任务。首次补采近几天数据或人工范围互动刷新耗时较长时，自动创建的 15 分钟采集和状态巡检仍由实时采集 Worker 独立处理；AI 审核 Worker 同样独立。调度器的同一时间桶使用幂等键复用任务，避免重复创建。旧 `INGEST_WINDOW` 因无法可靠判断来源，始终由人工补采 Worker 兼容消费。
 
@@ -86,6 +92,7 @@ flowchart LR
 | `INGEST_WINDOW` | 升级前历史存量。 | 人工补采 Worker | 兼容旧采集窗口及其已有 checkpoint；新代码不再创建此类型。 |
 | `OCR_EXTRACT` | 原创帖采集完成、单帖刷新、人工重新评估或诊断命令。 | AI 审核 Worker | 提取原创帖图片文字，供后续 AI 评估使用。 |
 | `AI_EVALUATE` | 与 `OCR_EXTRACT` 成对创建。 | AI 审核 Worker | 基于正文、投票和 OCR 输出分类、风险依据、置信度与人工审核建议；不自动执行处置。 |
+| `VIDEO_EXTRACT` | 启用视频审核后，原创帖的视频媒体。 | 视频提取 Worker | 受限 HTTPS 本地读取、抽帧二维码检测/OCR 和可选 ASR；失败不阻塞 AI，但要求人工重点核验。 |
 
 ## 系统配置与追溯台
 

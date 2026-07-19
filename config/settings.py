@@ -35,6 +35,22 @@ class RuntimeSettings(BaseSettings):
     ocr_base_url: str = ""
     ocr_api_key: str = ""
     ocr_model: str = ""
+    asr_base_url: str = ""
+    asr_api_key: str = ""
+    asr_model: str = ""
+    asr_timeout_seconds: float = Field(default=60, ge=1, le=300)
+    asr_enabled: bool = False
+    video_enabled: bool = False
+    video_preflight_verified: bool = False
+    video_max_bytes: int = Field(default=50 * 1024 * 1024, ge=1_048_576, le=200 * 1024 * 1024)
+    video_max_duration_seconds: int = Field(default=30, ge=1, le=60)
+    video_max_per_post: int = Field(default=3, ge=1, le=10)
+    video_max_frame_edge: int = Field(default=960, ge=240, le=1920)
+    video_dhash_threshold: int = Field(default=24, ge=0, le=32)
+    video_ocr_frame_budget: int = Field(default=60, ge=1, le=120)
+    video_connect_timeout_seconds: float = Field(default=10, ge=1, le=60)
+    video_read_timeout_seconds: float = Field(default=30, ge=1, le=180)
+    video_processing_timeout_seconds: float = Field(default=120, ge=10, le=600)
     enable_upstream_writes: bool = False
     enable_sink_writes: bool = False
     enable_block_writes: bool = False
@@ -133,11 +149,14 @@ SCHEDULED_INGESTION_PAGE_SIZE = runtime.scheduled_ingestion_page_size
 class SensitiveDataFilter(logging.Filter):
     """Replace sensitive tokens before a record is serialized by any handler."""
 
-    sensitive_terms = ("token=", "cookie", "authorization", "openid")
+    sensitive_terms = ("token=", "cookie", "authorization", "openid", "dis_k=", "dis_t=")
 
     def filter(self, record: logging.LogRecord) -> bool:
         message = record.getMessage()
-        if any(term in message.lower() for term in self.sensitive_terms):
+        if (
+            any(term in message.lower() for term in self.sensitive_terms)
+            or "http" in message.lower()
+        ):
             record.msg = "[已脱敏的日志消息]"
             record.args = ()
         return True

@@ -8,6 +8,10 @@ from django.utils import timezone
 from .models import BackgroundJob, JobStatus
 
 
+class JobDeferred(RuntimeError):
+    """A dependency is still running; reschedule without consuming a retry."""
+
+
 @dataclass(frozen=True)
 class EnqueueResult:
     """A persisted job plus whether this call created it."""
@@ -93,6 +97,15 @@ def fail_job(job: BackgroundJob, error_summary: str) -> None:
     job.save()
 
 
+def defer_job(job: BackgroundJob, reason: str, *, delay_seconds: int = 5) -> None:
+    """Release a job while its dependencies are active without treating it as a failure."""
+    job.status = JobStatus.PENDING
+    job.error_summary = reason[:500]
+    job.next_run_at = timezone.now() + timedelta(seconds=delay_seconds)
+    job.started_at = None
+    job.save(update_fields=["status", "error_summary", "next_run_at", "started_at", "updated_at"])
+
+
 def complete_job(job: BackgroundJob) -> None:
     job.status = JobStatus.SUCCEEDED
     job.error_summary = ""
@@ -122,6 +135,8 @@ def execute_next_job(
         return job
     try:
         handler(job)
+    except JobDeferred as exc:
+        defer_job(job, str(exc))
     except Exception as exc:  # The task error is intentionally persisted without a traceback.
         fail_job(job, str(exc))
     else:

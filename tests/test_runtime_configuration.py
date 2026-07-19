@@ -1,3 +1,5 @@
+import pytest
+
 from config.runtime_config import affected_services, public_runtime_config, update_runtime_config
 
 
@@ -11,6 +13,39 @@ def test_runtime_configuration_preserves_blank_secrets(tmp_path):
     assert "existing-key" not in str(public_runtime_config(path))
     assert public_runtime_config(path)["ai_api_key_configured"] is True
     assert "AI_API_KEY=existing-key" in path.read_text(encoding="utf-8")
+
+
+def test_runtime_configuration_restores_safe_video_defaults_for_blank_numeric_values(tmp_path):
+    path = tmp_path / ".env"
+    path.write_text("VIDEO_MAX_DURATION_SECONDS=\nVIDEO_DHASH_THRESHOLD=\n", encoding="utf-8")
+
+    config = public_runtime_config(path)
+    changed = update_runtime_config(
+        {"VIDEO_MAX_DURATION_SECONDS": "", "VIDEO_DHASH_THRESHOLD": ""}, path
+    )
+
+    assert config["video_max_duration_seconds"] == "30"
+    assert config["video_dhash_threshold"] == "24"
+    assert changed == {"VIDEO_MAX_DURATION_SECONDS", "VIDEO_DHASH_THRESHOLD"}
+    assert "VIDEO_MAX_DURATION_SECONDS=30" in path.read_text(encoding="utf-8")
+    assert "VIDEO_DHASH_THRESHOLD=24" in path.read_text(encoding="utf-8")
+
+
+def test_runtime_configuration_keeps_asr_disabled_without_an_explicit_opt_in(tmp_path):
+    path = tmp_path / ".env"
+
+    assert public_runtime_config(path)["asr_enabled"] == "false"
+    assert update_runtime_config({"ASR_ENABLED": "true"}, path) == {"ASR_ENABLED"}
+    assert "ASR_ENABLED=true" in path.read_text(encoding="utf-8")
+
+
+def test_runtime_configuration_rejects_out_of_range_video_values(tmp_path):
+    path = tmp_path / ".env"
+
+    with pytest.raises(ValueError, match="VIDEO_MAX_DURATION_SECONDS"):
+        update_runtime_config({"VIDEO_MAX_DURATION_SECONDS": "61"}, path)
+
+    assert not path.exists()
 
 
 def test_runtime_configuration_maps_restarts_to_affected_services():

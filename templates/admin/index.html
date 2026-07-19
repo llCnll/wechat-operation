@@ -35,21 +35,38 @@
     {% for node in admin_console.pipeline %}
     <article class="console-pipeline-node {% if node.ready %}is-ready{% else %}is-blocked{% endif %}{% if node.optional %} is-optional{% endif %}">
       <div class="console-pipeline-node-heading">
-        <span>{% if node.ready %}已就绪{% elif node.optional %}可选{% else %}待处理{% endif %}</span>
+        <div class="console-pipeline-node-state">
+          <span class="console-pipeline-node-step">{{ forloop.counter|stringformat:"02d" }}</span>
+          <span>{% if node.ready %}已就绪{% elif node.optional %}可选{% else %}待处理{% endif %}</span>
+        </div>
         <div class="console-pipeline-node-indicators">
           <i aria-hidden="true"></i>
-          {% if node.description %}
+          {% if node.key == "ocr" or node.key == "video_extraction" or node.key == "writes" %}
           <button class="console-pipeline-info" type="button" aria-describedby="pipeline-info-{{ node.key }}" aria-label="查看{{ node.label }}说明">i<span id="pipeline-info-{{ node.key }}" class="console-pipeline-tooltip" role="tooltip">{{ node.description }}</span></button>
           {% endif %}
         </div>
       </div>
       <strong>{{ node.label }}</strong>
       <small>{{ node.reason }}</small>
-      <span class="console-pipeline-node-check">检测 {{ node.checked_at|date:"H:i:s" }} · 下一步：{{ node.next_step }}</span>
+      <span class="console-pipeline-node-check">
+        <span>检测 {{ node.checked_at|date:"Y-m-d H:i:s" }}</span>
+        <span>下一步：{{ node.next_step }}</span>
+      </span>
       {% if node.key == "ai" %}
       <button type="button" data-config-dialog="ai" aria-haspopup="dialog">配置 AI 审核</button>
       {% elif node.key == "ocr" %}
       <button type="button" class="is-quiet" data-config-dialog="ocr" aria-haspopup="dialog">配置 OCR</button>
+      {% elif node.key == "video_extraction" %}
+      <div class="console-service-actions">
+        <button type="button" class="is-quiet" data-config-dialog="video" aria-haspopup="dialog">配置视频审核</button>
+        {% if node.running %}
+        <form method="post" action="{% url 'supervisor-control-service' service=node.service action='restart' %}">{% csrf_token %}<input type="hidden" name="return_to" value="/admin/"><button type="submit">重启</button></form>
+        <form method="post" action="{% url 'supervisor-control-service' service=node.service action='stop' %}">{% csrf_token %}<input type="hidden" name="return_to" value="/admin/"><button class="is-quiet" type="submit">停止</button></form>
+        {% else %}
+        <form method="post" action="{% url 'supervisor-control-service' service=node.service action='start' %}">{% csrf_token %}<input type="hidden" name="return_to" value="/admin/"><button type="submit">启动</button></form>
+        {% endif %}
+        <button class="is-quiet" type="button" data-supervisor-logs="{% url 'supervisor-service-logs' service=node.service %}" data-supervisor-log-label="{{ node.label }}">日志</button>
+      </div>
       {% elif node.key == "writes" %}
       <button type="button" class="is-quiet" data-config-dialog="writes" aria-haspopup="dialog">管理授权</button>
       {% elif node.key == "policy" %}
@@ -57,20 +74,25 @@
       {% elif node.key == "cdp" %}
       <form method="post" action="{% url 'open-controlled-login' %}">{% csrf_token %}<input type="hidden" name="return_to" value="/admin/"><button type="submit">打开登录页</button></form>
       {% elif node.key == "ingestion" %}
-      <div class="console-service-actions">
-        <button type="button" class="is-quiet" data-config-dialog="manual-ingestion" aria-haspopup="dialog">创建历史补采</button>
-        {% if node.running %}
-        <form method="post" action="{% url 'supervisor-control-ingestion-workers' action='restart' %}">{% csrf_token %}<input type="hidden" name="return_to" value="/admin/"><button type="submit">重启两个 Worker</button></form>
-        <form method="post" action="{% url 'supervisor-control-ingestion-workers' action='stop' %}">{% csrf_token %}<input type="hidden" name="return_to" value="/admin/"><button class="is-quiet" type="submit">停止两个 Worker</button></form>
-        {% else %}
-        <form method="post" action="{% url 'supervisor-control-ingestion-workers' action='start' %}">{% csrf_token %}<input type="hidden" name="return_to" value="/admin/"><button type="submit">启动两个 Worker</button></form>
-        {% endif %}
-      </div>
-      <div class="console-ingestion-subservices">
-        {% for service in node.subservices %}
-        <div><span class="{% if service.running %}is-running{% else %}is-stopped{% endif %}">{{ service.label }}</span><button class="is-quiet" type="button" data-supervisor-logs="{% url 'supervisor-service-logs' service=service.service %}" data-supervisor-log-label="{{ service.label }}">日志</button></div>
-        {% endfor %}
-      </div>
+      <details class="console-ingestion-details" {% if not node.ready %}open{% endif %}>
+        <summary>管理采集</summary>
+        <div class="console-ingestion-details-content">
+          <div class="console-service-actions">
+            <button type="button" class="is-quiet" data-config-dialog="manual-ingestion" aria-haspopup="dialog">创建历史补采</button>
+            {% if node.running %}
+            <form method="post" action="{% url 'supervisor-control-ingestion-workers' action='restart' %}">{% csrf_token %}<input type="hidden" name="return_to" value="/admin/"><button type="submit">重启两个 Worker</button></form>
+            <form method="post" action="{% url 'supervisor-control-ingestion-workers' action='stop' %}">{% csrf_token %}<input type="hidden" name="return_to" value="/admin/"><button class="is-quiet" type="submit">停止两个 Worker</button></form>
+            {% else %}
+            <form method="post" action="{% url 'supervisor-control-ingestion-workers' action='start' %}">{% csrf_token %}<input type="hidden" name="return_to" value="/admin/"><button type="submit">启动两个 Worker</button></form>
+            {% endif %}
+          </div>
+          <div class="console-ingestion-subservices">
+            {% for service in node.subservices %}
+            <div><span class="{% if service.running %}is-running{% else %}is-stopped{% endif %}">{{ service.label }}</span><button class="is-quiet" type="button" data-supervisor-logs="{% url 'supervisor-service-logs' service=service.service %}" data-supervisor-log-label="{{ service.label }}">日志</button></div>
+            {% endfor %}
+          </div>
+        </div>
+      </details>
       {% elif node.service %}
       <div class="console-service-actions">
         {% if node.service == "web" %}
@@ -95,6 +117,43 @@
 <dialog class="console-log-dialog" data-supervisor-log-dialog aria-labelledby="supervisor-log-title">
   <header><div><p>SERVICE LOG</p><h2 id="supervisor-log-title" data-supervisor-log-title>运行日志</h2></div><button type="button" class="console-dialog-close" data-supervisor-log-close aria-label="关闭">关闭</button></header>
   <pre class="console-service-log" data-supervisor-log-output>正在读取脱敏日志...</pre>
+</dialog>
+
+<dialog class="console-config-dialog console-config-dialog-video" data-config-dialog-panel="video" aria-labelledby="video-config-title">
+  <form method="post" action="{% url 'save-runtime-configuration' %}">{% csrf_token %}<input type="hidden" name="return_to" value="/admin/"><input type="hidden" name="config_scope" value="video">
+    <header><div><p>OPTIONAL CAPABILITY</p><h2 id="video-config-title">配置视频审核</h2></div><button type="button" class="console-dialog-close" data-config-dialog-close aria-label="关闭">关闭</button></header>
+    <p class="console-dialog-intro">仅在本机工具、无 Cookie 读取预检和数据传输审批完成后启用。系统不会向 OCR、ASR 或 AI 传递视频 URL、Cookie、原始视频或二维码目标。</p>
+    <div class="console-video-config">
+      <fieldset class="console-video-switches"><legend>启用条件</legend>
+        <label><input name="VIDEO_ENABLED" type="checkbox" value="true" {% if admin_console.runtime_config.video_enabled == "true" %}checked{% endif %}> 启用视频 Worker 入队</label>
+        <label><input name="VIDEO_PREFLIGHT_VERIFIED" type="checkbox" value="true" {% if admin_console.runtime_config.video_preflight_verified == "true" %}checked{% endif %}> 已完成受控样本无 Cookie 读取预检</label>
+      </fieldset>
+      <section class="console-video-asr" aria-labelledby="video-asr-title">
+        <div class="console-video-asr-heading"><div><h3 id="video-asr-title">语音转写（可选）</h3><p>默认关闭；未启用时不会向 ASR 服务传递任何音频。</p></div><label class="console-video-asr-switch"><input name="ASR_ENABLED" type="checkbox" value="true" {% if admin_console.runtime_config.asr_enabled == "true" %}checked{% endif %}> 启用语音转写</label></div>
+        <div class="console-dialog-fields console-video-asr-fields">
+          <label>ASR 服务地址<input name="ASR_BASE_URL" value="{{ admin_console.runtime_config.asr_base_url }}" placeholder="https://.../v1"></label>
+          <label>ASR 模型<input name="ASR_MODEL" value="{{ admin_console.runtime_config.asr_model }}"></label>
+          <label>ASR 密钥{% if admin_console.runtime_config.asr_api_key_configured %}<em>已配置，留空保留</em>{% endif %}<input name="ASR_API_KEY" type="password" autocomplete="new-password" placeholder="留空保留当前密钥"></label>
+          <label>ASR 超时（秒）<input name="ASR_TIMEOUT_SECONDS" value="{{ admin_console.runtime_config.asr_timeout_seconds }}" min="1" max="300" type="number"></label>
+        </div>
+      </section>
+      <details class="console-video-advanced">
+        <summary><span>资源与采样高级配置</span><small>默认值已适配 30 秒视频，通常无需调整</small></summary>
+        <div class="console-dialog-fields console-video-advanced-fields">
+          <label>最大时长（秒）<input name="VIDEO_MAX_DURATION_SECONDS" value="{{ admin_console.runtime_config.video_max_duration_seconds }}" min="1" max="60" type="number"></label>
+          <label>最大字节数<input name="VIDEO_MAX_BYTES" value="{{ admin_console.runtime_config.video_max_bytes }}" min="1048576" type="number"></label>
+          <label>每帖最大视频数<input name="VIDEO_MAX_PER_POST" value="{{ admin_console.runtime_config.video_max_per_post }}" min="1" max="10" type="number"></label>
+          <label>帧最长边（像素）<input name="VIDEO_MAX_FRAME_EDGE" value="{{ admin_console.runtime_config.video_max_frame_edge }}" min="240" max="1920" type="number"></label>
+          <label>dHash 去重阈值<input name="VIDEO_DHASH_THRESHOLD" value="{{ admin_console.runtime_config.video_dhash_threshold }}" min="0" max="32" type="number"></label>
+          <label>每帖 OCR 帧预算<input name="VIDEO_OCR_FRAME_BUDGET" value="{{ admin_console.runtime_config.video_ocr_frame_budget }}" min="1" max="120" type="number"></label>
+          <label>连接超时（秒）<input name="VIDEO_CONNECT_TIMEOUT_SECONDS" value="{{ admin_console.runtime_config.video_connect_timeout_seconds }}" min="1" max="60" type="number"></label>
+          <label>读取超时（秒）<input name="VIDEO_READ_TIMEOUT_SECONDS" value="{{ admin_console.runtime_config.video_read_timeout_seconds }}" min="1" max="180" type="number"></label>
+          <label class="console-dialog-field-wide">处理超时（秒）<input name="VIDEO_PROCESSING_TIMEOUT_SECONDS" value="{{ admin_console.runtime_config.video_processing_timeout_seconds }}" min="10" max="600" type="number"></label>
+        </div>
+      </details>
+    </div>
+    <footer><span>保存后重启视频审核 Worker 生效。</span><button class="console-config-submit" type="submit">保存视频配置</button></footer>
+  </form>
 </dialog>
 
 <dialog class="console-config-dialog" data-config-dialog-panel="manual-ingestion" aria-labelledby="manual-ingestion-title">

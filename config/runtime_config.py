@@ -7,7 +7,7 @@ from tempfile import NamedTemporaryFile
 
 from config.settings import RUNTIME_DIR
 
-SECRET_KEYS = frozenset(("AI_API_KEY", "OCR_API_KEY"))
+SECRET_KEYS = frozenset(("AI_API_KEY", "OCR_API_KEY", "ASR_API_KEY"))
 EDITABLE_KEYS = (
     "AI_BASE_URL",
     "AI_API_KEY",
@@ -16,6 +16,22 @@ EDITABLE_KEYS = (
     "OCR_BASE_URL",
     "OCR_API_KEY",
     "OCR_MODEL",
+    "ASR_BASE_URL",
+    "ASR_API_KEY",
+    "ASR_MODEL",
+    "ASR_TIMEOUT_SECONDS",
+    "ASR_ENABLED",
+    "VIDEO_ENABLED",
+    "VIDEO_PREFLIGHT_VERIFIED",
+    "VIDEO_MAX_BYTES",
+    "VIDEO_MAX_DURATION_SECONDS",
+    "VIDEO_MAX_PER_POST",
+    "VIDEO_MAX_FRAME_EDGE",
+    "VIDEO_DHASH_THRESHOLD",
+    "VIDEO_OCR_FRAME_BUDGET",
+    "VIDEO_CONNECT_TIMEOUT_SECONDS",
+    "VIDEO_READ_TIMEOUT_SECONDS",
+    "VIDEO_PROCESSING_TIMEOUT_SECONDS",
     "ENABLE_UPSTREAM_WRITES",
     "ENABLE_SINK_WRITES",
     "ENABLE_BLOCK_WRITES",
@@ -23,7 +39,36 @@ EDITABLE_KEYS = (
     "ENABLE_UNMUTE_WRITES",
     "ENABLE_RESTORE_WRITES",
 )
-BOOLEAN_KEYS = frozenset(key for key in EDITABLE_KEYS if key.startswith("ENABLE_"))
+BOOLEAN_KEYS = frozenset(key for key in EDITABLE_KEYS if key.startswith("ENABLE_")) | {
+    "ASR_ENABLED",
+    "VIDEO_ENABLED",
+    "VIDEO_PREFLIGHT_VERIFIED",
+}
+VIDEO_DEFAULTS = {
+    "ASR_ENABLED": "false",
+    "ASR_TIMEOUT_SECONDS": "60",
+    "VIDEO_MAX_BYTES": str(50 * 1024 * 1024),
+    "VIDEO_MAX_DURATION_SECONDS": "30",
+    "VIDEO_MAX_PER_POST": "3",
+    "VIDEO_MAX_FRAME_EDGE": "960",
+    "VIDEO_DHASH_THRESHOLD": "24",
+    "VIDEO_OCR_FRAME_BUDGET": "60",
+    "VIDEO_CONNECT_TIMEOUT_SECONDS": "10",
+    "VIDEO_READ_TIMEOUT_SECONDS": "30",
+    "VIDEO_PROCESSING_TIMEOUT_SECONDS": "120",
+}
+NUMERIC_BOUNDS = {
+    "ASR_TIMEOUT_SECONDS": (float, 1, 300),
+    "VIDEO_MAX_BYTES": (int, 1_048_576, 200 * 1024 * 1024),
+    "VIDEO_MAX_DURATION_SECONDS": (int, 1, 60),
+    "VIDEO_MAX_PER_POST": (int, 1, 10),
+    "VIDEO_MAX_FRAME_EDGE": (int, 240, 1920),
+    "VIDEO_DHASH_THRESHOLD": (int, 0, 32),
+    "VIDEO_OCR_FRAME_BUDGET": (int, 1, 120),
+    "VIDEO_CONNECT_TIMEOUT_SECONDS": (float, 1, 60),
+    "VIDEO_READ_TIMEOUT_SECONDS": (float, 1, 180),
+    "VIDEO_PROCESSING_TIMEOUT_SECONDS": (float, 10, 600),
+}
 
 
 def _read_lines(path: Path) -> list[str]:
@@ -43,13 +88,27 @@ def _values(lines: list[str]) -> dict[str, str]:
     return values
 
 
+def _validated_numeric_value(key: str, value: str) -> str:
+    numeric_type, minimum, maximum = NUMERIC_BOUNDS[key]
+    try:
+        parsed = numeric_type(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{key} 必须是数字") from exc
+    if not minimum <= parsed <= maximum:
+        raise ValueError(f"{key} 必须在 {minimum} 至 {maximum} 范围内")
+    return str(parsed)
+
+
 def public_runtime_config(path: Path = RUNTIME_DIR / ".env") -> dict[str, object]:
     values = _values(_read_lines(path))
     result: dict[str, object] = {
-        key.lower(): values.get(key, "") for key in EDITABLE_KEYS if key not in SECRET_KEYS
+        key.lower(): values.get(key) or VIDEO_DEFAULTS.get(key, "")
+        for key in EDITABLE_KEYS
+        if key not in SECRET_KEYS
     }
     result["ai_api_key_configured"] = bool(values.get("AI_API_KEY"))
     result["ocr_api_key_configured"] = bool(values.get("OCR_API_KEY"))
+    result["asr_api_key_configured"] = bool(values.get("ASR_API_KEY"))
     return result
 
 
@@ -64,8 +123,12 @@ def update_runtime_config(data: dict[str, str], path: Path = RUNTIME_DIR / ".env
         value = data[key]
         if key in SECRET_KEYS and not value:
             continue
+        if key in VIDEO_DEFAULTS and not value.strip():
+            value = VIDEO_DEFAULTS[key]
         if key in BOOLEAN_KEYS:
             value = "true" if value.lower() in {"1", "true", "on", "yes"} else "false"
+        elif key in NUMERIC_BOUNDS:
+            value = _validated_numeric_value(key, value.strip())
         if values.get(key) != value:
             values[key] = value
             changed.add(key)
@@ -93,7 +156,7 @@ def update_runtime_config(data: dict[str, str], path: Path = RUNTIME_DIR / ".env
 
 def affected_services(changed: set[str]) -> set[str]:
     services: set[str] = set()
-    model_keys = {
+    review_model_keys = {
         "AI_BASE_URL",
         "AI_API_KEY",
         "AI_MODEL",
@@ -102,8 +165,31 @@ def affected_services(changed: set[str]) -> set[str]:
         "OCR_API_KEY",
         "OCR_MODEL",
     }
-    if changed & model_keys:
+    video_keys = {
+        "OCR_BASE_URL",
+        "OCR_API_KEY",
+        "OCR_MODEL",
+        "ASR_BASE_URL",
+        "ASR_API_KEY",
+        "ASR_MODEL",
+        "ASR_ENABLED",
+        "ASR_TIMEOUT_SECONDS",
+        "VIDEO_ENABLED",
+        "VIDEO_PREFLIGHT_VERIFIED",
+        "VIDEO_MAX_BYTES",
+        "VIDEO_MAX_DURATION_SECONDS",
+        "VIDEO_MAX_PER_POST",
+        "VIDEO_MAX_FRAME_EDGE",
+        "VIDEO_DHASH_THRESHOLD",
+        "VIDEO_OCR_FRAME_BUDGET",
+        "VIDEO_CONNECT_TIMEOUT_SECONDS",
+        "VIDEO_READ_TIMEOUT_SECONDS",
+        "VIDEO_PROCESSING_TIMEOUT_SECONDS",
+    }
+    if changed & review_model_keys:
         services.add("review")
+    if changed & video_keys:
+        services.add("video_extraction")
     if changed & BOOLEAN_KEYS:
         services.add("web")
     return services

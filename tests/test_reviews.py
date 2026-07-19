@@ -1,10 +1,20 @@
+import json
+
+import httpx
 import pytest
 from django.db import connection
 
 from config.settings import runtime
 from jobs.models import BackgroundJob
 from posts.models import POST_STATUS_DELETED, CandidatePost, OriginalPost, OriginType
-from reviews.adapters import AssessmentOutput, ReplyOutput, RiskOutput, normalize_assessment_output
+from reviews.adapters import (
+    AssessmentOutput,
+    OpenAiCompatibleReviewClient,
+    ReplyOutput,
+    RiskOutput,
+    normalize_assessment_output,
+    review_system_prompt,
+)
 from reviews.models import (
     OperationAudit,
     PolicyRule,
@@ -59,6 +69,87 @@ def test_normalize_assessment_output_handles_non_structured_nested_values():
     assert output.reply_suggestion.reply_draft == "请人工确认。"
 
 
+def test_normalize_assessment_output_compacts_and_merges_repeated_risk_evidence():
+    normalized = normalize_assessment_output(
+        {
+            "risk_labels": [
+                {
+                    "label": "TRAFFIC_DIVERSION",
+                    "confidence": 0.6,
+                    "evidence": ["相同证据", "相 同 证 据！", "第二条", "第三条"],
+                },
+                {
+                    "label": "TRAFFIC_DIVERSION",
+                    "confidence": 0.9,
+                    "evidence": ["第二条", "第四条"],
+                },
+            ]
+        }
+    )
+
+    assert normalized["risk_labels"] == [
+        {
+            "label": "TRAFFIC_DIVERSION",
+            "confidence": 0.9,
+            "evidence": ["相同证据", "第二条", "第三条"],
+        }
+    ]
+
+
+def test_review_prompt_adds_video_rules_only_when_video_evidence_is_present():
+    without_video = review_system_prompt(has_video_evidence=False)
+    with_video = review_system_prompt(has_video_evidence=True)
+
+    assert "【视频审核规则】" not in without_video
+    assert "【视频审核规则】" in with_video
+    assert "对同一视频风险必须形成一次聚合结论" in with_video
+    assert "强引流组合" in with_video
+
+
+def test_review_request_contains_only_textual_assessment_context(monkeypatch):
+    captured = {}
+
+    def handler(request):
+        captured.update(json.loads(request.content))
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "message": {
+                            "content": json.dumps(
+                                {
+                                    "content_category": "OTHER",
+                                    "secondary_categories": [],
+                                    "risk_labels": [],
+                                    "sentiment": "",
+                                    "feedback_value": "",
+                                    "recommended_action": "KEEP",
+                                    "overall_confidence": 0.5,
+                                    "needs_human_review": True,
+                                    "reply_suggestion": None,
+                                }
+                            )
+                        }
+                    }
+                ]
+            },
+        )
+
+    monkeypatch.setattr(runtime, "ai_base_url", "https://ai.example")
+    monkeypatch.setattr(runtime, "ai_api_key", "test-key")
+    monkeypatch.setattr(runtime, "ai_model", "test-model")
+    client = OpenAiCompatibleReviewClient(
+        client=httpx.Client(transport=httpx.MockTransport(handler))
+    )
+    client.evaluate("正文", "[视频帧文字 · 视频 1 · 00:01.000] 加群领取", has_video_evidence=True)
+
+    payload = json.dumps(captured, ensure_ascii=False)
+    assert "视频帧文字" in payload
+    for forbidden in ("https://media.example", "cookie", "task_id", "policy_version", "data:image"):
+        assert forbidden not in payload.casefold()
+
+
 @pytest.mark.django_db
 def test_policy_risk_draft_is_suppressed_and_write_capability_is_disabled(monkeypatch):
     monkeypatch.setattr(runtime, "enable_upstream_writes", False)
@@ -83,6 +174,38 @@ def test_policy_risk_draft_is_suppressed_and_write_capability_is_disabled(monkey
     assert not hasattr(post, "reply_draft")
     with pytest.raises(PermissionError):
         create_confirmed_operation(task, user=None, action=RecommendedAction.BLOCK, reason="违规")
+
+
+@pytest.mark.django_db
+def test_explicit_qr_contact_can_block_while_high_reward_stays_in_focus():
+    post = OriginalPost.objects.create(topic_id=216, content_id="review-216", content_text="内容")
+    policy = PolicyVersion.objects.create(name="traffic", version="1", is_active=True)
+    PolicyRule.objects.create(
+        policy_version=policy,
+        risk_label="TRAFFIC_DIVERSION",
+        min_confidence=0.85,
+        recommended_action=RecommendedAction.BLOCK,
+        priority=90,
+    )
+    _, task = persist_assessment(
+        post,
+        AssessmentOutput(
+            content_category="ACTIVITY",
+            recommended_action=RecommendedAction.BLOCK,
+            overall_confidence=0.92,
+            risk_labels=[
+                RiskOutput(
+                    label="TRAFFIC_DIVERSION",
+                    confidence=0.95,
+                    evidence=["00:04.250 微信扫码咨询客服", "00:04.250 检测到二维码", "10万奖励"],
+                )
+            ],
+        ),
+        policy,
+    )
+
+    assert task.suggested_action == RecommendedAction.BLOCK
+    assert task.needs_focus is True
 
 
 @pytest.mark.django_db
@@ -142,7 +265,7 @@ def test_ai_review_input_includes_ballot_title_and_option_text(monkeypatch):
     class ReviewClient:
         content = ""
 
-        def evaluate(self, content, ocr_text):
+        def evaluate(self, content, ocr_text, *, has_video_evidence=False):
             self.content = content
             assert ocr_text == ""
             return AssessmentOutput(

@@ -1,9 +1,10 @@
-from datetime import datetime
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import pytest
 from django.contrib.auth import get_user_model
 from django.test import Client
+from django.utils import timezone
 
 from jobs.models import BackgroundJob
 from posts.models import CandidatePost, ManagedGame, OriginalPost, OriginType
@@ -39,8 +40,10 @@ def test_live_operations_analysis_defaults_to_seven_days_and_does_not_create_job
     assert response.status_code == 200
     assert "运营分析" in page
     assert "实时读取当前帖子、审核与互动数据" in page
-    assert 'value="2026-07-13"' in page
-    assert 'value="2026-07-19"' in page
+    end_date = timezone.localdate()
+    start_date = end_date - timedelta(days=6)
+    assert f'value="{start_date.isoformat()}"' in page
+    assert f'value="{end_date.isoformat()}"' in page
     assert "每帖仅取最新互动快照" in page
     assert "generate_daily_report" not in page
     assert "CSV" not in page

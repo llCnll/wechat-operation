@@ -6,7 +6,7 @@ from typing import Any
 from django.db import transaction
 from django.utils import timezone
 
-from jobs.adapters import SourceBusinessDeletedError, SourceContractError, SourceTransportError
+from jobs.adapters import SourceBusinessDeletedError, SourceContractError
 
 from .models import (
     CandidatePost,
@@ -47,6 +47,39 @@ def normalize_ballot_text(value: Any) -> str:
         if lines:
             ballots.append("\n".join(lines))
     return "\n\n".join(ballots)
+
+
+def _sync_media(post: OriginalPost, base: dict[str, Any]) -> None:
+    """Keep stable media rows so unchanged video extraction history survives a refresh."""
+    desired: dict[tuple[str, str], dict[str, Any]] = {}
+    for image in base.get("image_list", []):
+        if isinstance(image, dict) and image.get("url"):
+            desired[(str(image["url"]), MediaType.IMAGE)] = {
+                "width": image.get("width"),
+                "height": image.get("height"),
+                "is_gif": bool(image.get("is_gif", False)),
+            }
+    for video in base.get("video_info", []):
+        if isinstance(video, dict) and video.get("url"):
+            desired[(str(video["url"]), MediaType.VIDEO)] = {
+                "width": video.get("width"),
+                "height": video.get("height"),
+                "is_gif": False,
+            }
+    current = {(media.url, media.media_type): media for media in post.media.all()}
+    stale_ids = [media.pk for key, media in current.items() if key not in desired]
+    if stale_ids:
+        PostMedia.objects.filter(pk__in=stale_ids).delete()
+    for key, values in desired.items():
+        media = current.get(key)
+        if media is None:
+            PostMedia.objects.create(post=post, url=key[0], media_type=key[1], **values)
+            continue
+        changed = [field for field, value in values.items() if getattr(media, field) != value]
+        if changed:
+            for field in changed:
+                setattr(media, field, values[field])
+            media.save(update_fields=changed)
 
 
 @transaction.atomic
@@ -96,28 +129,7 @@ def classify_content_card(candidate: CandidatePost, card: dict[str, Any]) -> Ori
             "source_appid": candidate.source_appid,
         },
     )
-    PostMedia.objects.filter(post=post).delete()
-    for image in base.get("image_list", []):
-        if not isinstance(image, dict) or not image.get("url"):
-            continue
-        PostMedia.objects.create(
-            post=post,
-            url=str(image["url"]),
-            media_type=MediaType.IMAGE,
-            width=image.get("width"),
-            height=image.get("height"),
-            is_gif=bool(image.get("is_gif", False)),
-        )
-    for video in base.get("video_info", []):
-        if not isinstance(video, dict) or not video.get("url"):
-            continue
-        PostMedia.objects.create(
-            post=post,
-            url=str(video["url"]),
-            media_type=MediaType.VIDEO,
-            width=video.get("width"),
-            height=video.get("height"),
-        )
+    _sync_media(post, base)
     reply_info = details.get("reply_info", {})
     love_info = details.get("love_info", {})
     share_info = details.get("share_info", {})
@@ -169,40 +181,13 @@ def store_post_metrics(post: OriginalPost, payload: dict[str, Any]) -> Interacti
     return snapshot
 
 
-def refresh_original_post(client, post: OriginalPost) -> OriginalPost:
-    """Refresh content while keeping management deletion authoritative for operations."""
-    deleted = False
-    deleted_status = None
+def refresh_post_status_and_metrics(client, post: OriginalPost) -> OriginalPost:
+    """Refresh only operational status and aggregate interaction counters."""
     try:
         metrics_payload = client.get_post_metrics(post.topic_id)
     except SourceBusinessDeletedError:
-        deleted = True
-        metrics_payload = None
-        deleted_status = mark_post_deleted(post.status)
-        post.status = deleted_status
+        post.status = mark_post_deleted(post.status)
         post.save(update_fields=["status", "updated_at"])
-    candidate, _ = CandidatePost.objects.update_or_create(
-        topic_id=post.topic_id,
-        defaults={
-            "content_id": post.content_id,
-            "source_appid": post.source_appid,
-            "origin_type": OriginType.ORIGINAL,
-        },
-    )
-    try:
-        payload = client.get_content_card(candidate.content_id)
-        card = payload["data"]["content_card"]
-    except (KeyError, TypeError, SourceContractError, SourceTransportError) as exc:
-        if deleted:
-            # The deletion state is still useful even when the historical card has expired.
-            return post
-        raise SourceContractError("内容卡片响应结构无效") from exc
-    refreshed = classify_content_card(candidate, card)
-    if refreshed is None:
-        raise SourceContractError("刷新后帖子不再符合原创条件")
-    if deleted:
-        refreshed.status = deleted_status
-        refreshed.save(update_fields=["status", "updated_at"])
-    if metrics_payload is not None:
-        store_post_metrics(refreshed, metrics_payload)
-    return refreshed
+        return post
+    store_post_metrics(post, metrics_payload)
+    return post

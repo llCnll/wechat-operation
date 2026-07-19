@@ -115,9 +115,17 @@ def service_logs(request, service: str):
 def save_runtime_configuration(request):
     values = {key: value for key, value in request.POST.items()}
     if request.POST.get("config_scope") == "writes":
-        for key in BOOLEAN_KEYS:
+        for key in BOOLEAN_KEYS - {"VIDEO_ENABLED"}:
             values.setdefault(key, "false")
-    changed = update_runtime_config(values)
+    if request.POST.get("config_scope") == "video":
+        values.setdefault("VIDEO_ENABLED", "false")
+        values.setdefault("VIDEO_PREFLIGHT_VERIFIED", "false")
+        values.setdefault("ASR_ENABLED", "false")
+    try:
+        changed = update_runtime_config(values)
+    except ValueError as exc:
+        messages.error(request, str(exc))
+        return redirect(_return_to(request))
     services = affected_services(changed)
     if not changed:
         messages.info(request, "运行配置没有变化。")

@@ -1,5 +1,4 @@
 import pytest
-from django.db import connection
 
 from jobs.adapters import SourceBusinessDeletedError
 from posts.models import (
@@ -19,7 +18,11 @@ from posts.models import (
     mark_post_deleted,
     normalize_post_status,
 )
-from posts.services import classify_content_card, refresh_original_post, store_post_metrics
+from posts.services import (
+    classify_content_card,
+    refresh_post_status_and_metrics,
+    store_post_metrics,
+)
 
 
 @pytest.mark.parametrize(
@@ -131,9 +134,7 @@ def test_ballot_title_and_option_text_are_normalized_for_review():
 
     assert post is not None
     assert post.ballot_text == (
-        "投票 1：穿梭（竖着看第一个字）\n"
-        "选项 1：卫 护山河岁月长\n"
-        "选项 2：收 藏万象入华章"
+        "投票 1：穿梭（竖着看第一个字）\n选项 1：卫 护山河岁月长\n选项 2：收 藏万象入华章"
     )
     assert "poll-id-must-not-be-saved" not in post.ballot_text
     assert "option-id-1" not in post.ballot_text
@@ -179,8 +180,8 @@ def test_metrics_snapshot_discards_reply_payloads():
     assert snapshot.love_count == 4
 
 
-@pytest.mark.django_db(transaction=True)
-def test_management_detail_deletion_marks_post_and_refreshes_cached_content():
+@pytest.mark.django_db
+def test_status_and_metrics_refresh_marks_deleted_without_changing_cached_content():
     post = OriginalPost.objects.create(
         topic_id=12,
         content_id="content-12",
@@ -192,35 +193,16 @@ def test_management_detail_deletion_marks_post_and_refreshes_cached_content():
     class Source:
         def get_post_metrics(self, topic_id):
             assert topic_id == 12
-            assert not connection.in_atomic_block
             raise SourceBusinessDeletedError("原平台帖子已从管理队列删除")
 
-        def get_content_card(self, content_id):
-            assert content_id == "content-12"
-            assert not connection.in_atomic_block
-            return {
-                "data": {
-                    "content_card": {
-                        "base_content": {
-                            "content": "更新后的历史内容",
-                            "ballot_info_list": [
-                                {
-                                    "title": "竖着看首字",
-                                    "option_item_list": [{"text": "卫 护山河岁月长"}],
-                                }
-                            ],
-                        }
-                    }
-                }
-            }
+        def get_content_card(self, _content_id):
+            raise AssertionError("轻量刷新不得拉取内容卡")
 
-    refreshed = refresh_original_post(Source(), post)
+    refreshed = refresh_post_status_and_metrics(Source(), post)
 
     assert refreshed.status == POST_STATUS_SUNK | POST_STATUS_DELETED
     assert is_post_deleted(refreshed.status)
-    assert refreshed.content_text == "更新后的历史内容"
-    assert "竖着看首字" in refreshed.ballot_text
-    assert "卫 护山河岁月长" in refreshed.ballot_text
+    assert refreshed.content_text == "历史缓存内容"
 
 
 @pytest.mark.django_db
@@ -237,11 +219,10 @@ def test_management_detail_recovery_clears_local_deletion_bit():
             assert topic_id == 13
             return {"data": {"topic": {"view_count": 2, "status": POST_STATUS_BLOCKED}}}
 
-        def get_content_card(self, content_id):
-            assert content_id == "content-13"
-            return {"data": {"content_card": {"base_content": {"content": "恢复可见", "status": 8}}}}
+        def get_content_card(self, _content_id):
+            raise AssertionError("轻量刷新不得拉取内容卡")
 
-    refreshed = refresh_original_post(Source(), post)
+    refreshed = refresh_post_status_and_metrics(Source(), post)
 
     assert refreshed.status == POST_STATUS_BLOCKED
     assert not is_post_deleted(refreshed.status)

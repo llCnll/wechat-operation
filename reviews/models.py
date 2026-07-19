@@ -73,6 +73,79 @@ class OcrExtraction(models.Model):
         verbose_name_plural = "OCR 提取"
 
 
+class VideoExtractionStatus(models.TextChoices):
+    PENDING = "PENDING", "待提取"
+    RUNNING = "RUNNING", "提取中"
+    SUCCEEDED = "SUCCEEDED", "已完成"
+    PARTIAL = "PARTIAL", "部分完成"
+    FAILED = "FAILED", "失败"
+    CANCELED = "CANCELED", "已取消"
+    SKIPPED_LIMIT = "SKIPPED_LIMIT", "受资源限制"
+
+
+class VideoEvidenceKind(models.TextChoices):
+    FRAME_OCR = "FRAME_OCR", "视频帧文字"
+    QR_CODE = "QR_CODE", "二维码"
+    AUDIO_TRANSCRIPT = "AUDIO_TRANSCRIPT", "视频语音"
+
+
+class VideoExtraction(models.Model):
+    post = models.ForeignKey(
+        OriginalPost, on_delete=models.CASCADE, related_name="video_extractions"
+    )
+    media = models.ForeignKey(PostMedia, on_delete=models.CASCADE, related_name="video_extractions")
+    media_fingerprint = models.CharField(max_length=64)
+    extractor_version = models.CharField(max_length=64, default="v1")
+    attempt = models.PositiveIntegerField(default=1)
+    status = models.CharField(
+        max_length=20, choices=VideoExtractionStatus.choices, default=VideoExtractionStatus.PENDING
+    )
+    duration_ms = models.PositiveIntegerField(null=True, blank=True)
+    frame_count = models.PositiveIntegerField(default=0)
+    error_summary = models.CharField(max_length=500, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=("media", "media_fingerprint", "extractor_version", "attempt"),
+                name="unique_video_extraction_attempt",
+            )
+        ]
+        verbose_name = "视频提取"
+        verbose_name_plural = "视频提取"
+
+
+class VideoEvidence(models.Model):
+    extraction = models.ForeignKey(
+        VideoExtraction, on_delete=models.CASCADE, related_name="evidence"
+    )
+    kind = models.CharField(max_length=32, choices=VideoEvidenceKind.choices)
+    start_ms = models.PositiveIntegerField()
+    end_ms = models.PositiveIntegerField(null=True, blank=True)
+    sequence = models.PositiveIntegerField(default=0)
+    text = models.TextField(blank=True)
+    confidence = models.FloatField(null=True, blank=True)
+    provider = models.CharField(max_length=100, blank=True)
+    error_summary = models.CharField(max_length=500, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        constraints = [
+            models.CheckConstraint(
+                condition=models.Q(kind="QR_CODE", text="检测到二维码") | ~models.Q(kind="QR_CODE"),
+                name="qr_evidence_has_fixed_text",
+            ),
+            models.UniqueConstraint(
+                fields=("extraction", "kind", "sequence"), name="unique_video_evidence_sequence"
+            ),
+        ]
+        ordering = ("extraction_id", "start_ms", "sequence")
+        verbose_name = "视频证据"
+        verbose_name_plural = "视频证据"
+
+
 class PolicyVersion(models.Model):
     name = models.CharField(max_length=100, unique=True)
     version = models.CharField(max_length=100)

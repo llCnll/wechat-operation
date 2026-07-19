@@ -25,10 +25,12 @@ from reviews.models import (
 from reviews.services import (
     BLOCK_REASON_OPTIONS,
     complete_review,
+    current_video_extractions,
     enqueue_evaluation_pipeline,
     execute_confirmed_operation,
     is_operation_enabled,
     save_reply_draft,
+    video_evidence_summaries,
 )
 
 from .game_catalog import active_game_appid, managed_game_options
@@ -48,7 +50,7 @@ from .models import (
     is_post_self_visible,
     is_post_sunk,
 )
-from .services import refresh_original_post
+from .services import refresh_post_status_and_metrics
 from .source_client import CdpGameCircleClient
 
 DASHBOARD_SORT_OPTIONS = (
@@ -206,17 +208,30 @@ def operations_dashboard(request):
         "suggested_action": [value for value in request.GET.getlist("suggested_action") if value],
         "review_status": [value for value in request.GET.getlist("review_status") if value],
         "post_status": [value for value in request.GET.getlist("post_status") if value],
-        **{key: request.GET.get(key, "").strip() for key in (
-            "min_confidence", "sort", "priority_order", "reviewed", "min_views",
-        )},
+        **{
+            key: request.GET.get(key, "").strip()
+            for key in (
+                "min_confidence",
+                "sort",
+                "priority_order",
+                "reviewed",
+                "min_views",
+            )
+        },
     }
     valid_sorts = {value for value, _label in DASHBOARD_SORT_OPTIONS}
     if filters["sort"] not in valid_sorts:
         # Keep previously shared URLs working after replacing the old one-purpose control.
         filters["sort"] = "priority_asc" if filters["priority_order"] == "asc" else "priority_desc"
     posts = _with_latest_metrics(
-        OriginalPost.objects.select_related("review_task", "review_task__assessment", "reply_draft")
-        .prefetch_related("review_task__assessment__risk_evidence", "ocr_extractions", "review_task__operation_audits")
+        OriginalPost.objects.select_related(
+            "review_task", "review_task__assessment", "reply_draft"
+        ).prefetch_related(
+            "review_task__assessment__risk_evidence",
+            "ocr_extractions",
+            "review_task__operation_audits",
+            "video_extractions__evidence",
+        )
     )
     if search:
         posts = posts.filter(
@@ -241,9 +256,7 @@ def operations_dashboard(request):
         if "UNSYNCED" in selected_statuses:
             status_query |= Q(status__isnull=True)
         flags = sum(
-            flag
-            for name, flag in POST_STATUS_FILTER_FLAGS.items()
-            if name in selected_statuses
+            flag for name, flag in POST_STATUS_FILTER_FLAGS.items() if name in selected_statuses
         )
         if flags:
             posts = posts.annotate(_selected_status_flags=F("status").bitand(Value(flags)))
@@ -253,7 +266,10 @@ def operations_dashboard(request):
         posts = posts.filter(review_task__reviewed_at__isnull=False)
     elif filters["reviewed"] == "no":
         posts = posts.filter(review_task__reviewed_at__isnull=True)
-    for name, field in (("min_confidence", "review_task__assessment__overall_confidence__gte"), ("min_views", "latest_view_count__gte")):
+    for name, field in (
+        ("min_confidence", "review_task__assessment__overall_confidence__gte"),
+        ("min_views", "latest_view_count__gte"),
+    ):
         if filters[name]:
             try:
                 posts = posts.filter(**{field: float(filters[name])})
@@ -320,11 +336,27 @@ def operations_dashboard(request):
             selected_post.recommended_operation_label = (
                 selected_post.review.get_suggested_action_display()
             )
-            selected_post.risk_evidence = list(
-                selected_post.review.assessment.risk_evidence.all()
-            )
+            selected_post.risk_evidence = list(selected_post.review.assessment.risk_evidence.all())
             for evidence in selected_post.risk_evidence:
                 evidence.display_label = risk_label_display(evidence.label)
+        media_indexes = {
+            media_id: index
+            for index, media_id in enumerate(
+                selected_post.media.order_by("pk").values_list("pk", flat=True), start=1
+            )
+        }
+        current_extractions = current_video_extractions(selected_post)
+        current_extraction_ids = {extraction.pk for extraction in current_extractions}
+        for extraction in current_extractions:
+            extraction.media_index = media_indexes.get(extraction.media_id, "已移除媒体")
+            extraction.evidence_summaries = video_evidence_summaries(extraction)
+        selected_post.current_video_extractions = sorted(
+            current_extractions,
+            key=lambda item: (media_indexes.get(item.media_id, float("inf")), item.pk),
+        )
+        selected_post.historical_video_extraction_count = selected_post.video_extractions.exclude(
+            pk__in=current_extraction_ids
+        ).count()
         selected_post.operation_reason_suggestion = _operation_reason_suggestion(selected_post)
         latest_jobs = list(
             BackgroundJob.objects.filter(parameter_summary__topic_id=selected_post.topic_id)
@@ -333,10 +365,17 @@ def operations_dashboard(request):
         )
         ai_job = next((job for job in latest_jobs if job.task_type == "AI_EVALUATE"), None)
         ocr_job = next((job for job in latest_jobs if job.task_type == "OCR_EXTRACT"), None)
-        if any(job and job.status in {JobStatus.PENDING, JobStatus.RUNNING} for job in (ocr_job, ai_job)):
+        if any(
+            job and job.status in {JobStatus.PENDING, JobStatus.RUNNING}
+            for job in (ocr_job, ai_job)
+        ):
             evaluation = {"state": "RUNNING", "label": "正在评估", "error": ""}
         elif ai_job and ai_job.status == JobStatus.FAILED:
-            evaluation = {"state": "FAILED", "label": "评估失败，可重试", "error": ai_job.error_summary}
+            evaluation = {
+                "state": "FAILED",
+                "label": "评估失败，可重试",
+                "error": ai_job.error_summary,
+            }
         elif selected_post.review and selected_post.review.assessment:
             evaluation = {"state": "SUCCEEDED", "label": "评估完成", "error": ""}
     context = {
@@ -349,9 +388,7 @@ def operations_dashboard(request):
         "search": search,
         "appid": appid,
         "managed_games": managed_game_options(),
-        "active_game": next(
-            (game for game in managed_game_options() if game.appid == appid), None
-        ),
+        "active_game": next((game for game in managed_game_options() if game.appid == appid), None),
         "game_context_query": _game_context_query(request),
         "navigation_query": _navigation_query(request),
         "return_query": _navigation_query(request),
@@ -365,7 +402,9 @@ def operations_dashboard(request):
         "sort_options": DASHBOARD_SORT_OPTIONS,
         "stats": {
             "original": OriginalPost.objects.filter(game_filter).count(),
-            "forward": CandidatePost.objects.filter(game_filter, origin_type=OriginType.FORWARD).count(),
+            "forward": CandidatePost.objects.filter(
+                game_filter, origin_type=OriginType.FORWARD
+            ).count(),
             "pending": CandidatePost.objects.filter(
                 game_filter, origin_type=OriginType.CLASSIFICATION_PENDING
             ).count(),
@@ -383,9 +422,7 @@ def operations_dashboard(request):
         "batch_sink_count": batch_sink_count,
         "batch_block_count": batch_block_count,
         "batch_candidate_count": len(batch_candidates),
-        "batch_actions_enabled": any(
-            is_operation_enabled(action) for action in BATCH_AI_ACTIONS
-        ),
+        "batch_actions_enabled": any(is_operation_enabled(action) for action in BATCH_AI_ACTIONS),
     }
     return render(request, "posts/operations_dashboard.html", context)
 
@@ -447,7 +484,7 @@ def post_detail(request, topic_id: int):
 @login_required
 @require_POST
 def refresh_dashboard_post(request, topic_id: int):
-    """Refresh the selected post's card, status, media, and interaction counters."""
+    """Refresh the selected post's operational status and interaction counters."""
     post = get_object_or_404(OriginalPost, topic_id=topic_id)
     redirect_url = _dashboard_return_url(request, post.topic_id)
     if not post.source_appid:
@@ -456,16 +493,14 @@ def refresh_dashboard_post(request, topic_id: int):
     client = None
     try:
         client = CdpGameCircleClient(appid=post.source_appid)
-        refreshed = refresh_original_post(client, post)
+        refreshed = refresh_post_status_and_metrics(client, post)
     except Exception:
         messages.error(request, "刷新失败，请检查浏览器登录状态或稍后重试。")
     else:
-        if not is_post_deleted(refreshed.status):
-            enqueue_evaluation_pipeline(refreshed)
         if is_post_deleted(refreshed.status):
             messages.warning(request, "该帖子已从原平台管理队列删除，已标记为不可处置状态。")
         else:
-            messages.success(request, "帖子内容、状态和互动指标已刷新。")
+            messages.success(request, "帖子状态和互动指标已同步。")
     finally:
         if client is not None:
             client.close()
@@ -512,9 +547,17 @@ def confirm_dashboard_operation(request, topic_id: int, action: str):
                 source = CdpGameCircleClient(appid=post.source_appid)
             token = request.POST.get("confirmation_key")
             audits = [
-                execute_confirmed_operation(task, user=request.user, action=operation, reason=reason,
-                    source=source, upstream_payload=payload if operation == RecommendedAction.MUTE else {"block_reason_code": payload["block_reason_code"]},
-                    confirmation_key=f"{token}:{operation.lower()}")
+                execute_confirmed_operation(
+                    task,
+                    user=request.user,
+                    action=operation,
+                    reason=reason,
+                    source=source,
+                    upstream_payload=payload
+                    if operation == RecommendedAction.MUTE
+                    else {"block_reason_code": payload["block_reason_code"]},
+                    confirmation_key=f"{token}:{operation.lower()}",
+                )
                 for operation in (RecommendedAction.BLOCK, RecommendedAction.MUTE)
             ]
         except Exception:
@@ -525,7 +568,9 @@ def confirm_dashboard_operation(request, topic_id: int, action: str):
                 source.close()
         result_summary = "，".join(f"{item.action}={item.result_code}" for item in audits)
         if all(item.result_code == "OK" for item in audits):
-            complete_review(task, user=request.user, action=RecommendedAction.BLOCK_AND_MUTE, reason=reason)
+            complete_review(
+                task, user=request.user, action=RecommendedAction.BLOCK_AND_MUTE, reason=reason
+            )
             messages.success(request, f"组合处置成功，审核已完成：{result_summary}")
         else:
             messages.warning(request, f"组合处置未全部成功，审核保持待处理：{result_summary}")
@@ -701,7 +746,11 @@ def save_dashboard_reply_draft(request, topic_id: int):
     except ReplyDraft.DoesNotExist:
         messages.error(request, "该帖子没有可维护的回复草案。")
     else:
-        message = "已标记为本地采纳，未发布到原平台。" if action == "adopt" else "回复草案已保存，仅记录在本系统，未发布到原平台。"
+        message = (
+            "已标记为本地采纳，未发布到原平台。"
+            if action == "adopt"
+            else "回复草案已保存，仅记录在本系统，未发布到原平台。"
+        )
         messages.success(request, message)
     return redirect(redirect_url)
 
@@ -709,9 +758,7 @@ def save_dashboard_reply_draft(request, topic_id: int):
 def _dashboard_operation_payload(request, action: str) -> dict | None:
     if action in {RecommendedAction.SINK, RecommendedAction.RESTORE, RecommendedAction.UNMUTE}:
         return {}
-    selected = {
-        int(value) for value in request.POST.getlist("block_reason") if value.isdigit()
-    }
+    selected = {int(value) for value in request.POST.getlist("block_reason") if value.isdigit()}
     allowed = {code for code, _ in BLOCK_REASON_OPTIONS}
     if not selected or not selected <= allowed:
         messages.error(request, "必须选择至少一个已验证的违规原因。")

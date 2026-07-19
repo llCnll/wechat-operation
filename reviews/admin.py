@@ -13,6 +13,8 @@ from .models import (
     ReplyDraft,
     ReviewTask,
     RiskEvidence,
+    VideoEvidence,
+    VideoExtraction,
     risk_label_display,
 )
 
@@ -55,6 +57,30 @@ class OcrExtractionAdmin(ReadOnlyAdmin):
     list_filter = ("provider",)
     search_fields = ("post__topic_id", "text", "error_summary")
     date_hierarchy = "created_at"
+
+
+@admin.register(VideoExtraction)
+class VideoExtractionAdmin(ReadOnlyAdmin):
+    list_display = (
+        "post",
+        "media",
+        "extractor_version",
+        "attempt",
+        "status",
+        "duration_ms",
+        "frame_count",
+        "updated_at",
+    )
+    list_filter = ("status", "extractor_version")
+    search_fields = ("post__topic_id", "media_fingerprint", "error_summary")
+    date_hierarchy = "updated_at"
+
+
+@admin.register(VideoEvidence)
+class VideoEvidenceAdmin(ReadOnlyAdmin):
+    list_display = ("extraction", "kind", "start_ms", "end_ms", "confidence", "provider")
+    list_filter = ("kind", "provider")
+    search_fields = ("extraction__post__topic_id", "text", "error_summary")
 
 
 @admin.register(AiAssessment)

@@ -345,6 +345,11 @@ AI 评估中的单项风险证据，可保存多段命中内容。
 | `INGEST_WINDOW` | 升级前遗留的采集任务；新版本不再创建。 | 人工补采 Worker（Supervisor 服务 `backfill_ingestion`） |
 | `OCR_EXTRACT` | 原创帖图片 OCR。 | AI 审核 Worker（Supervisor 服务 `review`） |
 | `AI_EVALUATE` | 原创帖 AI 内容评估。 | AI 审核 Worker（Supervisor 服务 `review`） |
+| `VIDEO_EXTRACT` | 原创帖视频的本地受限证据提取。任务摘要仅含本地提取记录 ID、帖子 ID、URL 指纹与版本。 | 视频提取 Worker（Supervisor 服务 `video_extraction`） |
+
+## `reviews_videoextraction` 与 `reviews_videoevidence`
+
+视频审核仅持久化可复核的文本与时间位置。`VideoExtraction` 保存帖子、媒体外键、媒体 URL 的 SHA-256 指纹、提取器版本、尝试序号、状态、时长、帧数和脱敏错误；同一媒体每次显式重试创建新的尝试记录，旧证据保持可追溯。`VideoEvidence` 保存来源（帧 OCR、二维码、语音）、起止毫秒、顺序、文本、置信度和提供方。二维码文本固定为“检测到二维码”。两表均不保存视频、音频、帧、完整 URL、副本 Cookie、令牌、二维码解码字符串/目标或模型原始响应。
 
 ## Supervisor 运行态文件
 

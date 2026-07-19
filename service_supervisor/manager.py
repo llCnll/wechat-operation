@@ -21,8 +21,8 @@ import psutil
 
 from .runtime import RuntimeStore, SupervisorLockedError, utc_now
 
-SERVICE_NAMES = ("web", "scheduler", "ingestion", "backfill_ingestion", "review")
-WORKER_NAMES = ("scheduler", "ingestion", "backfill_ingestion", "review")
+SERVICE_NAMES = ("web", "scheduler", "ingestion", "backfill_ingestion", "review", "video_extraction")
+WORKER_NAMES = ("scheduler", "ingestion", "backfill_ingestion", "review", "video_extraction")
 CONTROL_VERSION = "v1"
 WEB_PORT = 8000
 MAX_LOG_BYTES = 1_000_000
@@ -88,6 +88,11 @@ class Supervisor:
             "review": ServiceDefinition(
                 "review",
                 (python, manage, "run_review_worker", "--loop"),
+                frozenset(("start", "stop", "restart", "status", "logs")),
+            ),
+            "video_extraction": ServiceDefinition(
+                "video_extraction",
+                (python, manage, "run_video_extraction_worker", "--loop"),
                 frozenset(("start", "stop", "restart", "status", "logs")),
             ),
         }

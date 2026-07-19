@@ -20,8 +20,17 @@ from posts.models import (
     OriginType,
 )
 from reviews.adapters import AssessmentOutput, ReplyOutput, RiskOutput
-from reviews.models import RecommendedAction, ReviewStatus, ReviewTask
+from reviews.models import (
+    RecommendedAction,
+    ReviewStatus,
+    ReviewTask,
+    VideoEvidence,
+    VideoEvidenceKind,
+    VideoExtraction,
+)
 from reviews.services import AI_EVALUATE_TASK, OCR_EXTRACT_TASK, persist_assessment
+from reviews.video import media_fingerprint
+from reviews.video_tasks import VIDEO_EXTRACTOR_VERSION
 
 
 @pytest.mark.django_db
@@ -63,7 +72,7 @@ def test_operations_dashboard_renders_original_post_metrics():
     assert "浏览 12" in response.content.decode()
     assert "审核处置" in response.content.decode()
     assert 'class="cdp-mode">CDP</span>' in response.content.decode()
-    assert 'data-cdp-login-status' in response.content.decode()
+    assert "data-cdp-login-status" in response.content.decode()
     assert 'fetch("/auth/status"' in response.content.decode()
     assert 'action="/auth/open-login/"' in response.content.decode()
     assert 'data-operation="SKIP"' in response.content.decode()
@@ -87,7 +96,9 @@ def test_invalid_cdp_login_control_only_opens_controlled_chrome(mock_open_login)
 
 @pytest.mark.django_db
 def test_operations_dashboard_shows_existing_local_reply_draft_without_publish_controls():
-    user = get_user_model().objects.create_user(username="reply-draft-operator", password="test-password")
+    user = get_user_model().objects.create_user(
+        username="reply-draft-operator", password="test-password"
+    )
     post = OriginalPost.objects.create(
         topic_id=1099, content_id="reply-draft-content", content_text="希望增加编队预设"
     )
@@ -154,9 +165,7 @@ def test_dashboard_requires_one_block_reason_without_requiring_every_reason():
 
 @pytest.mark.django_db
 def test_dashboard_renders_quick_filter_for_normal_pending_recommendations():
-    user = get_user_model().objects.create_user(
-        username="quick-filter", password="test-password"
-    )
+    user = get_user_model().objects.create_user(username="quick-filter", password="test-password")
     client = Client()
     client.force_login(user)
 
@@ -220,7 +229,9 @@ def test_dashboard_keyboard_navigation_uses_real_query_separators_and_repairs_le
     assert 'id="post-workspace"' in page
     assert 'const postWorkspaceAnchor="#post-workspace"' in page
     assert repaired.status_code == 302
-    assert repaired.url == f"/?appid=wx6d2454a8afcd9706&sort=publish_time_desc&topic={first.topic_id}"
+    assert (
+        repaired.url == f"/?appid=wx6d2454a8afcd9706&sort=publish_time_desc&topic={first.topic_id}"
+    )
 
 
 @pytest.mark.django_db
@@ -235,6 +246,49 @@ def test_operations_dashboard_renders_post_media():
 
     assert response.status_code == 200
     assert 'src="https://example.test/post-image.png"' in response.content.decode()
+
+
+@pytest.mark.django_db
+def test_dashboard_aggregates_current_video_evidence_and_hides_history_by_default():
+    user = get_user_model().objects.create_user(username="video-evidence", password="test-password")
+    post = OriginalPost.objects.create(topic_id=101, content_id="video-evidence-content")
+    media = post.media.create(url="https://example.test/video.mp4", media_type="VIDEO")
+    current = VideoExtraction.objects.create(
+        post=post,
+        media=media,
+        media_fingerprint=media_fingerprint(media.url),
+        extractor_version=VIDEO_EXTRACTOR_VERSION,
+    )
+    historical = VideoExtraction.objects.create(
+        post=post,
+        media=media,
+        media_fingerprint=media_fingerprint(media.url),
+        extractor_version="v1",
+    )
+    for sequence, text in enumerate(("扫码联系客服", "扫码联系客服！", "搜索群号领取礼包")):
+        VideoEvidence.objects.create(
+            extraction=current,
+            kind=VideoEvidenceKind.FRAME_OCR,
+            start_ms=sequence * 250,
+            sequence=sequence,
+            text=text,
+            confidence=0.9,
+        )
+    VideoEvidence.objects.create(
+        extraction=historical,
+        kind=VideoEvidenceKind.FRAME_OCR,
+        start_ms=0,
+        text="历史逐帧证据",
+    )
+    client = Client()
+    client.force_login(user)
+
+    page = client.get("/", {"topic": post.topic_id}).content.decode()
+
+    assert "视频帧文字汇总" in page
+    assert "查看原始 3 帧 OCR" in page
+    assert "另有 1 个历史提取记录，未用于当前 AI 审核。" in page
+    assert "历史逐帧证据" not in page
 
 
 @pytest.mark.django_db
@@ -256,7 +310,9 @@ def test_operations_dashboard_shows_sink_status_and_only_restore_transition():
 
 @pytest.mark.django_db
 def test_dashboard_filters_combined_upstream_post_statuses():
-    user = get_user_model().objects.create_user(username="post-status-filter", password="test-password")
+    user = get_user_model().objects.create_user(
+        username="post-status-filter", password="test-password"
+    )
     normal = OriginalPost.objects.create(
         topic_id=1004, content_id="status-normal", content_text="状态正常", status=2
     )
@@ -387,9 +443,7 @@ def test_operations_dashboard_keeps_posts_deleted_from_management_queue_as_statu
 def test_dashboard_rejects_operation_for_post_deleted_from_management_queue(monkeypatch):
     monkeypatch.setattr(runtime, "enable_upstream_writes", True)
     monkeypatch.setattr(runtime, "enable_block_writes", True)
-    user = get_user_model().objects.create_user(
-        username="deleted-action", password="test-password"
-    )
+    user = get_user_model().objects.create_user(username="deleted-action", password="test-password")
     post = OriginalPost.objects.create(
         topic_id=1002,
         content_id="deleted-action-content",
@@ -514,8 +568,12 @@ def test_dashboard_successful_single_operation_completes_human_review(monkeypatc
 
 @pytest.mark.django_db
 def test_dashboard_partial_combined_operation_keeps_human_review_pending():
-    user = get_user_model().objects.create_user(username="combined-pending", password="test-password")
-    post = OriginalPost.objects.create(topic_id=108, content_id="combined-pending-content", status=2)
+    user = get_user_model().objects.create_user(
+        username="combined-pending", password="test-password"
+    )
+    post = OriginalPost.objects.create(
+        topic_id=108, content_id="combined-pending-content", status=2
+    )
     CandidatePost.objects.create(
         topic_id=post.topic_id, content_id=post.content_id, origin_type=OriginType.ORIGINAL
     )
@@ -577,7 +635,9 @@ def test_dashboard_shows_ai_suggestion_and_human_final_action_without_feedback_u
 
 @pytest.mark.django_db
 def test_dashboard_allows_deleted_post_to_be_requeued_for_local_evaluation():
-    user = get_user_model().objects.create_user(username="deleted-requeue", password="test-password")
+    user = get_user_model().objects.create_user(
+        username="deleted-requeue", password="test-password"
+    )
     post = OriginalPost.objects.create(
         topic_id=107,
         content_id="deleted-requeue-content",
@@ -632,7 +692,13 @@ def test_dashboard_uses_one_selected_game_and_other_filters_remain_multi_value()
         109, "wx-filter-a", "多选命中 A", "GUIDE", "CHEAT", "SINK", ReviewStatus.PENDING
     )
     second = create_assessed_post(
-        110, "wx-filter-b", "多选命中 B", "FEEDBACK", "TRAFFIC_DIVERSION", "KEEP", ReviewStatus.REVIEWED
+        110,
+        "wx-filter-b",
+        "多选命中 B",
+        "FEEDBACK",
+        "TRAFFIC_DIVERSION",
+        "KEEP",
+        ReviewStatus.REVIEWED,
     )
     create_assessed_post(
         111, "wx-filter-c", "不应命中", "SOCIAL", "OFF_TOPIC", "HUMAN_REVIEW", ReviewStatus.PENDING
@@ -694,7 +760,7 @@ def test_dashboard_rejects_unknown_block_reason(monkeypatch):
 
 
 @pytest.mark.django_db
-def test_dashboard_refresh_updates_post_content_status_and_metrics(monkeypatch):
+def test_dashboard_refresh_updates_only_post_status_and_metrics(monkeypatch):
     user = get_user_model().objects.create_user(
         username="refresh-operator", password="test-password"
     )
@@ -717,20 +783,21 @@ def test_dashboard_refresh_updates_post_content_status_and_metrics(monkeypatch):
             self.closed = False
 
         def get_content_card(self, content_id):
-            assert content_id == "content-104"
+            raise AssertionError("轻量刷新不得拉取内容卡")
+
+        def get_post_metrics(self, topic_id):
+            assert topic_id == 104
             return {
                 "data": {
-                    "content_card": {
-                        "base_content": {"content": "<p>新正文</p>", "status": 2},
-                        "reply_info": {"total_reply_count": 5},
-                        "love_info": {"total_love_count": 4},
-                        "share_info": {"total_share_count": 3},
+                    "topic": {
+                        "view_count": 12,
+                        "reply_count": 5,
+                        "love_count": 4,
+                        "share_count": 3,
+                        "status": 2,
                     }
                 }
             }
-
-        def get_post_metrics(self, topic_id):
-            return {"data": {"topic": {"view_count": 12, "reply_count": 5, "love_count": 4}}}
 
         def close(self):
             self.closed = True
@@ -744,11 +811,13 @@ def test_dashboard_refresh_updates_post_content_status_and_metrics(monkeypatch):
     assert response.status_code == 302
     post.refresh_from_db()
     snapshot = post.interaction_snapshots.order_by("-captured_at").first()
-    assert post.content_text == "新正文"
+    assert post.content_text == "旧正文"
     assert post.status == 2
     assert snapshot.view_count == 12
     assert snapshot.love_count == 4
     assert snapshot.reply_count == 5
+    assert snapshot.share_count == 3
+    assert not BackgroundJob.objects.filter(task_type=AI_EVALUATE_TASK).exists()
 
 
 @pytest.mark.django_db
@@ -756,9 +825,7 @@ def test_dashboard_batch_executes_only_eligible_ai_sink_and_block_recommendation
     monkeypatch.setattr(runtime, "enable_upstream_writes", True)
     monkeypatch.setattr(runtime, "enable_sink_writes", True)
     monkeypatch.setattr(runtime, "enable_block_writes", True)
-    user = get_user_model().objects.create_user(
-        username="batch-operator", password="test-password"
-    )
+    user = get_user_model().objects.create_user(username="batch-operator", password="test-password")
     appid = "wx6d2454a8afcd9706"
 
     def create_post(topic_id, action, *, status=2, with_evidence=True):
@@ -776,7 +843,11 @@ def test_dashboard_batch_executes_only_eligible_ai_sink_and_block_recommendation
             origin_type=OriginType.ORIGINAL,
         )
         risks = (
-            [RiskOutput(label="TRAFFIC_DIVERSION", confidence=0.91, evidence=[f"联系方式 {topic_id}"])]
+            [
+                RiskOutput(
+                    label="TRAFFIC_DIVERSION", confidence=0.91, evidence=[f"联系方式 {topic_id}"]
+                )
+            ]
             if with_evidence
             else []
         )
@@ -832,7 +903,7 @@ def test_dashboard_batch_executes_only_eligible_ai_sink_and_block_recommendation
     assert f"#{sink_post.topic_id}" in preview
     assert f"#{block_post.topic_id}" in preview
     assert "引流/外部联系方式：联系方式 1201" in preview
-    assert 'data-batch-open' in preview
+    assert "data-batch-open" in preview
     response = client.post(
         "/posts/batch-ai-recommendations/",
         {

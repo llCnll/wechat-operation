@@ -134,7 +134,7 @@ def write_worker_heartbeat() -> None:
     """Update the optional heartbeat only for processes started by Supervisor."""
     service = os.getenv("OPERATION_SUPERVISOR_SERVICE", "")
     runtime_dir = os.getenv("OPERATION_RUNTIME_DIR", "")
-    if service not in {"scheduler", "ingestion", "backfill_ingestion", "review"} or not runtime_dir:
+    if service not in {"scheduler", "ingestion", "backfill_ingestion", "review", "video_extraction"} or not runtime_dir:
         return
     RuntimeStore(Path(runtime_dir)).write_heartbeat(service)
 

@@ -9,7 +9,7 @@ from django.test.utils import CaptureQueriesContext
 from django.urls import resolve
 from django.utils import timezone
 
-from config.context_processors import admin_console_overview
+from config.context_processors import _service_reason, admin_console_overview
 from config.supervisor import SupervisorUnavailableError
 from jobs.models import BackgroundJob, JobStatus
 from posts.models import ManagedGame, OriginalPost
@@ -42,12 +42,16 @@ def test_admin_home_is_configuration_and_traceability_console(admin_client):
     assert "仅此区域允许编辑" in page
     assert "未启用策略" in page
     assert "初始化与运行状态" in page
-    assert "每 15 分钟创建采集和状态巡检任务；不读取微信，也不调用 AI。" in page
-    assert "实时采集 Worker 处理自动采集和状态巡检" in page
-    assert "人工补采 Worker 处理历史补采、互动刷新和旧任务。" in page
-    assert "执行图片 OCR 和 AI 评估任务；不创建任务，也不直接读取微信。" in page
+    assert "自动调度器" in page
+    assert "帖子采集 Worker" in page
+    assert "AI 审核 Worker" in page
     assert "配置 AI 审核" in page
     assert "配置 OCR" in page
+    assert "配置视频审核" in page
+    assert (
+        "/admin/runtime/services/video_extraction/start/" in page
+        or "/admin/runtime/services/video_extraction/restart/" in page
+    )
     assert "人工处置授权" in page
     assert 'data-config-dialog="ai"' in page
     assert 'data-config-dialog-panel="ai"' in page
@@ -55,9 +59,32 @@ def test_admin_home_is_configuration_and_traceability_console(admin_client):
     assert 'data-config-dialog-panel="writes"' in page
     assert "配置 AI、OCR 与人工处置授权" not in page
     assert "console-pipeline-info" in page
-    assert "查看帖子采集 Worker说明" in page
+    assert "管理采集" in page
+    assert 'class="console-pipeline-node-step">01</span>' in page
+    assert "查看视频审核 Worker（可选）说明" in page
+    assert "查看帖子采集 Worker说明" not in page
     assert "检测" in page
     assert "下一步：" in page
+
+
+@pytest.mark.django_db
+def test_admin_pipeline_follows_the_content_flow(admin_client):
+    response = admin_client.get("/admin/")
+
+    pipeline = admin_console_overview(response.wsgi_request)["admin_console"]["pipeline"]
+
+    assert [node["key"] for node in pipeline] == [
+        "web",
+        "cdp",
+        "scheduler",
+        "ingestion",
+        "ocr",
+        "video_extraction",
+        "ai",
+        "policy",
+        "review",
+        "writes",
+    ]
 
 
 @pytest.mark.django_db
@@ -71,6 +98,14 @@ def test_admin_home_degrades_when_supervisor_is_unavailable(admin_client, monkey
 
     assert "Supervisor 未启动或运行态文件不可用" in page
     assert "启动 Supervisor" in page
+
+
+def test_service_reason_formats_heartbeat_in_local_time():
+    reason = _service_reason(
+        {"running": True, "heartbeat_at": "2026-07-19T18:12:43.074687+00:00"}
+    )
+
+    assert reason == "运行中；最近心跳 2026-07-20 02:12:43"
 
 
 @pytest.mark.django_db
@@ -109,9 +144,7 @@ def test_runtime_control_is_staff_only_and_uses_fixed_proxy(admin_client, monkey
     anonymous = Client()
 
     denied = anonymous.post("/admin/runtime/services/review/start/")
-    response = admin_client.post(
-        "/admin/runtime/services/review/start/", {"return_to": "/admin/"}
-    )
+    response = admin_client.post("/admin/runtime/services/review/start/", {"return_to": "/admin/"})
 
     assert denied.status_code == 302
     assert response.status_code == 302
@@ -171,9 +204,7 @@ def test_ingestion_control_starts_both_fixed_workers_and_reports_partial_failure
 
     assert response.status_code == 302
     assert calls == [("ingestion", "start"), ("backfill_ingestion", "start")]
-    response_messages = " ".join(
-        str(message) for message in get_messages(response.wsgi_request)
-    )
+    response_messages = " ".join(str(message) for message in get_messages(response.wsgi_request))
     assert "backfill_ingestion" in response_messages
 
 
@@ -197,9 +228,7 @@ def test_admin_can_enqueue_bounded_manual_ingestion_for_a_managed_game(admin_cli
     assert captured["appid"] == game.appid
     assert captured["page_size"] == 20
     assert captured["end_time"] - captured["start_time"] == 12 * 60 * 60
-    response_messages = " ".join(
-        str(message) for message in get_messages(response.wsgi_request)
-    )
+    response_messages = " ".join(str(message) for message in get_messages(response.wsgi_request))
     assert "已创建" in response_messages
     assert resolve("/admin/runtime/ingestion/enqueue/").func.__name__ == "enqueue_manual_ingestion"
 
@@ -212,9 +241,7 @@ def test_admin_rejects_manual_ingestion_outside_the_bounded_hour_range(admin_cli
     )
 
     assert response.status_code == 302
-    response_messages = " ".join(
-        str(message) for message in get_messages(response.wsgi_request)
-    )
+    response_messages = " ".join(str(message) for message in get_messages(response.wsgi_request))
     assert "1 至 744 小时" in response_messages
 
 
@@ -375,9 +402,12 @@ def test_managed_game_only_exposes_controlled_sync_action(admin_client):
     assert page.status_code == 200
     assert "从受控微信同步可管理游戏" in page.content.decode()
     assert admin_client.get("/admin/posts/managedgame/add/").status_code == 403
-    assert admin_client.post(
-        f"/admin/posts/managedgame/{game.pk}/change/", {"name": "不应写入", "_save": "保存"}
-    ).status_code == 403
+    assert (
+        admin_client.post(
+            f"/admin/posts/managedgame/{game.pk}/change/", {"name": "不应写入", "_save": "保存"}
+        ).status_code
+        == 403
+    )
     game.refresh_from_db()
     assert game.name == "仅同步目录"
 

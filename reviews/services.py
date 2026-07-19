@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import re
 from datetime import timedelta
+from difflib import SequenceMatcher
 from hashlib import sha256
 from uuid import uuid4
 
@@ -10,11 +12,12 @@ from django.db import transaction
 from django.utils import timezone
 
 from config.settings import runtime
-from jobs.models import BackgroundJob
+from jobs.models import BackgroundJob, JobStatus
 from jobs.services import enqueue_job
 from posts.models import (
     POST_STATUS_NORMAL,
     CandidatePost,
+    MediaType,
     OriginalPost,
     OriginType,
     is_post_deleted,
@@ -32,7 +35,11 @@ from .models import (
     ReviewStatus,
     ReviewTask,
     RiskEvidence,
+    VideoExtraction,
+    VideoExtractionStatus,
 )
+from .video import media_fingerprint
+from .video_tasks import VIDEO_EXTRACT_TASK, VIDEO_EXTRACTOR_VERSION, normalized_ocr_text
 
 EXPECTED_OPERATION_STATUS = {
     RecommendedAction.RESTORE: 2,
@@ -49,8 +56,16 @@ BLOCK_REASON_OPTIONS = (
 )
 OCR_EXTRACT_TASK = "OCR_EXTRACT"
 AI_EVALUATE_TASK = "AI_EVALUATE"
-EVALUATION_PIPELINE_VERSION = "v1"
+EVALUATION_PIPELINE_VERSION = "v3"
 MAX_REPLY_DRAFT_LENGTH = 4000
+VIDEO_OCR_SUMMARY_GAP_MS = 1_500
+VIDEO_OCR_SUMMARY_MAX_SPAN_MS = 5_000
+VIDEO_OCR_SUMMARY_MAX_TEXTS = 3
+VIDEO_OCR_SUMMARY_SIMILARITY_THRESHOLD = 0.85
+MAX_EVALUATION_CONTENT_CHARS = 12_000
+MAX_IMAGE_OCR_CHARS = 8_000
+MAX_VIDEO_EVIDENCE_CHARS = 12_000
+MAX_EVALUATION_OCR_CHARS = 20_000
 
 
 def is_operation_enabled(action: str) -> bool:
@@ -132,22 +147,202 @@ def policy_recommendation(
     return action, priority
 
 
+def _video_timestamp(start_ms: int, end_ms: int | None = None) -> str:
+    start = f"{start_ms // 60000:02d}:{(start_ms // 1000) % 60:02d}.{start_ms % 1000:03d}"
+    if end_ms is None:
+        return start
+    end = f"{end_ms // 60000:02d}:{(end_ms // 1000) % 60:02d}.{end_ms % 1000:03d}"
+    return f"{start}–{end}"
+
+
+def _bounded_text(value: str, limit: int) -> str:
+    """Keep model context bounded without splitting a marker or exposing source URLs."""
+    if len(value) <= limit:
+        return value
+    return value[: max(0, limit - 1)].rstrip() + "…"
+
+
+def _group_video_ocr(evidence_rows) -> list[list]:
+    """Split dense frame OCR into bounded continuous visual segments."""
+    groups: list[list] = []
+    for evidence in evidence_rows:
+        if evidence.kind != "FRAME_OCR":
+            continue
+        if (
+            groups
+            and evidence.start_ms - groups[-1][-1].start_ms <= VIDEO_OCR_SUMMARY_GAP_MS
+            and evidence.start_ms - groups[-1][0].start_ms <= VIDEO_OCR_SUMMARY_MAX_SPAN_MS
+        ):
+            groups[-1].append(evidence)
+        else:
+            groups.append([evidence])
+    return groups
+
+
+def _representative_video_ocr(group) -> list:
+    """Keep the strongest and materially different OCR observations in a segment."""
+    ordered = sorted(
+        group,
+        key=lambda evidence: (
+            evidence.confidence if evidence.confidence is not None else 0,
+            len(evidence.text),
+            evidence.start_ms,
+        ),
+        reverse=True,
+    )
+    selected = []
+    for evidence in ordered:
+        normalized = normalized_ocr_text(evidence.text)
+        if not normalized:
+            continue
+        if any(
+            SequenceMatcher(
+                a=normalized,
+                b=normalized_ocr_text(existing.text),
+                autojunk=False,
+            ).ratio()
+            >= VIDEO_OCR_SUMMARY_SIMILARITY_THRESHOLD
+            for existing in selected
+        ):
+            continue
+        selected.append(evidence)
+        if len(selected) == VIDEO_OCR_SUMMARY_MAX_TEXTS:
+            break
+    return sorted(selected, key=lambda evidence: evidence.start_ms)
+
+
+def video_evidence_summaries(extraction: VideoExtraction) -> list[dict]:
+    """Return compact visual evidence with original OCR retained for disclosure."""
+    kind_order = {"QR_CODE": 0, "FRAME_OCR": 1, "AUDIO_TRANSCRIPT": 2}
+    evidence_rows = sorted(
+        extraction.evidence.all(),
+        key=lambda evidence: (
+            evidence.start_ms,
+            kind_order[evidence.kind],
+            evidence.sequence,
+            evidence.pk,
+        ),
+    )
+    summaries: list[dict] = []
+    for group in _group_video_ocr(evidence_rows):
+        summaries.append(
+            {
+                "kind": "FRAME_OCR_SUMMARY",
+                "start_ms": group[0].start_ms,
+                "end_ms": group[-1].start_ms if len(group) > 1 else None,
+                "frame_count": len(group),
+                "representatives": _representative_video_ocr(group),
+                "raw_evidence": group,
+            }
+        )
+    for evidence in evidence_rows:
+        if evidence.kind == "FRAME_OCR":
+            continue
+        summaries.append(
+            {
+                "kind": evidence.kind,
+                "start_ms": evidence.start_ms,
+                "end_ms": evidence.end_ms,
+                "evidence": evidence,
+            }
+        )
+    return sorted(
+        summaries,
+        key=lambda summary: (
+            summary["start_ms"],
+            kind_order.get(summary["kind"].replace("_SUMMARY", ""), 1),
+        ),
+    )
+
+
+def current_video_extractions(post: OriginalPost) -> list[VideoExtraction]:
+    """Return the latest active-version attempt for each video media item."""
+    latest_by_media: dict[int, VideoExtraction] = {}
+    for extraction in (
+        post.video_extractions.filter(extractor_version=VIDEO_EXTRACTOR_VERSION)
+        .select_related("media")
+        .prefetch_related("evidence")
+        .order_by("media_id", "-attempt", "-pk")
+    ):
+        latest_by_media.setdefault(extraction.media_id, extraction)
+    return list(latest_by_media.values())
+
+
+def _video_evidence_input_lines(extraction: VideoExtraction, media_index: int) -> list[str]:
+    """Compress repeated dense-frame OCR before it becomes model context."""
+    lines: list[str] = []
+    for summary in video_evidence_summaries(extraction):
+        if summary["kind"] == "FRAME_OCR_SUMMARY":
+            label = "视频帧文字" if summary["frame_count"] == 1 else "视频帧文字汇总"
+            timestamp = _video_timestamp(summary["start_ms"], summary["end_ms"])
+            representative_text = "；".join(
+                f"{_video_timestamp(evidence.start_ms)}：{evidence.text}"
+                for evidence in summary["representatives"]
+            )
+            frame_detail = (
+                "" if summary["frame_count"] == 1 else f" · 连续 {summary['frame_count']} 帧"
+            )
+            lines.append(
+                f"[{label} · 视频 {media_index} · {timestamp}{frame_detail}] "
+                f"代表文字：{representative_text}"
+            )
+            continue
+        evidence = summary["evidence"]
+        label = {"QR_CODE": "二维码", "AUDIO_TRANSCRIPT": "视频语音"}[summary["kind"]]
+        lines.append(
+            f"[{label} · 视频 {media_index} · "
+            f"{_video_timestamp(evidence.start_ms, evidence.end_ms)}] {evidence.text}"
+        )
+    return lines
+
+
 def build_evaluation_input(post: OriginalPost) -> tuple[str, str, str]:
     """Return prompt input and a stable fingerprint without provider payloads."""
-    content = "\n\n".join(
-        part for part in (post.title.strip(), post.content_text.strip(), post.ballot_text.strip()) if part
+    content = _bounded_text(
+        "\n\n".join(
+            part
+            for part in (post.title.strip(), post.content_text.strip(), post.ballot_text.strip())
+            if part
+        ),
+        MAX_EVALUATION_CONTENT_CHARS,
     )
-    ocr_text = "\n".join(
-        text.strip() for text in post.ocr_extractions.order_by("media_id", "created_at").values_list("text", flat=True)
-        if text.strip()
+    image_ocr = _bounded_text(
+        "\n".join(
+            text.strip()
+            for text in post.ocr_extractions.order_by("media_id", "created_at").values_list(
+                "text", flat=True
+            )
+            if text.strip()
+        ),
+        MAX_IMAGE_OCR_CHARS,
     )
+    video_lines: list[str] = []
+    media_ids = list(post.media.order_by("pk").values_list("pk", flat=True))
+    for extraction in current_video_extractions(post):
+        media_index = media_ids.index(extraction.media_id) + 1
+        video_lines.extend(_video_evidence_input_lines(extraction, media_index))
+        if extraction.status != VideoExtractionStatus.SUCCEEDED:
+            video_lines.append(
+                f"[视频 {media_index} 提取状态] {extraction.status}："
+                f"{extraction.error_summary or '需人工核验'}"
+            )
+    ocr_text = image_ocr
+    if video_lines:
+        video_text = _bounded_text("\n".join(video_lines), MAX_VIDEO_EVIDENCE_CHARS)
+        ocr_text = _bounded_text(
+            "\n".join(part for part in (image_ocr, video_text) if part),
+            MAX_EVALUATION_OCR_CHARS,
+        )
     urls = ",".join(post.media.order_by("pk").values_list("url", flat=True))
     # OCR is a pipeline output. The source snapshot is post copy plus media references.
     fingerprint = sha256(f"{content}\n--MEDIA--\n{urls}".encode()).hexdigest()
     return content, ocr_text, fingerprint
 
 
-def enqueue_evaluation_pipeline(post: OriginalPost, *, force: bool = False) -> tuple[BackgroundJob, BackgroundJob]:
+@transaction.atomic
+def enqueue_evaluation_pipeline(
+    post: OriginalPost, *, force: bool = False
+) -> tuple[BackgroundJob, BackgroundJob]:
     """Queue OCR first and AI second; repeated requests reuse the same jobs."""
     candidate = CandidatePost.objects.filter(topic_id=post.topic_id).first()
     if candidate is None or candidate.origin_type != OriginType.ORIGINAL:
@@ -159,11 +354,90 @@ def enqueue_evaluation_pipeline(post: OriginalPost, *, force: bool = False) -> t
     if force:
         # An explicit operator re-evaluation intentionally creates a new assessment history entry.
         suffix = f"{suffix}:rerun:{uuid4().hex}"
-    summary = {"topic_id": post.topic_id, "input_fingerprint": fingerprint, "pipeline_version": EVALUATION_PIPELINE_VERSION}
-    ocr_job = enqueue_job(task_type=OCR_EXTRACT_TASK, idempotency_key=f"ocr:{suffix}", parameter_summary=summary)
+    summary = {
+        "topic_id": post.topic_id,
+        "input_fingerprint": fingerprint,
+        "pipeline_version": EVALUATION_PIPELINE_VERSION,
+    }
+    ocr_job = enqueue_job(
+        task_type=OCR_EXTRACT_TASK, idempotency_key=f"ocr:{suffix}", parameter_summary=summary
+    )
+    video_job_ids: list[int] = []
+    if runtime.video_enabled and runtime.video_preflight_verified:
+        for media in post.media.filter(media_type=MediaType.VIDEO).order_by("pk")[
+            : runtime.video_max_per_post
+        ]:
+            fingerprint_value = media_fingerprint(media.url)
+            extraction = (
+                VideoExtraction.objects.filter(
+                    media=media,
+                    media_fingerprint=fingerprint_value,
+                    extractor_version=VIDEO_EXTRACTOR_VERSION,
+                )
+                .order_by("-attempt", "-pk")
+                .first()
+            )
+            if extraction is None:
+                extraction = VideoExtraction.objects.create(
+                    post=post,
+                    media=media,
+                    media_fingerprint=fingerprint_value,
+                    extractor_version=VIDEO_EXTRACTOR_VERSION,
+                    attempt=1,
+                )
+            video_summary = {
+                "topic_id": post.topic_id,
+                "video_extraction_id": extraction.pk,
+                "extractor_version": VIDEO_EXTRACTOR_VERSION,
+                "attempt": extraction.attempt,
+            }
+            video_key = (
+                f"video:{post.topic_id}:{fingerprint_value}:{VIDEO_EXTRACTOR_VERSION}:"
+                f"attempt:{extraction.attempt}"
+            )
+            retryable_video_statuses = {
+                VideoExtractionStatus.FAILED,
+                VideoExtractionStatus.PARTIAL,
+                VideoExtractionStatus.CANCELED,
+                VideoExtractionStatus.SKIPPED_LIMIT,
+            }
+            active_video_job = (
+                BackgroundJob.objects.filter(
+                    task_type=VIDEO_EXTRACT_TASK,
+                    status__in=(JobStatus.PENDING, JobStatus.RUNNING),
+                    parameter_summary__video_extraction_id=extraction.pk,
+                )
+                .order_by("created_at")
+                .first()
+            )
+            if force and extraction.status in retryable_video_statuses and not active_video_job:
+                extraction = VideoExtraction.objects.create(
+                    post=post,
+                    media=media,
+                    media_fingerprint=fingerprint_value,
+                    extractor_version=VIDEO_EXTRACTOR_VERSION,
+                    attempt=extraction.attempt + 1,
+                )
+                video_summary = {
+                    "topic_id": post.topic_id,
+                    "video_extraction_id": extraction.pk,
+                    "extractor_version": VIDEO_EXTRACTOR_VERSION,
+                    "attempt": extraction.attempt,
+                }
+                video_key = (
+                    f"video:{post.topic_id}:{fingerprint_value}:{VIDEO_EXTRACTOR_VERSION}:"
+                    f"attempt:{extraction.attempt}"
+                )
+            video_job = active_video_job or enqueue_job(
+                task_type=VIDEO_EXTRACT_TASK,
+                idempotency_key=video_key,
+                parameter_summary=video_summary,
+            )
+            video_job_ids.append(video_job.pk)
     ai_job = enqueue_job(
-        task_type=AI_EVALUATE_TASK, idempotency_key=f"ai:{suffix}",
-        parameter_summary={**summary, "ocr_job_id": ocr_job.pk},
+        task_type=AI_EVALUATE_TASK,
+        idempotency_key=f"ai:{suffix}",
+        parameter_summary={**summary, "ocr_job_id": ocr_job.pk, "video_job_ids": video_job_ids},
     )
     return ocr_job, ai_job
 
@@ -192,6 +466,15 @@ def persist_assessment(
             confidence=risk.confidence,
             evidence=risk.evidence,
         )
+    high_reward = any(
+        re.search(r"(?:上千|上万|无限|巨额|\d+\s*[万千])", evidence)
+        for risk in output.risk_labels
+        for evidence in risk.evidence
+    )
+    video_incomplete = any(
+        extraction.status != VideoExtractionStatus.SUCCEEDED
+        for extraction in current_video_extractions(post)
+    )
     task, _ = ReviewTask.objects.update_or_create(
         post=post,
         defaults={
@@ -204,6 +487,8 @@ def persist_assessment(
                 or not post.content_text
                 or post.ocr_extractions.filter(error_summary__gt="").exists()
                 or any(not risk.evidence for risk in output.risk_labels)
+                or video_incomplete
+                or high_reward
             ),
         },
     )
@@ -333,9 +618,8 @@ def execute_confirmed_operation(
         ):
             result_code = "SKIPPED_UPSTREAM_NOT_NORMAL"
             error_summary = "上游帖子已不是正常状态，跳过重复处置"
-        elif (
-            action == RecommendedAction.UNMUTE
-            and before_state["local_block_end_time"] <= int(timezone.now().timestamp())
+        elif action == RecommendedAction.UNMUTE and before_state["local_block_end_time"] <= int(
+            timezone.now().timestamp()
         ):
             error_summary = "当前游戏未处于禁言状态"
         else:

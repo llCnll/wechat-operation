@@ -1,9 +1,15 @@
 from jobs.models import BackgroundJob, JobStatus
+from jobs.services import JobDeferred
 from posts.models import OriginalPost
 
 from .adapters import OpenAiCompatibleOcrClient, OpenAiCompatibleReviewClient
 from .models import OcrExtraction, PolicyVersion
-from .services import OCR_EXTRACT_TASK, build_evaluation_input, persist_assessment
+from .services import (
+    OCR_EXTRACT_TASK,
+    build_evaluation_input,
+    current_video_extractions,
+    persist_assessment,
+)
 
 AI_EVALUATE_TASK = "AI_EVALUATE"
 
@@ -22,13 +28,20 @@ def evaluate_post_handler(job: BackgroundJob) -> None:
     if ocr_job_id:
         ocr_job = BackgroundJob.objects.get(pk=ocr_job_id)
         if ocr_job.status in {JobStatus.PENDING, JobStatus.RUNNING}:
-            raise RuntimeError("等待 OCR 任务完成")
+            raise JobDeferred("等待 OCR 任务完成")
+    for video_job_id in job.parameter_summary.get("video_job_ids", []):
+        video_job = BackgroundJob.objects.get(pk=video_job_id)
+        if video_job.status in {JobStatus.PENDING, JobStatus.RUNNING}:
+            raise JobDeferred("等待视频提取任务完成")
     policy = PolicyVersion.objects.filter(is_active=True).order_by("-created_at").first()
     content, ocr_text, fingerprint = build_evaluation_input(post)
     expected_fingerprint = job.parameter_summary.get("input_fingerprint")
     if expected_fingerprint and expected_fingerprint != fingerprint:
         raise RuntimeError("帖子内容已变化，等待重新入队")
-    output = OpenAiCompatibleReviewClient().evaluate(content, ocr_text)
+    has_video_evidence = bool(current_video_extractions(post))
+    output = OpenAiCompatibleReviewClient().evaluate(
+        content, ocr_text, has_video_evidence=has_video_evidence
+    )
     persist_assessment(post, output, policy)
 
 
@@ -40,12 +53,16 @@ def extract_post_ocr_handler(job: BackgroundJob) -> None:
             text, confidence = client.extract_text(media.url)
         except Exception as exc:
             OcrExtraction.objects.update_or_create(
-                post=post, media=media, provider="openai-compatible",
+                post=post,
+                media=media,
+                provider="openai-compatible",
                 defaults={"text": "", "confidence": None, "error_summary": str(exc)[:500]},
             )
         else:
             OcrExtraction.objects.update_or_create(
-                post=post, media=media, provider="openai-compatible",
+                post=post,
+                media=media,
+                provider="openai-compatible",
                 defaults={"text": text, "confidence": confidence, "error_summary": ""},
             )
 
