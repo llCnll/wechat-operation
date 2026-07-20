@@ -36,7 +36,11 @@ def _future_timestamp(value: Any, *, observed_at) -> datetime | None:
 
 @transaction.atomic
 def sync_author_mute_status(
-    post: OriginalPost, payload: dict[str, Any], *, source_requested_at=None
+    post: OriginalPost,
+    payload: dict[str, Any],
+    *,
+    source_requested_at=None,
+    source_appid: str | None = None,
 ) -> AuthorMuteStatus | None:
     """Persist the small author projection carried by an already-fetched management detail."""
     requested_at = source_requested_at or timezone.now()
@@ -50,13 +54,13 @@ def sync_author_mute_status(
     if not isinstance(openid, str) or not openid:
         return None
 
-    source_appid = post.source_appid or str(topic.get("appid") or "")
-    if not source_appid:
+    resolved_appid = source_appid or post.source_appid or str(topic.get("appid") or "")
+    if not resolved_appid:
         return None
     nick_name = creator.get("nick_name") if isinstance(creator.get("nick_name"), str) else ""
     block_info = creator.get("block_info") if isinstance(creator, dict) else None
     local_until = None
-    if isinstance(block_info, dict) and str(block_info.get("appid", "")) == source_appid:
+    if isinstance(block_info, dict) and str(block_info.get("appid", "")) == resolved_appid:
         local_until = _future_timestamp(block_info.get("block_end_time"), observed_at=observed_at)
     global_until = _future_timestamp(creator.get("global_block_end_time"), observed_at=observed_at)
 
@@ -65,7 +69,7 @@ def sync_author_mute_status(
         post.save(update_fields=["author_openid", "updated_at"])
 
     state = AuthorMuteStatus.objects.select_for_update().filter(
-        openid=openid, source_appid=source_appid
+        openid=openid, source_appid=resolved_appid
     ).first()
     if state is not None and state.source_requested_at > requested_at:
         return state
@@ -73,7 +77,7 @@ def sync_author_mute_status(
     if state is None:
         return AuthorMuteStatus.objects.create(
             openid=openid,
-            source_appid=source_appid,
+            source_appid=resolved_appid,
             nick_name=nick_name,
             local_muted_until=local_until,
             global_muted_until=global_until,

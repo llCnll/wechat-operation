@@ -10,6 +10,10 @@ from django.utils import timezone
 
 from jobs.adapters import SourceBusinessDeletedError, SourceContractError, SourceTransportError
 from jobs.models import BackgroundJob
+from jobs.once.author_mute_status_backfill import (
+    AUTHOR_MUTE_STATUS_BACKFILL_TASK,
+    author_mute_status_backfill_handler,
+)
 from reviews.models import ReviewStatus
 
 from .ingestion import ingest_page
@@ -201,4 +205,5 @@ BACKFILL_INGESTION_WORKER_HANDLERS = {
     LEGACY_INGEST_WINDOW_TASK: ingest_window_handler,
     MANUAL_INGEST_WINDOW_TASK: ingest_window_handler,
     METRICS_REFRESH_WINDOW_TASK: refresh_metrics_window_handler,
+    AUTHOR_MUTE_STATUS_BACKFILL_TASK: author_mute_status_backfill_handler,
 }

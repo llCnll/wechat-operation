@@ -6,6 +6,7 @@ from jobs.adapters import CandidatePostDTO, SourceBusinessDeletedError, SourceTr
 from jobs.models import BackgroundJob
 from posts.models import POST_STATUS_DELETED, CandidatePost, OriginalPost, OriginType
 from posts.tasks import (
+    AUTHOR_MUTE_STATUS_BACKFILL_TASK,
     BACKFILL_INGESTION_WORKER_HANDLERS,
     LEGACY_INGEST_WINDOW_TASK,
     MANUAL_INGEST_WINDOW_TASK,
@@ -191,6 +192,7 @@ def test_ingestion_worker_lanes_are_explicit_and_keep_legacy_jobs_in_backfill():
         LEGACY_INGEST_WINDOW_TASK,
         MANUAL_INGEST_WINDOW_TASK,
         METRICS_REFRESH_WINDOW_TASK,
+        AUTHOR_MUTE_STATUS_BACKFILL_TASK,
     }
     assert BACKFILL_INGESTION_WORKER_HANDLERS[LEGACY_INGEST_WINDOW_TASK] is ingest_window_handler
 
