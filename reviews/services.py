@@ -6,6 +6,7 @@ import re
 from datetime import timedelta
 from difflib import SequenceMatcher
 from hashlib import sha256
+from time import monotonic, sleep
 from uuid import uuid4
 
 from django.db import IntegrityError, transaction
@@ -23,6 +24,7 @@ from posts.models import (
     is_post_deleted,
     is_post_self_visible,
 )
+from posts.services import sync_author_mute_status
 
 from .adapters import AssessmentOutput
 from .models import (
@@ -76,6 +78,9 @@ AI_AUTOMATED_MIN_CONFIDENCE = {
     RecommendedAction.BLOCK: 0.99,
 }
 DEFAULT_REVIEW_PROMPT_VERSION = "review-v4"
+MUTE_VERIFY_DELAYS_SECONDS = (0, 2, 5, 10)
+MUTE_VERIFY_MAX_WAIT_SECONDS = 20
+MUTE_VERIFY_REQUEST_OVERHEAD_SECONDS = 0.5
 
 
 class OperationExecutionConflict(ValueError):
@@ -136,6 +141,53 @@ def _operation_state(payload: dict) -> dict:
         "local_block_end_time": local_block_end_time,
         "global_block_end_time": global_block_end_time,
     }
+
+
+def _operation_author_openid(payload: dict) -> str:
+    try:
+        openid = payload["data"]["topic"]["creater"]["openid"]
+    except (KeyError, TypeError) as exc:
+        raise ValueError("操作前无法读取作者用户 ID") from exc
+    if not isinstance(openid, str) or not openid:
+        raise ValueError("操作前作者用户 ID无效")
+    return openid
+
+
+def _read_mute_metrics(source, topic_id: int, *, timeout_seconds: float) -> dict:
+    """Use the bounded CDP read when available while keeping test/source adapters compatible."""
+    bounded_read = getattr(source, "get_post_metrics_with_timeout", None)
+    if callable(bounded_read):
+        return bounded_read(topic_id, timeout_seconds=timeout_seconds)
+    return source.get_post_metrics(topic_id)
+
+
+def _read_mute_state_with_verification(source, post: OriginalPost, *, action: str, expected_end_time: int | None) -> dict:
+    """Read at most four times after a mute write; never repeats the write itself."""
+    latest_state: dict = {}
+    started_at = monotonic()
+    for delay in MUTE_VERIFY_DELAYS_SECONDS:
+        remaining = MUTE_VERIFY_MAX_WAIT_SECONDS - (monotonic() - started_at)
+        if remaining <= 0 or delay > remaining:
+            break
+        if delay:
+            sleep(delay)
+        remaining = MUTE_VERIFY_MAX_WAIT_SECONDS - (monotonic() - started_at)
+        if remaining <= MUTE_VERIFY_REQUEST_OVERHEAD_SECONDS:
+            break
+        requested_at = timezone.now()
+        payload = _read_mute_metrics(
+            source,
+            post.topic_id,
+            timeout_seconds=remaining - MUTE_VERIFY_REQUEST_OVERHEAD_SECONDS,
+        )
+        sync_author_mute_status(post, payload, source_requested_at=requested_at)
+        latest_state = _operation_state(payload)
+        if action == RecommendedAction.MUTE:
+            if latest_state["local_block_end_time"] >= (expected_end_time or 0):
+                break
+        elif latest_state["local_block_end_time"] <= int(timezone.now().timestamp()):
+            break
+    return latest_state
 
 
 def _prepare_upstream_payload(action: str, reason: str, payload: dict | None) -> dict:
@@ -825,7 +877,17 @@ def execute_confirmed_operation(
     result_code = "ACTION_FAILED"
     error_summary = "上游操作失败或契约未验证"
     try:
-        before_state = _operation_state(source.get_post_metrics(task.post.topic_id))
+        before_requested_at = timezone.now()
+        before_payload = source.get_post_metrics(task.post.topic_id)
+        before_state = _operation_state(before_payload)
+        stored_author_openid = task.post.author_openid
+        sync_author_mute_status(task.post, before_payload, source_requested_at=before_requested_at)
+        current_author_openid = ""
+        if action in {RecommendedAction.MUTE, RecommendedAction.UNMUTE}:
+            current_author_openid = _operation_author_openid(before_payload)
+            if stored_author_openid and stored_author_openid != current_author_openid:
+                raise ValueError("写前作者用户 ID与已同步记录不一致，已拒绝处置")
+            payload["author_openid"] = current_author_openid
         if (
             action in {RecommendedAction.SINK, RecommendedAction.BLOCK}
             and before_state["status"] != POST_STATUS_NORMAL
@@ -836,29 +898,52 @@ def execute_confirmed_operation(
             timezone.now().timestamp()
         ):
             error_summary = "当前游戏未处于禁言状态"
+        elif action == RecommendedAction.MUTE and before_state["local_block_end_time"] > int(
+            timezone.now().timestamp()
+        ):
+            error_summary = "当前游戏已处于禁言状态"
         else:
-            result = source.perform_confirmed_operation(
-                topic_id=task.post.topic_id, action=action, payload=payload
-            )
-            after_state = _operation_state(source.get_post_metrics(task.post.topic_id))
-            expected_status = EXPECTED_OPERATION_STATUS.get(action)
-            if action == RecommendedAction.MUTE:
-                expected_end_time = payload["mute_end_time"]
-                actual_end_time = max(
-                    after_state["local_block_end_time"],
-                    after_state["global_block_end_time"],
+            write_error: Exception | None = None
+            result = None
+            try:
+                result = source.perform_confirmed_operation(
+                    topic_id=task.post.topic_id, action=action, payload=payload
                 )
-                if actual_end_time < expected_end_time:
-                    error_summary = "禁言状态回读与预期不一致"
-                else:
-                    result_code = "OK"
-                    error_summary = ""
-            elif action == RecommendedAction.UNMUTE:
-                if after_state["local_block_end_time"] > int(timezone.now().timestamp()):
+            except Exception as exc:
+                write_error = exc
+                if action not in {RecommendedAction.MUTE, RecommendedAction.UNMUTE}:
+                    raise
+            if action in {RecommendedAction.MUTE, RecommendedAction.UNMUTE}:
+                after_state = _read_mute_state_with_verification(
+                    source,
+                    task.post,
+                    action=action,
+                    expected_end_time=payload.get("mute_end_time"),
+                )
+                if write_error is not None:
+                    error_summary = f"上游调用失败，回读状态已同步：{type(write_error).__name__}"[:500]
+                elif action == RecommendedAction.MUTE:
+                    expected_end_time = payload["mute_end_time"]
+                    if after_state["local_block_end_time"] < expected_end_time:
+                        error_summary = "禁言状态回读与预期不一致"
+                    else:
+                        result_code = "OK"
+                        error_summary = ""
+                elif after_state["local_block_end_time"] > int(timezone.now().timestamp()):
                     error_summary = "当前游戏禁言状态回读与预期不一致"
                 else:
                     result_code = "OK"
                     error_summary = ""
+                # MUTE and UNMUTE are fully handled by their bounded verification branch.
+                result = None
+            else:
+                after_requested_at = timezone.now()
+                after_payload = source.get_post_metrics(task.post.topic_id)
+                sync_author_mute_status(task.post, after_payload, source_requested_at=after_requested_at)
+                after_state = _operation_state(after_payload)
+            expected_status = EXPECTED_OPERATION_STATUS.get(action)
+            if action in {RecommendedAction.MUTE, RecommendedAction.UNMUTE}:
+                pass
             elif expected_status is None or after_state["status"] != expected_status:
                 error_summary = "上游状态回读与预期不一致"
             elif not isinstance(result, dict) or result.get("errcode") != 0:

@@ -99,6 +99,7 @@ def sync_pending_status_handler(job: BackgroundJob) -> None:
     try:
         for post in posts:
             try:
+                requested_at = timezone.now()
                 payload = client.get_post_metrics(post.topic_id)
             except SourceBusinessDeletedError:
                 post.status = mark_post_deleted(post.status)
@@ -107,7 +108,7 @@ def sync_pending_status_handler(job: BackgroundJob) -> None:
                 continue
             else:
                 try:
-                    store_post_metrics(post, payload)
+                    store_post_metrics(post, payload, source_requested_at=requested_at)
                 except (SourceContractError, SourceTransportError):
                     continue
                 # Rotate the next scan toward older pending posts when the status is unchanged.

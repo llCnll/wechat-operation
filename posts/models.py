@@ -103,12 +103,43 @@ class OriginalPost(models.Model):
     status = models.IntegerField(null=True, blank=True)
     recommend_status = models.IntegerField(null=True, blank=True)
     source_appid = models.CharField(max_length=128, blank=True)
+    author_openid = models.CharField(max_length=255, blank=True, db_index=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
         verbose_name = "原创帖子"
         verbose_name_plural = "原创帖子"
+
+
+class AuthorMuteStatus(models.Model):
+    """Latest observed author mute state within one managed-game context."""
+
+    openid = models.CharField(max_length=255)
+    source_appid = models.CharField(max_length=128)
+    nick_name = models.CharField(max_length=255, blank=True)
+    local_muted_until = models.DateTimeField(null=True, blank=True)
+    global_muted_until = models.DateTimeField(null=True, blank=True)
+    first_detected_at = models.DateTimeField(null=True, blank=True)
+    last_synced_at = models.DateTimeField()
+    source_requested_at = models.DateTimeField()
+    last_source_post = models.ForeignKey(
+        OriginalPost,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="author_mute_observations",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=("openid", "source_appid"), name="author_mute_scope")
+        ]
+        indexes = [models.Index(fields=("source_appid", "local_muted_until"))]
+        verbose_name = "作者禁言状态"
+        verbose_name_plural = "作者禁言状态"
 
 
 class PostMedia(models.Model):

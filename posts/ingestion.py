@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Protocol
 
+from django.utils import timezone
+
 from jobs.adapters import CandidatePostDTO, SourceContractError, SourceTransportError
 from jobs.models import BackgroundJob
 
@@ -51,7 +53,12 @@ def ingest_page(
         post = classify_content_card(candidate, card)
         if post is not None:
             try:
-                store_post_metrics(post, client.get_post_metrics(candidate.topic_id))
+                requested_at = timezone.now()
+                store_post_metrics(
+                    post,
+                    client.get_post_metrics(candidate.topic_id),
+                    source_requested_at=requested_at,
+                )
             except (SourceContractError, SourceTransportError):
                 # Metrics are optional; keep the original post even if counters are unavailable.
                 pass

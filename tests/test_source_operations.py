@@ -48,13 +48,9 @@ def test_verified_block_operation_uses_reason_bitmask(monkeypatch):
     ]
 
 
-def test_verified_mute_uses_ephemeral_author_identity(monkeypatch):
+def test_verified_mute_reuses_preflight_author_identity_without_second_read(monkeypatch):
     client, calls = _client_with_captured_post(monkeypatch)
-    monkeypatch.setattr(
-        client,
-        "get_post_metrics",
-        lambda topic_id: {"data": {"topic": {"creater": {"openid": "ephemeral-author"}}}},
-    )
+    monkeypatch.setattr(client, "get_post_metrics", lambda _topic_id: pytest.fail("unexpected read"))
     mute_calls = []
     monkeypatch.setattr(
         client,
@@ -65,7 +61,12 @@ def test_verified_mute_uses_ephemeral_author_identity(monkeypatch):
     client.perform_confirmed_operation(
         topic_id=321,
         action="MUTE",
-        payload={"block_reason_code": 8, "mute_end_time": 2_000_000_000, "reason": "广告"},
+        payload={
+            "block_reason_code": 8,
+            "mute_end_time": 2_000_000_000,
+            "reason": "广告",
+            "author_openid": "ephemeral-author",
+        },
     )
 
     assert calls == []
@@ -82,13 +83,9 @@ def test_verified_mute_uses_ephemeral_author_identity(monkeypatch):
     ]
 
 
-def test_verified_unmute_uses_ephemeral_author_identity_and_module(monkeypatch):
+def test_verified_unmute_reuses_preflight_author_identity_and_module(monkeypatch):
     client, calls = _client_with_captured_post(monkeypatch)
-    monkeypatch.setattr(
-        client,
-        "get_post_metrics",
-        lambda topic_id: {"data": {"topic": {"creater": {"openid": "ephemeral-author"}}}},
-    )
+    monkeypatch.setattr(client, "get_post_metrics", lambda _topic_id: pytest.fail("unexpected read"))
     unmute_calls = []
     monkeypatch.setattr(
         client,
@@ -96,7 +93,9 @@ def test_verified_unmute_uses_ephemeral_author_identity_and_module(monkeypatch):
         lambda method, body: unmute_calls.append((method, body)) or {"errcode": 0},
     )
 
-    client.perform_confirmed_operation(topic_id=321, action="UNMUTE", payload={})
+    client.perform_confirmed_operation(
+        topic_id=321, action="UNMUTE", payload={"author_openid": "ephemeral-author"}
+    )
 
     assert calls == []
     assert unmute_calls == [
@@ -120,6 +119,16 @@ def test_management_detail_deleted_error_is_mapped_to_business_deletion(monkeypa
 
     with pytest.raises(SourceBusinessDeletedError):
         client.get_post_metrics(1434284478)
+
+
+def test_bounded_management_detail_read_restores_the_default_timeout(monkeypatch):
+    client = object.__new__(CdpGameCircleClient)
+    client.frame = type("Frame", (), {"timeout": 15})()
+    monkeypatch.setattr(client, "get_post_metrics", lambda _topic_id: {"data": {"topic": {}}})
+
+    client.get_post_metrics_with_timeout(321, timeout_seconds=3)
+
+    assert client.frame.timeout == 15
 
 
 @pytest.mark.parametrize(

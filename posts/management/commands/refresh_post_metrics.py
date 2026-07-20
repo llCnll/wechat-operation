@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from django.core.management.base import BaseCommand, CommandError
+from django.utils import timezone
 
 from posts.models import OriginalPost
 from posts.services import store_post_metrics
@@ -27,7 +28,12 @@ class Command(BaseCommand):
         client = CdpGameCircleClient(appid=appid)
         try:
             for post in posts:
-                store_post_metrics(post, client.get_post_metrics(post.topic_id))
+                requested_at = timezone.now()
+                store_post_metrics(
+                    post,
+                    client.get_post_metrics(post.topic_id),
+                    source_requested_at=requested_at,
+                )
         finally:
             client.close()
         self.stdout.write(f"已刷新 {len(posts)} 条原创帖互动指标。")

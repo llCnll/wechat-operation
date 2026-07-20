@@ -30,6 +30,7 @@
 | `classification_error` | 字符串，最长 500，可留空 | 判定失败的脱敏摘要。 |
 | `classified_at` | 日期时间，可空 | 最近一次完成判定的时间。 |
 | `source_appid` | 字符串，最长 128，可留空 | 所属小游戏 AppID。 |
+| `author_openid` | 字符串，最长 255，可留空、有索引 | 管理详情返回的作者用户 ID；仅用于禁言状态和同作者历史原创帖关联。 |
 | `created_at` | 日期时间，自动写入 | 首次采集时间。 |
 | `updated_at` | 日期时间，自动更新 | 最近更新时间。 |
 
@@ -76,6 +77,22 @@
 | `NULL` 或其他值 | 尚未同步或原平台未知状态。 |
 
 `2` 是唯一正常基值，不参与按位组合。屏蔽、沉底和删除使用按位与判定；例如 `status & 128 != 0` 表示原平台已删除。`16` 是独立的上游仅自己可见状态：可在工作台筛选、查看和刷新，但系统不会发送沉底、屏蔽、恢复或禁言操作覆盖该状态。删除确认时间不再独立保存，可通过 `updated_at` 与后台任务记录辅助追溯。
+
+## `posts_authormutestatus`（作者禁言状态）
+
+按作者用户 ID与游戏 AppID保存最近一次管理详情观测到的禁言状态。`(openid, source_appid)` 唯一；无有效禁言时两个到期字段均为 `NULL`，表示已确认未禁言，而没有记录才表示尚未同步。
+
+| 字段 | 类型与约束 | 含义 |
+| --- | --- | --- |
+| `openid` | 字符串，最长 255 | 作者平台用户 ID。 |
+| `source_appid` | 字符串，最长 128 | 当前游戏禁言的作用域。 |
+| `nick_name` | 字符串，最长 255，可留空 | 最近同步昵称，仅供禁言管理展示与查询。 |
+| `local_muted_until` | 日期时间，可空 | 当前游戏禁言有效期至。 |
+| `global_muted_until` | 日期时间，可空 | 全局禁言有效期至。 |
+| `first_detected_at` | 日期时间，可空 | 首次发现有效禁言的时间，不代表上游真实开始时间。 |
+| `last_synced_at` | 日期时间 | 最近成功详情同步时间。 |
+| `source_requested_at` | 日期时间 | 产生当前观测的详情请求起始时间，用于拒绝乱序旧响应覆盖。 |
+| `last_source_post_id` | 外键，可空 | 最近用于同步该状态的原创帖子。 |
 
 ## `posts_postmedia`（帖子媒体）
 
@@ -359,4 +376,4 @@ Supervisor 不新增数据库表。它在 `runtime/supervisor/` 保存独占锁�
 
 以下表由 Django 认证、会话、后台和迁移机制维护，不是内容运营业务模型：`auth_user`、`auth_group`、`auth_permission`、`auth_user_groups`、`auth_user_user_permissions`、`auth_group_permissions`、`django_session`、`django_admin_log`、`django_content_type`、`django_migrations`。
 
-业务表仅以外键引用 `auth_user` 的本地后台用户。系统不将浏览器 Cookie、会话令牌、完整已认证 URL、原平台作者 `openid` 或评论正文写入任意数据库表；禁言所需的作者身份仅在上游请求内存中短暂使用。
+业务表仅以外键引用 `auth_user` 的本地后台用户。系统不将浏览器 Cookie、会话令牌、完整已认证 URL、运营者身份标识或评论正文写入任意数据库表。管理详情返回的发帖作者用户 ID例外：它仅保存在 `posts_originalpost.author_openid` 与 `posts_authormutestatus.openid`，用于禁言状态和同作者历史原创帖关联；不得进入普通报表、通用搜索索引、日志或导出。

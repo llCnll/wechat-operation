@@ -1,0 +1,7 @@
+{% extends "posts/operations_base.html" %}
+{% block title %}作者历史帖子 | 游戏圈运营{% endblock %}
+{% block content %}
+<section class="masthead compact-head mute-masthead"><div><p class="eyebrow">MUTE MANAGEMENT / AUTHOR HISTORY</p><h1>作者历史原创帖</h1><p>{{ status.nick_name|default:"昵称未知" }} · {{ presentation.label }}</p></div></section>
+<nav class="workspace-tabs" aria-label="内容管理子导航"><a href="{% url 'operations-dashboard' %}?appid={{ appid|urlencode }}">内容队列</a><a class="is-active" href="{% url 'mute-management' %}?appid={{ appid|urlencode }}">禁言管理</a></nav>
+<section class="mute-history-panel"><header><a class="back-link" href="{% url 'mute-management' %}?appid={{ appid|urlencode }}">← 返回禁言管理</a><span>当前游戏内已关联的原创帖子</span></header><div class="mute-history-list">{% for post in posts %}<article><div><span>帖子 #{{ post.topic_id }}</span><strong>{{ post.title|default:post.content_text|default:"图片或短内容帖子"|truncatechars:120 }}</strong></div><span>{% if post.publish_time %}{{ post.publish_time|date:"Y年m月d日 H:i" }}{% else %}发布时间未知{% endif %}</span><a href="{% url 'operations-dashboard' %}?appid={{ appid|urlencode }}&topic={{ post.topic_id }}">查看帖子 →</a></article>{% empty %}<div class="mute-empty"><strong>尚无已关联的原创帖子</strong><span>作者关联会在成功同步管理详情后逐步补齐。</span></div>{% endfor %}</div></section>
+{% endblock %}

@@ -145,6 +145,19 @@ class CdpGameCircleClient:
             {"data": json.dumps({"topic_id": topic_id, "need_topic": True, "limit": 0})},
         )
 
+    def get_post_metrics_with_timeout(
+        self, topic_id: int, *, timeout_seconds: float
+    ) -> dict[str, Any]:
+        """Bound a single detail read without changing the client's normal read timeout."""
+        if timeout_seconds <= 0:
+            raise SourceTransportError("详情读取已超过允许的验证时间")
+        original_timeout = self.frame.timeout
+        self.frame.timeout = min(original_timeout, timeout_seconds)
+        try:
+            return self.get_post_metrics(topic_id)
+        finally:
+            self.frame.timeout = original_timeout
+
     def perform_confirmed_operation(
         self, *, topic_id: int, action: str, payload: dict[str, Any]
     ) -> dict[str, Any]:
@@ -171,11 +184,13 @@ class CdpGameCircleClient:
                 raise SourceContractError("禁言原因码无效或未验证")
             if not isinstance(end_time, int) or end_time <= 0:
                 raise SourceContractError("禁言截止时间无效")
-            metrics = self.get_post_metrics(topic_id)
-            try:
-                account_openid = metrics["data"]["topic"]["creater"]["openid"]
-            except (KeyError, TypeError) as exc:
-                raise SourceContractError("无法从当前帖子读取禁言目标") from exc
+            account_openid = payload.get("author_openid")
+            if not isinstance(account_openid, str) or not account_openid:
+                metrics = self.get_post_metrics(topic_id)
+                try:
+                    account_openid = metrics["data"]["topic"]["creater"]["openid"]
+                except (KeyError, TypeError) as exc:
+                    raise SourceContractError("无法从当前帖子读取禁言目标") from exc
             if not isinstance(account_openid, str) or not account_openid:
                 raise SourceContractError("禁言目标身份标识无效")
             request_body = {
@@ -189,11 +204,13 @@ class CdpGameCircleClient:
                 request_body,
             )
         elif action == "UNMUTE":
-            metrics = self.get_post_metrics(topic_id)
-            try:
-                account_openid = metrics["data"]["topic"]["creater"]["openid"]
-            except (KeyError, TypeError) as exc:
-                raise SourceContractError("无法从当前帖子读取解除禁言目标") from exc
+            account_openid = payload.get("author_openid")
+            if not isinstance(account_openid, str) or not account_openid:
+                metrics = self.get_post_metrics(topic_id)
+                try:
+                    account_openid = metrics["data"]["topic"]["creater"]["openid"]
+                except (KeyError, TypeError) as exc:
+                    raise SourceContractError("无法从当前帖子读取解除禁言目标") from exc
             if not isinstance(account_openid, str) or not account_openid:
                 raise SourceContractError("解除禁言目标身份标识无效")
             return self._post_gameopenmpwap(

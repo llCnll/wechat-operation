@@ -14,6 +14,7 @@ from posts.models import (
     POST_STATUS_SELF_VISIBLE,
     POST_STATUS_SUNK,
     CandidatePost,
+    AuthorMuteStatus,
     InteractionSnapshot,
     ManagedGame,
     OriginalPost,
@@ -82,6 +83,115 @@ def test_operations_dashboard_renders_original_post_metrics():
     assert 'data-operation="SKIP"' in response.content.decode()
     assert 'data-operation="UNMUTE"' in response.content.decode()
     assert f"/posts/{post.topic_id}/refresh/" in response.content.decode()
+
+
+@pytest.mark.django_db
+def test_dashboard_explicitly_marks_missing_author_mute_observation_as_unknown():
+    user = get_user_model().objects.create_user(username="mute-unknown", password="test-password")
+    OriginalPost.objects.create(topic_id=98, content_id="mute-unknown", content_text="待审核")
+    client = Client()
+    client.force_login(user)
+
+    response = client.get("/?topic=98")
+
+    assert response.status_code == 200
+    assert "作者禁言状态：状态未知（尚未同步）" in response.content.decode()
+    assert "author-mute-status is-unknown" in response.content.decode()
+
+
+@pytest.mark.django_db
+def test_dashboard_marks_active_author_mute_with_a_distinct_indicator():
+    user = get_user_model().objects.create_user(username="mute-active", password="test-password")
+    now = timezone.now()
+    post = OriginalPost.objects.create(
+        topic_id=95,
+        content_id="mute-active",
+        source_appid="wx6d2454a8afcd9706",
+        author_openid="active-author",
+    )
+    AuthorMuteStatus.objects.create(
+        openid="active-author",
+        source_appid="wx6d2454a8afcd9706",
+        local_muted_until=now + timedelta(days=1),
+        last_synced_at=now,
+        source_requested_at=now,
+    )
+    client = Client()
+    client.force_login(user)
+
+    response = client.get(f"/?topic={post.topic_id}")
+
+    assert "author-mute-status is-muted" in response.content.decode()
+
+
+@pytest.mark.django_db
+def test_mute_management_filters_by_game_and_links_author_history():
+    user = get_user_model().objects.create_user(username="mute-list", password="test-password")
+    now = timezone.now()
+    active = OriginalPost.objects.create(
+        topic_id=96, content_id="author-active", source_appid="wx6d2454a8afcd9706", author_openid="author-a"
+    )
+    hidden = OriginalPost.objects.create(
+        topic_id=97, content_id="author-other", source_appid="other-game", author_openid="author-a"
+    )
+    status = AuthorMuteStatus.objects.create(
+        openid="author-a",
+        source_appid="wx6d2454a8afcd9706",
+        nick_name="可见作者",
+        local_muted_until=now + timedelta(days=1),
+        last_synced_at=now,
+        source_requested_at=now,
+        last_source_post=active,
+    )
+    AuthorMuteStatus.objects.create(
+        openid="author-a", source_appid="other-game", nick_name="不应出现",
+        local_muted_until=now + timedelta(days=1), last_synced_at=now, source_requested_at=now,
+        last_source_post=hidden,
+    )
+    client = Client()
+    client.force_login(user)
+
+    response = client.get("/mute-management/?appid=wx6d2454a8afcd9706&q=可见")
+    assert response.status_code == 200
+    body = response.content.decode()
+    assert "可见作者" in body
+    assert "不应出现" not in body
+    assert f"/mute-management/{status.pk}/posts/" in body
+
+    history = client.get(f"/mute-management/{status.pk}/posts/?appid=wx6d2454a8afcd9706")
+    assert history.status_code == 200
+    assert "#96" in history.content.decode()
+    assert "#97" not in history.content.decode()
+
+
+@pytest.mark.django_db
+def test_mute_management_filters_scope_and_imminent_expiry():
+    user = get_user_model().objects.create_user(username="mute-scope", password="test-password")
+    now = timezone.now()
+    AuthorMuteStatus.objects.create(
+        openid="local-author",
+        source_appid="wx6d2454a8afcd9706",
+        nick_name="本地禁言",
+        local_muted_until=now + timedelta(days=2),
+        last_synced_at=now,
+        source_requested_at=now,
+    )
+    AuthorMuteStatus.objects.create(
+        openid="global-author",
+        source_appid="wx6d2454a8afcd9706",
+        nick_name="全局禁言",
+        global_muted_until=now + timedelta(days=10),
+        last_synced_at=now,
+        source_requested_at=now,
+    )
+    client = Client()
+    client.force_login(user)
+
+    local = client.get("/mute-management/?scope=LOCAL&expires=SOON")
+    global_mutes = client.get("/mute-management/?scope=GLOBAL")
+
+    assert [status.nick_name for status in local.context["statuses"]] == ["本地禁言"]
+    assert [status.nick_name for status in global_mutes.context["statuses"]] == ["全局禁言"]
 
 
 @pytest.mark.django_db

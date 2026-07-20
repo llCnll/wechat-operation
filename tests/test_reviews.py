@@ -23,6 +23,7 @@ from reviews.models import (
     ReviewStatus,
 )
 from reviews.services import (
+    _read_mute_state_with_verification,
     create_confirmed_operation,
     execute_confirmed_operation,
     is_operation_enabled,
@@ -598,6 +599,7 @@ def test_confirmed_unmute_requires_active_local_mute_and_reads_back_release(monk
                         "creater": {
                             "block_info": {"appid": "wx-test", "block_end_time": block_end_time},
                             "global_block_end_time": 2_000_000_000,
+                            "openid": "unmute-author",
                         },
                     }
                 }
@@ -605,7 +607,7 @@ def test_confirmed_unmute_requires_active_local_mute_and_reads_back_release(monk
 
         def perform_confirmed_operation(self, *, topic_id, action, payload):
             assert action == RecommendedAction.UNMUTE
-            assert payload == {}
+            assert payload == {"author_openid": "unmute-author"}
             self.writes += 1
             return {"errcode": 0, "errmsg": "ok"}
 
@@ -659,7 +661,10 @@ def test_unmute_does_not_call_upstream_when_local_mute_is_inactive(monkeypatch):
                         "topic_id": topic_id,
                         "status": 2,
                         "appid": "wx-test",
-                        "creater": {"block_info": {"appid": "wx-test", "block_end_time": 0}},
+                        "creater": {
+                            "block_info": {"appid": "wx-test", "block_end_time": 0},
+                            "openid": "unmute-author",
+                        },
                     }
                 }
             }
@@ -680,3 +685,152 @@ def test_unmute_does_not_call_upstream_when_local_mute_is_inactive(monkeypatch):
     assert audit.result_code == "ACTION_FAILED"
     assert audit.error_summary == "当前游戏未处于禁言状态"
     assert source.writes == 0
+
+
+@pytest.mark.django_db
+def test_mute_rejects_when_preflight_author_differs_from_saved_value(monkeypatch):
+    monkeypatch.setattr(runtime, "enable_upstream_writes", True)
+    monkeypatch.setattr(runtime, "enable_mute_writes", True)
+    post = OriginalPost.objects.create(
+        topic_id=213, content_id="mute-mismatch", source_appid="wx-test", author_openid="old-author"
+    )
+    CandidatePost.objects.create(topic_id=213, content_id="mute-mismatch", origin_type=OriginType.ORIGINAL)
+    _, task = persist_assessment(
+        post, AssessmentOutput(content_category="OTHER", recommended_action="MUTE", overall_confidence=0.9)
+    )
+
+    class Source:
+        writes = 0
+
+        def get_post_metrics(self, topic_id):
+            return {"data": {"topic": {"topic_id": topic_id, "status": 2, "appid": "wx-test", "creater": {"openid": "new-author", "block_info": {"appid": "wx-test", "block_end_time": 0}, "global_block_end_time": 0}}}}
+
+        def perform_confirmed_operation(self, **kwargs):
+            self.writes += 1
+
+    source = Source()
+    audit = execute_confirmed_operation(
+        task, user=None, action=RecommendedAction.MUTE, reason="人工确认", source=source,
+        upstream_payload={"mute_days": 1, "block_reason_code": 1},
+    )
+    post.refresh_from_db()
+    assert audit.result_code == "ACTION_FAILED"
+    assert audit.error_summary.endswith("ValueError")
+    assert source.writes == 0
+    assert post.author_openid == "new-author"
+
+
+@pytest.mark.django_db
+def test_mute_reads_at_bounded_delays_without_repeating_write(monkeypatch):
+    monkeypatch.setattr(runtime, "enable_upstream_writes", True)
+    monkeypatch.setattr(runtime, "enable_mute_writes", True)
+    delays = []
+    monkeypatch.setattr("reviews.services.sleep", delays.append)
+    post = OriginalPost.objects.create(topic_id=214, content_id="mute-delayed", source_appid="wx-test")
+    CandidatePost.objects.create(topic_id=214, content_id="mute-delayed", origin_type=OriginType.ORIGINAL)
+    _, task = persist_assessment(
+        post, AssessmentOutput(content_category="OTHER", recommended_action="MUTE", overall_confidence=0.9)
+    )
+
+    class Source:
+        reads = 0
+        writes = 0
+
+        def get_post_metrics(self, topic_id):
+            self.reads += 1
+            end = 2_000_000_000 if self.reads == 3 else 0
+            return {"data": {"topic": {"topic_id": topic_id, "status": 2, "appid": "wx-test", "creater": {"openid": "delayed-author", "block_info": {"appid": "wx-test", "block_end_time": end}, "global_block_end_time": 0}}}}
+
+        def perform_confirmed_operation(self, **kwargs):
+            self.writes += 1
+            return {"errcode": 0}
+
+    source = Source()
+    audit = execute_confirmed_operation(
+        task, user=None, action=RecommendedAction.MUTE, reason="人工确认", source=source,
+        upstream_payload={"mute_days": 1, "block_reason_code": 1},
+    )
+    assert audit.result_code == "OK"
+    assert source.writes == 1
+    assert source.reads == 3
+    assert delays == [2]
+
+
+@pytest.mark.django_db
+def test_mute_readback_never_exceeds_the_twenty_second_budget(monkeypatch):
+    clock = [0.0]
+    sleeps = []
+    monkeypatch.setattr("reviews.services.monotonic", lambda: clock[0])
+
+    def advance_sleep(seconds):
+        sleeps.append(seconds)
+        clock[0] += seconds
+
+    monkeypatch.setattr("reviews.services.sleep", advance_sleep)
+    post = OriginalPost.objects.create(topic_id=216, content_id="mute-readback-budget")
+
+    class Source:
+        timeout_values = []
+
+        def get_post_metrics_with_timeout(self, topic_id, *, timeout_seconds):
+            self.timeout_values.append(timeout_seconds)
+            clock[0] += timeout_seconds
+            return {
+                "data": {
+                    "topic": {
+                        "topic_id": topic_id,
+                        "status": 2,
+                        "appid": "wx-test",
+                        "creater": {
+                            "openid": "budget-author",
+                            "block_info": {"appid": "wx-test", "block_end_time": 0},
+                            "global_block_end_time": 0,
+                        },
+                    }
+                }
+            }
+
+    source = Source()
+    _read_mute_state_with_verification(
+        source, post, action=RecommendedAction.MUTE, expected_end_time=2_000_000_000
+    )
+
+    assert len(source.timeout_values) == 1
+    assert source.timeout_values[0] < 20
+    assert sleeps == []
+    assert clock[0] < 20
+
+
+@pytest.mark.django_db
+def test_mute_keeps_action_failed_when_write_raises_even_if_readback_matches(monkeypatch):
+    monkeypatch.setattr(runtime, "enable_upstream_writes", True)
+    monkeypatch.setattr(runtime, "enable_mute_writes", True)
+    monkeypatch.setattr("reviews.services.sleep", lambda _seconds: None)
+    post = OriginalPost.objects.create(topic_id=215, content_id="mute-write-failed", source_appid="wx-test")
+    CandidatePost.objects.create(topic_id=215, content_id="mute-write-failed", origin_type=OriginType.ORIGINAL)
+    _, task = persist_assessment(
+        post, AssessmentOutput(content_category="OTHER", recommended_action="MUTE", overall_confidence=0.9)
+    )
+
+    class Source:
+        reads = 0
+        writes = 0
+
+        def get_post_metrics(self, topic_id):
+            self.reads += 1
+            end = 0 if self.reads == 1 else 2_000_000_000
+            return {"data": {"topic": {"topic_id": topic_id, "status": 2, "appid": "wx-test", "creater": {"openid": "failed-author", "block_info": {"appid": "wx-test", "block_end_time": end}, "global_block_end_time": 0}}}}
+
+        def perform_confirmed_operation(self, **kwargs):
+            self.writes += 1
+            raise TimeoutError("uncertain")
+
+    source = Source()
+    audit = execute_confirmed_operation(
+        task, user=None, action=RecommendedAction.MUTE, reason="人工确认", source=source,
+        upstream_payload={"mute_days": 1, "block_reason_code": 1},
+    )
+    assert audit.result_code == "ACTION_FAILED"
+    assert "回读状态已同步" in audit.error_summary
+    assert audit.after_state["local_block_end_time"] == 2_000_000_000
+    assert source.writes == 1

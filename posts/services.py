@@ -9,6 +9,7 @@ from django.utils import timezone
 from jobs.adapters import SourceBusinessDeletedError, SourceContractError
 
 from .models import (
+    AuthorMuteStatus,
     CandidatePost,
     InteractionSnapshot,
     MediaType,
@@ -18,6 +19,90 @@ from .models import (
     mark_post_deleted,
     normalize_post_status,
 )
+
+
+def _future_timestamp(value: Any, *, observed_at) -> datetime | None:
+    try:
+        timestamp = int(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if timestamp <= int(observed_at.timestamp()):
+        return None
+    try:
+        return datetime.fromtimestamp(timestamp, tz=UTC)
+    except (ValueError, OverflowError, OSError):
+        return None
+
+
+@transaction.atomic
+def sync_author_mute_status(
+    post: OriginalPost, payload: dict[str, Any], *, source_requested_at=None
+) -> AuthorMuteStatus | None:
+    """Persist the small author projection carried by an already-fetched management detail."""
+    requested_at = source_requested_at or timezone.now()
+    observed_at = timezone.now()
+    try:
+        topic = payload["data"]["topic"]
+        creator = topic.get("creater")
+        openid = creator.get("openid") if isinstance(creator, dict) else None
+    except (KeyError, TypeError, AttributeError):
+        return None
+    if not isinstance(openid, str) or not openid:
+        return None
+
+    source_appid = post.source_appid or str(topic.get("appid") or "")
+    if not source_appid:
+        return None
+    nick_name = creator.get("nick_name") if isinstance(creator.get("nick_name"), str) else ""
+    block_info = creator.get("block_info") if isinstance(creator, dict) else None
+    local_until = None
+    if isinstance(block_info, dict) and str(block_info.get("appid", "")) == source_appid:
+        local_until = _future_timestamp(block_info.get("block_end_time"), observed_at=observed_at)
+    global_until = _future_timestamp(creator.get("global_block_end_time"), observed_at=observed_at)
+
+    if post.author_openid != openid:
+        post.author_openid = openid
+        post.save(update_fields=["author_openid", "updated_at"])
+
+    state = AuthorMuteStatus.objects.select_for_update().filter(
+        openid=openid, source_appid=source_appid
+    ).first()
+    if state is not None and state.source_requested_at > requested_at:
+        return state
+    active = local_until is not None or global_until is not None
+    if state is None:
+        return AuthorMuteStatus.objects.create(
+            openid=openid,
+            source_appid=source_appid,
+            nick_name=nick_name,
+            local_muted_until=local_until,
+            global_muted_until=global_until,
+            first_detected_at=observed_at if active else None,
+            last_synced_at=observed_at,
+            source_requested_at=requested_at,
+            last_source_post=post,
+        )
+    state.nick_name = nick_name
+    state.local_muted_until = local_until
+    state.global_muted_until = global_until
+    if active and state.first_detected_at is None:
+        state.first_detected_at = observed_at
+    state.last_synced_at = observed_at
+    state.source_requested_at = requested_at
+    state.last_source_post = post
+    state.save(
+        update_fields=(
+            "nick_name",
+            "local_muted_until",
+            "global_muted_until",
+            "first_detected_at",
+            "last_synced_at",
+            "source_requested_at",
+            "last_source_post",
+            "updated_at",
+        )
+    )
+    return state
 
 
 def html_to_text(value: str) -> str:
@@ -171,23 +256,27 @@ def store_post_interaction_metrics(
 
 
 @transaction.atomic
-def store_post_metrics(post: OriginalPost, payload: dict[str, Any]) -> InteractionSnapshot:
+def store_post_metrics(
+    post: OriginalPost, payload: dict[str, Any], *, source_requested_at=None
+) -> InteractionSnapshot:
     """Persist post-level counters and the upstream status for status-aware refreshes."""
     snapshot = store_post_interaction_metrics(post, payload)
     topic = payload["data"]["topic"]
     if topic.get("status") is not None:
         post.status = normalize_post_status(topic["status"])
         post.save(update_fields=["status", "updated_at"])
+    sync_author_mute_status(post, payload, source_requested_at=source_requested_at)
     return snapshot
 
 
 def refresh_post_status_and_metrics(client, post: OriginalPost) -> OriginalPost:
     """Refresh only operational status and aggregate interaction counters."""
     try:
+        requested_at = timezone.now()
         metrics_payload = client.get_post_metrics(post.topic_id)
     except SourceBusinessDeletedError:
         post.status = mark_post_deleted(post.status)
         post.save(update_fields=["status", "updated_at"])
         return post
-    store_post_metrics(post, metrics_payload)
+    store_post_metrics(post, metrics_payload, source_requested_at=requested_at)
     return post

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
+
 from django.contrib import messages
 from django.contrib.auth.decorators import login_required
 from django.db.models import F, OuterRef, Q, Subquery, Value
@@ -24,6 +26,7 @@ from reviews.models import (
     ReplyDraft,
     ReviewStatus,
     ReviewTask,
+    OperationAudit,
     risk_label_display,
 )
 from reviews.services import (
@@ -49,6 +52,7 @@ from .models import (
     POST_STATUS_SELF_VISIBLE,
     POST_STATUS_SUNK,
     CandidatePost,
+    AuthorMuteStatus,
     InteractionSnapshot,
     OriginalPost,
     OriginType,
@@ -237,6 +241,61 @@ def _dashboard_game_filter(appid: str) -> Q:
     return game_filter
 
 
+def _author_mute_presentation(state: AuthorMuteStatus | None, *, now=None) -> dict[str, object]:
+    """Return an explicit display state; missing observation is never treated as unmuted."""
+    now = now or timezone.now()
+    if state is None:
+        return {"label": "状态未知（尚未同步）", "scope": "", "until": None, "active": False}
+    local_active = state.local_muted_until and state.local_muted_until > now
+    global_active = state.global_muted_until and state.global_muted_until > now
+    if local_active and global_active:
+        return {
+            "label": "当前游戏及全局禁言",
+            "scope": "当前游戏及全局",
+            "until": min(state.local_muted_until, state.global_muted_until),
+            "remaining": _remaining_time_label(
+                min(state.local_muted_until, state.global_muted_until), now
+            ),
+            "active": True,
+        }
+    if local_active:
+        return {
+            "label": "当前游戏禁言",
+            "scope": "当前游戏",
+            "until": state.local_muted_until,
+            "remaining": _remaining_time_label(state.local_muted_until, now),
+            "active": True,
+        }
+    if global_active:
+        return {
+            "label": "全局禁言",
+            "scope": "全局",
+            "until": state.global_muted_until,
+            "remaining": _remaining_time_label(state.global_muted_until, now),
+            "active": True,
+        }
+    return {"label": "已确认未禁言", "scope": "", "until": None, "active": False}
+
+
+def _remaining_time_label(until, now) -> str:
+    remaining_seconds = max(0, int((until - now).total_seconds()))
+    days, remainder = divmod(remaining_seconds, 86_400)
+    hours = remainder // 3_600
+    if days:
+        return f"剩余 {days} 天" if not hours else f"剩余 {days} 天 {hours} 小时"
+    if hours:
+        return f"剩余 {hours} 小时"
+    return "即将到期"
+
+
+def _author_mute_status_for_post(post: OriginalPost, appid: str) -> AuthorMuteStatus | None:
+    if not post.author_openid:
+        return None
+    return AuthorMuteStatus.objects.filter(
+        openid=post.author_openid, source_appid=appid
+    ).first()
+
+
 @login_required
 def operations_dashboard(request):
     normalized_query, query_was_normalized = _normalize_dashboard_query(request.GET)
@@ -375,6 +434,10 @@ def operations_dashboard(request):
     selected_post = posts[selected_index] if posts else None
     evaluation = {"state": "IDLE", "label": "尚未评估", "error": ""}
     if selected_post:
+        selected_post.author_mute_status = _author_mute_status_for_post(selected_post, appid)
+        selected_post.author_mute_presentation = _author_mute_presentation(
+            selected_post.author_mute_status
+        )
         selected_post.review = getattr(selected_post, "review_task", None)
         selected_post.recommended_operation = ""
         selected_post.recommended_operation_label = ""
@@ -497,6 +560,93 @@ def operations_dashboard(request):
         "batch_actions_enabled": any(is_operation_enabled(action) for action in BATCH_AI_ACTIONS),
     }
     return render(request, "posts/operations_dashboard.html", context)
+
+
+@login_required
+def mute_management(request):
+    """Read-only current mute observations for one managed-game context."""
+    appid = active_game_appid(request.GET.get("appid", "").strip())
+    search = request.GET.get("q", "").strip()
+    scope = request.GET.get("scope", "").strip().upper()
+    expires = request.GET.get("expires", "").strip().upper()
+    if scope not in {"", "LOCAL", "GLOBAL"}:
+        scope = ""
+    if expires not in {"", "SOON"}:
+        expires = ""
+    now = timezone.now()
+    active_mutes = Q(local_muted_until__gt=now) | Q(global_muted_until__gt=now)
+    statuses = AuthorMuteStatus.objects.filter(source_appid=appid).filter(active_mutes)
+    if search:
+        statuses = statuses.filter(nick_name__icontains=search)
+    if scope == "LOCAL":
+        statuses = statuses.filter(local_muted_until__gt=now)
+    elif scope == "GLOBAL":
+        statuses = statuses.filter(global_muted_until__gt=now)
+    if expires == "SOON":
+        soon = now + timedelta(days=7)
+        statuses = statuses.filter(
+            Q(local_muted_until__gt=now, local_muted_until__lte=soon)
+            | Q(global_muted_until__gt=now, global_muted_until__lte=soon)
+        )
+    statuses = list(statuses.select_related("last_source_post").order_by("-last_synced_at"))
+    for status in statuses:
+        status.presentation = _author_mute_presentation(status, now=now)
+        status.system_muted_at = (
+            OperationAudit.objects.filter(
+                task__post__author_openid=status.openid,
+                task__post__source_appid=appid,
+                action=RecommendedAction.MUTE,
+                result_code="OK",
+            )
+            .order_by("-executed_at")
+            .values_list("executed_at", flat=True)
+            .first()
+        )
+    statuses.sort(
+        key=lambda status: (
+            status.presentation["until"] is None,
+            status.presentation["until"] or datetime.max.replace(tzinfo=UTC),
+            -status.last_synced_at.timestamp(),
+        )
+    )
+    return render(
+        request,
+        "posts/mute_management.html",
+        {
+            "appid": appid,
+            "active_game": next(
+                (game for game in managed_game_options() if game.appid == appid), None
+            ),
+            "managed_games": managed_game_options(),
+            "statuses": statuses,
+            "search": search,
+            "scope": scope,
+            "expires": expires,
+        },
+    )
+
+
+@login_required
+def author_mute_history(request, status_id: int):
+    """Show saved original posts for one status row without exposing OpenID in the URL."""
+    appid = active_game_appid(request.GET.get("appid", "").strip())
+    status = get_object_or_404(AuthorMuteStatus, pk=status_id, source_appid=appid)
+    posts = _with_latest_metrics(
+        OriginalPost.objects.filter(_dashboard_game_filter(appid), author_openid=status.openid)
+    ).order_by("-publish_time", "-topic_id")
+    return render(
+        request,
+        "posts/author_mute_history.html",
+        {
+            "appid": appid,
+            "active_game": next(
+                (game for game in managed_game_options() if game.appid == appid), None
+            ),
+            "status": status,
+            "presentation": _author_mute_presentation(status),
+            "posts": posts,
+        },
+    )
 
 
 def _navigation_query(request) -> str:

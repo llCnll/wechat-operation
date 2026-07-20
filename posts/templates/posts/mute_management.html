@@ -1,0 +1,22 @@
+{% extends "posts/operations_base.html" %}
+{% block title %}禁言管理 | 游戏圈运营{% endblock %}
+{% block content %}
+<section class="masthead compact-head mute-masthead">
+  <div><p class="eyebrow">CONTENT OPERATIONS / MUTE MANAGEMENT</p><h1>禁言管理</h1></div>
+  <div class="head-context"><div class="game-context"><span>当前游戏</span><details class="single-filter game-selector"><summary>{{ active_game.name|default:"当前游戏" }}</summary><div class="single-options">{% for game in managed_games %}<a href="?appid={{ game.appid|urlencode }}{% if search %}&q={{ search|urlencode }}{% endif %}{% if scope %}&scope={{ scope|urlencode }}{% endif %}{% if expires %}&expires={{ expires|urlencode }}{% endif %}" {% if game.appid == appid %}class="is-selected"{% endif %}>{{ game.name }}</a>{% endfor %}</div></details></div></div>
+</section>
+<nav class="workspace-tabs" aria-label="内容管理子导航"><a href="{% url 'operations-dashboard' %}?appid={{ appid|urlencode }}">内容队列</a><a class="is-active" href="{% url 'mute-management' %}?appid={{ appid|urlencode }}">禁言管理</a></nav>
+<form class="filters workspace-filter mute-filter" method="get"><input type="hidden" name="appid" value="{{ appid }}"><div class="filter-grid"><div class="filter-search"><input name="q" value="{{ search }}" placeholder="搜索作者昵称" aria-label="搜索作者昵称"></div><label class="mute-filter-select"><span>禁言范围</span><select name="scope"><option value="" {% if not scope %}selected{% endif %}>全部有效禁言</option><option value="LOCAL" {% if scope == 'LOCAL' %}selected{% endif %}>当前游戏禁言</option><option value="GLOBAL" {% if scope == 'GLOBAL' %}selected{% endif %}>全局禁言</option></select></label><label class="mute-filter-select"><span>到期时间</span><select name="expires"><option value="" {% if not expires %}selected{% endif %}>全部</option><option value="SOON" {% if expires == 'SOON' %}selected{% endif %}>7 天内到期</option></select></label><div class="filter-actions"><a href="?appid={{ appid|urlencode }}">清空</a><button type="submit">筛选</button></div></div></form>
+<section class="mute-management-panel" aria-label="当前有效禁言对象">
+  <header class="mute-panel-heading"><div><p class="eyebrow">ACTIVE MUTES</p><h2>当前有效禁言对象</h2><p>按最早到期时间排序，避免遗漏临近恢复的账号。</p></div><strong class="mute-count">{{ statuses|length }}<small>项</small></strong></header>
+  <div class="mute-list">{% for status in statuses %}
+    <article class="mute-row">
+      <div class="mute-identity"><strong>{{ status.nick_name|default:"昵称未知" }}</strong><span>最近同步 {{ status.last_synced_at|date:"m月d日 H:i" }}</span></div>
+      <div class="mute-expiry"><span class="mute-scope {% if status.presentation.scope == '全局' %}is-global{% elif status.presentation.scope == '当前游戏及全局' %}is-both{% endif %}">{{ status.presentation.scope }}</span><strong>至 {{ status.presentation.until|date:"Y年m月d日 H:i" }}</strong><span>{{ status.presentation.remaining }}</span></div>
+      <div class="mute-origin"><span>{% if status.system_muted_at %}本系统禁言{% elif status.first_detected_at %}上游首次发现{% else %}状态来源未知{% endif %}</span><strong>{% if status.system_muted_at %}{{ status.system_muted_at|date:"m月d日 H:i" }}{% elif status.first_detected_at %}{{ status.first_detected_at|date:"m月d日 H:i" }}{% else %}--{% endif %}</strong></div>
+      <div class="mute-post">{% if status.last_source_post %}<span>最近帖子</span><a href="{% url 'operations-dashboard' %}?appid={{ appid|urlencode }}&topic={{ status.last_source_post.topic_id }}">#{{ status.last_source_post.topic_id }}</a>{% else %}<span>最近帖子</span><strong>--</strong>{% endif %}</div>
+      <a class="mute-history-link" href="{% url 'author-mute-history' status.id %}?appid={{ appid|urlencode }}">历史帖子<span>→</span></a>
+    </article>
+  {% empty %}<div class="mute-empty"><strong>当前条件下没有有效禁言对象</strong><span>可调整范围、到期时间或昵称筛选后再查看。</span></div>{% endfor %}</div>
+</section>
+{% endblock %}

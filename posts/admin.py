@@ -4,7 +4,14 @@ from config.admin_support import ReadOnlyAdmin, ReadOnlyTabularInline, operation
 from config.cdp import CdpUnavailableError, list_managed_games
 
 from .game_catalog import sync_managed_games
-from .models import CandidatePost, InteractionSnapshot, ManagedGame, OriginalPost, PostMedia
+from .models import (
+    AuthorMuteStatus,
+    CandidatePost,
+    InteractionSnapshot,
+    ManagedGame,
+    OriginalPost,
+    PostMedia,
+)
 
 
 @admin.register(ManagedGame)
@@ -87,3 +94,16 @@ class OriginalPostAdmin(ReadOnlyAdmin):
     @admin.display(description="内容管理")
     def dashboard_link(self, obj):
         return operations_dashboard_link(obj.topic_id)
+
+
+@admin.register(AuthorMuteStatus)
+class AuthorMuteStatusAdmin(ReadOnlyAdmin):
+    list_display = (
+        "nick_name",
+        "source_appid",
+        "local_muted_until",
+        "global_muted_until",
+        "last_synced_at",
+    )
+    list_filter = ("source_appid",)
+    search_fields = ("nick_name", "openid")
