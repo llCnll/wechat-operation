@@ -1,0 +1,21 @@
+version: 1.2.0
+previous: 1.1.1
+changes:
+  - AI 自动处置改为只消费内容管理已经生成的 AI 推荐及其决定规则，不再因自动授权状态重新选择动作。
+  - 自动沉底与屏蔽改用决定规则的授权阈值；非决定风险不再否决当前推荐。
+  - 新增重点原因、决定风险依据和图片 OCR 来源快照；空正文仅在 OCR 来源可写前复核时允许自动处置。
+  - 自动资格复核每次读取当前策略规则，使阈值或自动许可变更立即生效。
+upgrade:
+  dependencies: none
+  database: migrate
+  static: none
+  restart:
+    mode: supervisor
+    services: []
+  once_jobs: []
+  manual: []
+verification:
+  - uv run python manage.py validate_releases
+  - uv run python manage.py check
+  - uv run pytest -q tests/test_ai_automated_moderation.py tests/test_reviews.py tests/test_review_pipeline.py
+  - 确认 Supervisor 健康检查通过。

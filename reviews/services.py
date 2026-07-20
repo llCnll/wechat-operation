@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 from datetime import timedelta
 from difflib import SequenceMatcher
 from hashlib import sha256
@@ -32,8 +33,11 @@ from .models import (
     AiOperationReview,
     AiOperationReviewStatus,
     ContentCategory,
+    FocusReason,
+    OcrExtraction,
     OperationAudit,
     OperationExecutionSource,
+    PolicyRule,
     PolicyVersion,
     RecommendedAction,
     ReplyDraft,
@@ -73,10 +77,7 @@ MAX_IMAGE_OCR_CHARS = 8_000
 MAX_VIDEO_EVIDENCE_CHARS = 12_000
 MAX_EVALUATION_OCR_CHARS = 20_000
 AI_AUTOMATED_DAILY_LIMIT = 100
-AI_AUTOMATED_MIN_CONFIDENCE = {
-    RecommendedAction.SINK: 0.98,
-    RecommendedAction.BLOCK: 0.99,
-}
+OCR_GROUNDED_EVIDENCE_MIN_LENGTH = 6
 DEFAULT_REVIEW_PROMPT_VERSION = "review-v4"
 MUTE_VERIFY_DELAYS_SECONDS = (0, 2, 5, 10)
 MUTE_VERIFY_MAX_WAIT_SECONDS = 20
@@ -100,7 +101,7 @@ def is_operation_enabled(action: str) -> bool:
 
 def ai_automation_enabled(action: str) -> tuple[bool, str]:
     """Return the complete, explicit authorization decision for an AI write."""
-    if action not in AI_AUTOMATED_MIN_CONFIDENCE:
+    if action not in {RecommendedAction.SINK, RecommendedAction.BLOCK}:
         return False, "AI 自动处置仅支持沉底或屏蔽"
     if not runtime.enable_ai_automated_moderation:
         return False, "AI 自动处置总开关未启用"
@@ -210,18 +211,34 @@ def _operation_idempotency_key(task: ReviewTask, action: str, confirmation_key: 
     return f"{task.post.topic_id}:{action}:{token}"
 
 
-def policy_recommendation(
-    output: AssessmentOutput, policy: PolicyVersion | None
-) -> tuple[str, int, object | None]:
+@dataclass(frozen=True)
+class PolicyDecision:
+    action: str
+    priority: int
+    rule: PolicyRule | None
+    risk_index: int | None
+
+
+def policy_recommendation(output: AssessmentOutput, policy: PolicyVersion | None) -> PolicyDecision:
+    """Preserve the human-review recommendation, while recording its deciding input.
+
+    The automated worker consumes the persisted recommendation.  It must never
+    select a different action based on the subset of rules that allow automation.
+    """
     action, priority = output.recommended_action, 50
     deciding_rule = None
+    deciding_risk_index = None
     if policy:
-        for risk in output.risk_labels:
+        for risk_index, risk in enumerate(output.risk_labels):
             for rule in policy.rules.filter(risk_label=risk.label, enabled=True):
                 if any(item and item in " ".join(risk.evidence) for item in rule.exceptions):
                     continue
-                if risk.confidence >= rule.min_confidence and rule.priority >= priority:
-                    action, priority, deciding_rule = rule.recommended_action, rule.priority, rule
+                if risk.confidence >= rule.min_confidence:
+                    if rule.priority >= priority:
+                        action, priority = rule.recommended_action, rule.priority
+                        deciding_rule = rule
+                        deciding_risk_index = risk_index
+
     if output.content_category in {ContentCategory.FEEDBACK, ContentCategory.SUGGESTION}:
         if action == RecommendedAction.SINK and output.feedback_value.upper() in {
             "HIGH",
@@ -229,7 +246,8 @@ def policy_recommendation(
         }:
             action = RecommendedAction.KEEP
             deciding_rule = None
-    return action, priority, deciding_rule
+            deciding_risk_index = None
+    return PolicyDecision(action, priority, deciding_rule, deciding_risk_index)
 
 
 def _video_timestamp(start_ms: int, end_ms: int | None = None) -> str:
@@ -351,6 +369,59 @@ def current_video_extractions(post: OriginalPost) -> list[VideoExtraction]:
     ):
         latest_by_media.setdefault(extraction.media_id, extraction)
     return list(latest_by_media.values())
+
+
+def _normalized_text_fingerprint(value: str) -> str:
+    return sha256(normalized_ocr_text(value).encode()).hexdigest()
+
+
+def _ocr_source_refs(post: OriginalPost, evidence: list[str]) -> list[dict]:
+    """Record only server-verified image-OCR sources for a risk evidence row."""
+    successful_ocr = list(
+        post.ocr_extractions.filter(error_summary="").exclude(text="").order_by("pk")
+    )
+    refs: list[dict] = []
+    for evidence_index, snippet in enumerate(evidence):
+        if not isinstance(snippet, str):
+            continue
+        normalized_snippet = normalized_ocr_text(snippet)
+        if len(normalized_snippet) < OCR_GROUNDED_EVIDENCE_MIN_LENGTH:
+            continue
+        for extraction in successful_ocr:
+            normalized_ocr = normalized_ocr_text(extraction.text)
+            if normalized_snippet not in normalized_ocr:
+                continue
+            refs.append(
+                {
+                    "ocr_extraction_id": extraction.pk,
+                    "text_fingerprint": _normalized_text_fingerprint(extraction.text),
+                    "evidence_index": evidence_index,
+                    "evidence_fingerprint": _normalized_text_fingerprint(snippet),
+                }
+            )
+    return refs
+
+
+def _focus_reasons(
+    post: OriginalPost,
+    output: AssessmentOutput,
+    *,
+    high_reward: bool,
+    video_incomplete: bool,
+) -> list[str]:
+    """Make the existing human-focus conditions individually auditable."""
+    reasons: list[str] = []
+    if not post.content_text:
+        reasons.append(FocusReason.EMPTY_BODY)
+    if post.ocr_extractions.filter(error_summary__gt="").exists():
+        reasons.append(FocusReason.OCR_FAILED)
+    if any(not risk.evidence for risk in output.risk_labels):
+        reasons.append(FocusReason.EVIDENCE_MISSING)
+    if video_incomplete:
+        reasons.append(FocusReason.VIDEO_INCOMPLETE)
+    if high_reward:
+        reasons.append(FocusReason.HIGH_REWARD)
+    return reasons
 
 
 def _video_evidence_input_lines(extraction: VideoExtraction, media_index: int) -> list[str]:
@@ -535,28 +606,38 @@ def persist_assessment(
     *,
     prompt_version: str = DEFAULT_REVIEW_PROMPT_VERSION,
 ):
-    action, priority, deciding_rule = policy_recommendation(output, policy)
+    decision = policy_recommendation(output, policy)
     assessment = AiAssessment.objects.create(
         post=post,
         category=output.content_category,
         secondary_categories=output.secondary_categories,
         sentiment=output.sentiment,
         feedback_value=output.feedback_value,
-        recommended_action=action,
+        recommended_action=decision.action,
         overall_confidence=output.overall_confidence,
         needs_human_review=True,
         model_version=runtime.ai_model or "unconfigured",
         prompt_version=prompt_version,
         policy_version=policy,
-        deciding_policy_rule=deciding_rule,
+        deciding_policy_rule=decision.rule,
     )
+    evidence_rows = []
     for risk in output.risk_labels:
-        RiskEvidence.objects.create(
-            assessment=assessment,
-            label=risk.label,
-            confidence=risk.confidence,
-            evidence=risk.evidence,
+        evidence_rows.append(
+            RiskEvidence.objects.create(
+                assessment=assessment,
+                label=risk.label,
+                confidence=risk.confidence,
+                evidence=risk.evidence,
+                ocr_source_refs=_ocr_source_refs(post, risk.evidence),
+            )
         )
+    deciding_evidence = (
+        evidence_rows[decision.risk_index] if decision.risk_index is not None else None
+    )
+    if deciding_evidence is not None:
+        assessment.deciding_risk_evidence = deciding_evidence
+        assessment.save(update_fields=["deciding_risk_evidence"])
     high_reward = any(
         re.search(r"(?:上千|上万|无限|巨额|\d+\s*[万千])", evidence)
         for risk in output.risk_labels
@@ -566,39 +647,40 @@ def persist_assessment(
         extraction.status != VideoExtractionStatus.SUCCEEDED
         for extraction in current_video_extractions(post)
     )
-    needs_focus = (
-        not output.needs_human_review
-        or not post.content_text
-        or post.ocr_extractions.filter(error_summary__gt="").exists()
-        or any(not risk.evidence for risk in output.risk_labels)
-        or video_incomplete
-        or high_reward
+    focus_reasons = _focus_reasons(
+        post,
+        output,
+        high_reward=high_reward,
+        video_incomplete=video_incomplete,
     )
+    needs_focus = bool(focus_reasons)
     task = ReviewTask.objects.select_for_update().filter(post=post).first()
     if task is None:
         task = ReviewTask.objects.create(
             post=post,
             assessment=assessment,
-            suggested_action=action,
-            priority=priority,
+            suggested_action=decision.action,
+            priority=decision.priority,
             status=ReviewStatus.PENDING,
             needs_focus=needs_focus,
+            focus_reasons=focus_reasons,
         )
     elif task.status not in {
         ReviewStatus.AUTO_EXECUTED_PENDING_REVIEW,
         ReviewStatus.AUTO_REVIEW_ESCALATED,
     }:
         task.assessment = assessment
-        task.suggested_action = action
-        task.priority = priority
+        task.suggested_action = decision.action
+        task.priority = decision.priority
         task.status = ReviewStatus.PENDING
         task.needs_focus = needs_focus
+        task.focus_reasons = focus_reasons
         task.final_action = ""
         task.reviewed_by = None
         task.reviewed_at = None
         task.reason = ""
         task.save()
-    risky = action in {
+    risky = decision.action in {
         RecommendedAction.BLOCK,
         RecommendedAction.MUTE,
         RecommendedAction.BLOCK_AND_MUTE,
@@ -623,32 +705,81 @@ def persist_assessment(
     if eligible:
         enqueue_job(
             task_type=AI_AUTOMATED_MODERATION_TASK,
-            idempotency_key=f"ai-auto:{task.pk}:{assessment.pk}:{action}",
+            idempotency_key=f"ai-auto:{task.pk}:{assessment.pk}:{decision.action}",
             parameter_summary={
                 "task_id": task.pk,
                 "assessment_id": assessment.pk,
-                "action": action,
+                "action": decision.action,
             },
             max_retries=0,
         )
     return assessment, task
 
 
-def _automation_evidence(assessment: AiAssessment, rule) -> list[dict]:
-    rows = []
-    for risk in assessment.risk_evidence.filter(label=rule.risk_label).order_by("pk"):
-        snippets = risk.evidence if isinstance(risk.evidence, list) else []
-        normalized = []
-        for snippet in snippets:
-            if isinstance(snippet, str):
-                value = " ".join(snippet.split())
-                if value and value not in normalized:
-                    normalized.append(value[:180])
-        if normalized:
-            rows.append(
-                {"label": risk.label, "confidence": risk.confidence, "evidence": normalized[:3]}
-            )
-    return rows
+def _automation_evidence(assessment: AiAssessment, rule: PolicyRule) -> list[dict]:
+    """Return the one evidence row that produced the existing AI recommendation."""
+    risk = assessment.deciding_risk_evidence
+    if risk is None or risk.assessment_id != assessment.pk or risk.label != rule.risk_label:
+        return []
+    snippets = risk.evidence if isinstance(risk.evidence, list) else []
+    normalized = []
+    for snippet in snippets:
+        if isinstance(snippet, str):
+            value = " ".join(snippet.split())
+            if value and value not in normalized:
+                normalized.append(value[:180])
+    if not normalized:
+        return []
+    return [
+        {
+            "label": risk.label,
+            "confidence": risk.confidence,
+            "evidence": normalized[:3],
+            "ocr_source_refs": risk.ocr_source_refs,
+        }
+    ]
+
+
+def _has_verified_deciding_ocr_source(assessment: AiAssessment) -> bool:
+    """Revalidate the persisted OCR source before allowing the empty-body exception."""
+    risk = assessment.deciding_risk_evidence
+    if risk is None or risk.assessment_id != assessment.pk:
+        return False
+    snippets = risk.evidence if isinstance(risk.evidence, list) else []
+    refs = risk.ocr_source_refs if isinstance(risk.ocr_source_refs, list) else []
+    for ref in refs:
+        if not isinstance(ref, dict):
+            continue
+        extraction_id = ref.get("ocr_extraction_id")
+        evidence_index = ref.get("evidence_index")
+        text_fingerprint = ref.get("text_fingerprint")
+        evidence_fingerprint = ref.get("evidence_fingerprint")
+        if not isinstance(extraction_id, int) or not isinstance(evidence_index, int):
+            continue
+        if not isinstance(text_fingerprint, str) or not isinstance(evidence_fingerprint, str):
+            continue
+        if evidence_index < 0 or evidence_index >= len(snippets):
+            continue
+        snippet = snippets[evidence_index]
+        if not isinstance(snippet, str):
+            continue
+        normalized_snippet = normalized_ocr_text(snippet)
+        if (
+            len(normalized_snippet) < OCR_GROUNDED_EVIDENCE_MIN_LENGTH
+            or _normalized_text_fingerprint(snippet) != evidence_fingerprint
+        ):
+            continue
+        extraction = OcrExtraction.objects.filter(pk=extraction_id, post=assessment.post).first()
+        if (
+            extraction is None
+            or extraction.error_summary
+            or not extraction.text
+            or _normalized_text_fingerprint(extraction.text) != text_fingerprint
+        ):
+            continue
+        if normalized_snippet in normalized_ocr_text(extraction.text):
+            return True
+    return False
 
 
 def ai_automation_eligibility(
@@ -673,7 +804,10 @@ def ai_automation_eligibility(
     enabled, reason = ai_automation_enabled(task.suggested_action)
     if not enabled:
         return False, reason, snapshot
-    rule = assessment.deciding_policy_rule
+    # Authorization is operator-controlled mutable state.  Do not reuse a cached
+    # related object here: a worker or caller may otherwise apply an obsolete
+    # threshold or auto-execution switch.
+    rule = PolicyRule.objects.filter(pk=assessment.deciding_policy_rule_id).first()
     if (
         rule is None
         or not rule.enabled
@@ -682,14 +816,22 @@ def ai_automation_eligibility(
         or rule.recommended_action != task.suggested_action
     ):
         return False, "决定规则未授权 AI 自动执行", snapshot
-    minimum = max(rule.min_confidence, AI_AUTOMATED_MIN_CONFIDENCE[task.suggested_action])
+    minimum = rule.min_confidence
     evidence = _automation_evidence(assessment, rule)
-    if not evidence or task.needs_focus:
-        return False, "风险依据不完整或需重点人工核验", snapshot
-    if assessment.overall_confidence < minimum or any(
-        row["confidence"] < minimum for row in evidence
-    ):
+    if not evidence:
+        return False, "决定风险依据不完整", snapshot
+    if assessment.overall_confidence < minimum or evidence[0]["confidence"] < minimum:
         return False, "置信度未达到自动处置下限", snapshot
+    focus_reasons = task.focus_reasons
+    if not isinstance(focus_reasons, list):
+        return False, "重点核验原因记录无效", snapshot
+    if task.needs_focus != bool(focus_reasons):
+        return False, "重点核验状态与原因记录不一致", snapshot
+    if focus_reasons:
+        if set(focus_reasons) != {FocusReason.EMPTY_BODY}:
+            return False, "需重点人工核验", snapshot
+        if not _has_verified_deciding_ocr_source(assessment):
+            return False, "空正文缺少可验证的图片 OCR 风险依据", snapshot
     since = timezone.now() - timedelta(hours=24)
     if (
         OperationAudit.objects.filter(
@@ -705,6 +847,7 @@ def ai_automation_eligibility(
             "action": task.suggested_action,
             "overall_confidence": assessment.overall_confidence,
             "risk_evidence": evidence,
+            "focus_reasons": focus_reasons,
             "model_version": assessment.model_version,
             "prompt_version": assessment.prompt_version,
             "policy_version": assessment.policy_version.version

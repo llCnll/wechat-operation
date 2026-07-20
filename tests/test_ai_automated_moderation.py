@@ -5,12 +5,14 @@ from django.contrib.auth import get_user_model
 from django.test import Client
 
 from jobs.models import BackgroundJob
-from posts.models import CandidatePost, OriginalPost, OriginType
+from posts.models import CandidatePost, OriginalPost, OriginType, PostMedia
 from reviews.adapters import REVIEW_PROMPT_VERSION, AssessmentOutput, RiskOutput
 from reviews.automation_tasks import automated_moderation_handler
 from reviews.models import (
     AiOperationReview,
     AiOperationReviewStatus,
+    FocusReason,
+    OcrExtraction,
     OperationAudit,
     OperationExecutionSource,
     PolicyRule,
@@ -20,6 +22,7 @@ from reviews.models import (
 )
 from reviews.services import (
     AI_AUTOMATED_MODERATION_TASK,
+    ai_automation_eligibility,
     escalate_ai_operation_review,
     execute_ai_automated_moderation,
     persist_assessment,
@@ -138,6 +141,381 @@ def test_automation_disabled_keeps_conclusion_in_manual_queue(monkeypatch):
         policy,
     )
     assert task.status == ReviewStatus.PENDING
+    assert not BackgroundJob.objects.filter(task_type=AI_AUTOMATED_MODERATION_TASK).exists()
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("action", "risk_label"),
+    [
+        (RecommendedAction.SINK, "ADVERTISEMENT_SPAM"),
+        (RecommendedAction.BLOCK, "OFF_TOPIC"),
+    ],
+)
+def test_authorized_action_uses_its_deciding_rule_threshold_not_fixed_minimum(
+    monkeypatch, action, risk_label
+):
+    """Both supported actions may use the threshold the operator authorized."""
+    from config.settings import runtime
+
+    _enable_automation(monkeypatch, runtime)
+    post = OriginalPost.objects.create(
+        topic_id=9100 + (1 if action == RecommendedAction.SINK else 2),
+        content_id=f"threshold-{action}",
+        content_text="普通正文",
+        status=2,
+    )
+    CandidatePost.objects.create(
+        topic_id=post.topic_id, content_id=post.content_id, origin_type=OriginType.ORIGINAL
+    )
+    policy = PolicyVersion.objects.create(name=f"threshold-{action}", version="1", is_active=True)
+    PolicyRule.objects.create(
+        policy_version=policy,
+        risk_label=risk_label,
+        min_confidence=0.85,
+        recommended_action=action,
+        priority=100,
+        auto_execution_enabled=True,
+    )
+
+    assessment, task = persist_assessment(
+        post,
+        AssessmentOutput(
+            content_category="OTHER",
+            recommended_action=RecommendedAction.KEEP,
+            overall_confidence=0.86,
+            risk_labels=[RiskOutput(label=risk_label, confidence=0.86, evidence=["明确风险依据"])],
+        ),
+        policy,
+    )
+
+    assert task.suggested_action == action
+    assert assessment.deciding_risk_evidence.label == risk_label
+    assert BackgroundJob.objects.get(task_type=AI_AUTOMATED_MODERATION_TASK).parameter_summary[
+        "assessment_id"
+    ] == assessment.pk
+
+
+@pytest.mark.django_db
+def test_non_deciding_low_confidence_risk_does_not_veto_authorized_recommendation(monkeypatch):
+    from config.settings import runtime
+
+    _enable_automation(monkeypatch, runtime)
+    post = OriginalPost.objects.create(
+        topic_id=9103, content_id="non-deciding-risk", content_text="普通正文", status=2
+    )
+    CandidatePost.objects.create(
+        topic_id=post.topic_id, content_id=post.content_id, origin_type=OriginType.ORIGINAL
+    )
+    policy = PolicyVersion.objects.create(name="non-deciding-risk", version="1", is_active=True)
+    PolicyRule.objects.create(
+        policy_version=policy,
+        risk_label="OFF_TOPIC",
+        min_confidence=0.85,
+        recommended_action=RecommendedAction.BLOCK,
+        priority=100,
+        auto_execution_enabled=True,
+    )
+    PolicyRule.objects.create(
+        policy_version=policy,
+        risk_label="ADVERTISEMENT_SPAM",
+        min_confidence=0.85,
+        recommended_action=RecommendedAction.SINK,
+        priority=10,
+        auto_execution_enabled=False,
+    )
+
+    assessment, task = persist_assessment(
+        post,
+        AssessmentOutput(
+            content_category="OTHER",
+            recommended_action=RecommendedAction.KEEP,
+            overall_confidence=0.86,
+            risk_labels=[
+                RiskOutput(label="OFF_TOPIC", confidence=0.86, evidence=["百事可乐 PEPSI"]),
+                RiskOutput(label="ADVERTISEMENT_SPAM", confidence=0.42, evidence=["百事可乐 PEPSI"]),
+            ],
+        ),
+        policy,
+    )
+
+    assert task.suggested_action == RecommendedAction.BLOCK
+    assert assessment.deciding_risk_evidence.label == "OFF_TOPIC"
+    assert ai_automation_eligibility(task, assessment=assessment)[0] is True
+
+
+@pytest.mark.django_db
+def test_below_deciding_rule_threshold_stays_in_manual_queue(monkeypatch):
+    from config.settings import runtime
+
+    _enable_automation(monkeypatch, runtime)
+    post = OriginalPost.objects.create(
+        topic_id=9108, content_id="below-threshold", content_text="普通正文", status=2
+    )
+    CandidatePost.objects.create(
+        topic_id=post.topic_id, content_id=post.content_id, origin_type=OriginType.ORIGINAL
+    )
+    policy = PolicyVersion.objects.create(name="below-threshold", version="1", is_active=True)
+    PolicyRule.objects.create(
+        policy_version=policy,
+        risk_label="OFF_TOPIC",
+        min_confidence=0.85,
+        recommended_action=RecommendedAction.BLOCK,
+        priority=100,
+        auto_execution_enabled=True,
+    )
+
+    assessment, task = persist_assessment(
+        post,
+        AssessmentOutput(
+            content_category="OTHER",
+            recommended_action=RecommendedAction.BLOCK,
+            overall_confidence=0.84,
+            risk_labels=[RiskOutput(label="OFF_TOPIC", confidence=0.86, evidence=["无关内容"])],
+        ),
+        policy,
+    )
+
+    assert task.suggested_action == RecommendedAction.BLOCK
+    assert assessment.deciding_policy_rule is not None
+    assert assessment.deciding_risk_evidence.confidence == 0.86
+    assert ai_automation_eligibility(task, assessment=assessment)[0] is False
+    assert not BackgroundJob.objects.filter(task_type=AI_AUTOMATED_MODERATION_TASK).exists()
+
+
+@pytest.mark.django_db
+def test_raised_rule_threshold_rejects_the_persisted_deciding_evidence(monkeypatch):
+    from config.settings import runtime
+
+    _enable_automation(monkeypatch, runtime)
+    post = OriginalPost.objects.create(
+        topic_id=9112, content_id="raised-rule-threshold", content_text="普通正文", status=2
+    )
+    CandidatePost.objects.create(
+        topic_id=post.topic_id, content_id=post.content_id, origin_type=OriginType.ORIGINAL
+    )
+    policy = PolicyVersion.objects.create(name="raised-rule-threshold", version="1", is_active=True)
+    rule = PolicyRule.objects.create(
+        policy_version=policy,
+        risk_label="OFF_TOPIC",
+        min_confidence=0.85,
+        recommended_action=RecommendedAction.BLOCK,
+        priority=100,
+        auto_execution_enabled=True,
+    )
+    assessment, task = persist_assessment(
+        post,
+        AssessmentOutput(
+            content_category="OTHER",
+            recommended_action=RecommendedAction.KEEP,
+            overall_confidence=0.9,
+            risk_labels=[RiskOutput(label="OFF_TOPIC", confidence=0.86, evidence=["无关内容"])],
+        ),
+        policy,
+    )
+    rule.min_confidence = 0.87
+    rule.save(update_fields=["min_confidence"])
+
+    eligible, reason, _ = ai_automation_eligibility(task, assessment=assessment)
+    assert eligible is False
+    assert reason == "置信度未达到自动处置下限"
+
+
+@pytest.mark.django_db
+def test_automation_never_replaces_content_management_recommendation(monkeypatch):
+    from config.settings import runtime
+
+    _enable_automation(monkeypatch, runtime)
+    post = OriginalPost.objects.create(
+        topic_id=9104, content_id="manual-recommendation", content_text="普通正文", status=2
+    )
+    CandidatePost.objects.create(
+        topic_id=post.topic_id, content_id=post.content_id, origin_type=OriginType.ORIGINAL
+    )
+    policy = PolicyVersion.objects.create(name="manual-recommendation", version="1", is_active=True)
+    PolicyRule.objects.create(
+        policy_version=policy,
+        risk_label="OFF_TOPIC",
+        min_confidence=0.85,
+        recommended_action=RecommendedAction.BLOCK,
+        priority=100,
+        auto_execution_enabled=False,
+    )
+    PolicyRule.objects.create(
+        policy_version=policy,
+        risk_label="ADVERTISEMENT_SPAM",
+        min_confidence=0.85,
+        recommended_action=RecommendedAction.SINK,
+        priority=10,
+        auto_execution_enabled=True,
+    )
+
+    _, task = persist_assessment(
+        post,
+        AssessmentOutput(
+            content_category="OTHER",
+            recommended_action=RecommendedAction.KEEP,
+            overall_confidence=0.95,
+            risk_labels=[
+                RiskOutput(label="OFF_TOPIC", confidence=0.95, evidence=["无关内容"]),
+                RiskOutput(label="ADVERTISEMENT_SPAM", confidence=0.95, evidence=["推广信息"]),
+            ],
+        ),
+        policy,
+    )
+
+    assert task.suggested_action == RecommendedAction.BLOCK
+    assert not BackgroundJob.objects.filter(task_type=AI_AUTOMATED_MODERATION_TASK).exists()
+
+
+def _empty_body_ocr_post(topic_id: int) -> OriginalPost:
+    post = OriginalPost.objects.create(topic_id=topic_id, content_id=f"empty-{topic_id}", status=2)
+    CandidatePost.objects.create(
+        topic_id=post.topic_id, content_id=post.content_id, origin_type=OriginType.ORIGINAL
+    )
+    media = PostMedia.objects.create(post=post, url=f"https://example.invalid/{topic_id}.jpg")
+    OcrExtraction.objects.create(
+        post=post,
+        media=media,
+        text="扫码添加客服领取游戏礼包",
+        confidence=0.99,
+        provider="test",
+    )
+    return post
+
+
+def _authorized_traffic_policy(name: str) -> PolicyVersion:
+    policy = PolicyVersion.objects.create(name=name, version="1", is_active=True)
+    PolicyRule.objects.create(
+        policy_version=policy,
+        risk_label="TRAFFIC_DIVERSION",
+        min_confidence=0.85,
+        recommended_action=RecommendedAction.BLOCK,
+        priority=100,
+        auto_execution_enabled=True,
+    )
+    return policy
+
+
+def _persist_empty_body_traffic_assessment(post: OriginalPost, policy_name: str):
+    return persist_assessment(
+        post,
+        AssessmentOutput(
+            content_category="OTHER",
+            recommended_action=RecommendedAction.BLOCK,
+            overall_confidence=0.9,
+            risk_labels=[
+                RiskOutput(
+                    label="TRAFFIC_DIVERSION", confidence=0.9, evidence=["扫码添加客服领取游戏礼包"]
+                )
+            ],
+        ),
+        _authorized_traffic_policy(policy_name),
+    )
+
+
+@pytest.mark.django_db
+def test_empty_body_remains_focus_but_verified_deciding_ocr_can_be_automated(monkeypatch):
+    from config.settings import runtime
+
+    _enable_automation(monkeypatch, runtime)
+    post = _empty_body_ocr_post(9105)
+    assessment, task = _persist_empty_body_traffic_assessment(post, "empty-body-ocr")
+
+    assert task.needs_focus is True
+    assert task.focus_reasons == [FocusReason.EMPTY_BODY]
+    assert assessment.deciding_risk_evidence.ocr_source_refs
+    assert ai_automation_eligibility(task, assessment=assessment)[0] is True
+    assert BackgroundJob.objects.filter(task_type=AI_AUTOMATED_MODERATION_TASK).exists()
+
+
+@pytest.mark.django_db
+def test_empty_body_rejects_changed_ocr_source_before_write(monkeypatch):
+    from config.settings import runtime
+
+    _enable_automation(monkeypatch, runtime)
+    post = _empty_body_ocr_post(9106)
+    assessment, task = _persist_empty_body_traffic_assessment(post, "empty-body-changed-ocr")
+    extraction = post.ocr_extractions.get()
+    extraction.text = "内容已改变"
+    extraction.save(update_fields=["text"])
+
+    eligible, reason, _ = ai_automation_eligibility(task, assessment=assessment)
+    assert eligible is False
+    assert reason == "空正文缺少可验证的图片 OCR 风险依据"
+
+
+@pytest.mark.django_db
+def test_empty_body_rejects_missing_ocr_source(monkeypatch):
+    from config.settings import runtime
+
+    _enable_automation(monkeypatch, runtime)
+    post = OriginalPost.objects.create(topic_id=9109, content_id="empty-no-ocr", status=2)
+    CandidatePost.objects.create(
+        topic_id=post.topic_id, content_id=post.content_id, origin_type=OriginType.ORIGINAL
+    )
+    assessment, task = _persist_empty_body_traffic_assessment(post, "empty-body-no-ocr")
+
+    assert task.focus_reasons == [FocusReason.EMPTY_BODY]
+    assert assessment.deciding_risk_evidence.ocr_source_refs == []
+    eligible, reason, _ = ai_automation_eligibility(task, assessment=assessment)
+    assert eligible is False
+    assert reason == "空正文缺少可验证的图片 OCR 风险依据"
+    assert not BackgroundJob.objects.filter(task_type=AI_AUTOMATED_MODERATION_TASK).exists()
+
+
+@pytest.mark.django_db
+def test_empty_body_rejects_failed_ocr_source_before_write(monkeypatch):
+    from config.settings import runtime
+
+    _enable_automation(monkeypatch, runtime)
+    post = _empty_body_ocr_post(9110)
+    assessment, task = _persist_empty_body_traffic_assessment(post, "empty-body-failed-ocr")
+    extraction = post.ocr_extractions.get()
+    extraction.error_summary = "OCR 服务失败"
+    extraction.save(update_fields=["error_summary"])
+
+    eligible, reason, _ = ai_automation_eligibility(task, assessment=assessment)
+    assert eligible is False
+    assert reason == "空正文缺少可验证的图片 OCR 风险依据"
+
+
+@pytest.mark.django_db
+def test_label_mismatch_in_deciding_evidence_remains_manual(monkeypatch):
+    from config.settings import runtime
+
+    _enable_automation(monkeypatch, runtime)
+    post = _empty_body_ocr_post(9111)
+    assessment, task = _persist_empty_body_traffic_assessment(post, "deciding-label-mismatch")
+    assessment.deciding_risk_evidence.label = "ADVERTISEMENT_SPAM"
+    assessment.deciding_risk_evidence.save(update_fields=["label"])
+
+    eligible, reason, _ = ai_automation_eligibility(task, assessment=assessment)
+    assert eligible is False
+    assert reason == "决定风险依据不完整"
+
+
+@pytest.mark.django_db
+def test_empty_body_with_ocr_failure_remains_manual(monkeypatch):
+    from config.settings import runtime
+
+    _enable_automation(monkeypatch, runtime)
+    post = _empty_body_ocr_post(9107)
+    post.ocr_extractions.update(error_summary="OCR 服务失败")
+    _, task = persist_assessment(
+        post,
+        AssessmentOutput(
+            content_category="OTHER",
+            recommended_action=RecommendedAction.BLOCK,
+            overall_confidence=0.9,
+            risk_labels=[
+                RiskOutput(label="TRAFFIC_DIVERSION", confidence=0.9, evidence=["扫码添加客服"])
+            ],
+        ),
+        _authorized_traffic_policy("empty-body-ocr-failure"),
+    )
+
+    assert FocusReason.OCR_FAILED in task.focus_reasons
     assert not BackgroundJob.objects.filter(task_type=AI_AUTOMATED_MODERATION_TASK).exists()
 
 

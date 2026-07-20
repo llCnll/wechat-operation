@@ -73,6 +73,14 @@ class AiOperationReviewStatus(models.TextChoices):
     RESTORED = "RESTORED", "已人工恢复"
 
 
+class FocusReason(models.TextChoices):
+    EMPTY_BODY = "EMPTY_BODY", "正文为空"
+    OCR_FAILED = "OCR_FAILED", "图片 OCR 失败"
+    EVIDENCE_MISSING = "EVIDENCE_MISSING", "风险依据缺失"
+    VIDEO_INCOMPLETE = "VIDEO_INCOMPLETE", "视频证据不完整"
+    HIGH_REWARD = "HIGH_REWARD", "高额奖励待核验"
+
+
 class OcrExtraction(models.Model):
     post = models.ForeignKey(OriginalPost, on_delete=models.CASCADE, related_name="ocr_extractions")
     media = models.ForeignKey(PostMedia, on_delete=models.CASCADE, related_name="ocr_extractions")
@@ -209,6 +217,13 @@ class AiAssessment(models.Model):
         on_delete=models.SET_NULL,
         related_name="deciding_assessments",
     )
+    deciding_risk_evidence = models.ForeignKey(
+        "RiskEvidence",
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="deciding_assessments",
+    )
     raw_error_summary = models.CharField(max_length=500, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
@@ -224,6 +239,7 @@ class RiskEvidence(models.Model):
     label = models.CharField(max_length=100)
     confidence = models.FloatField()
     evidence = models.JSONField(default=list)
+    ocr_source_refs = models.JSONField(default=list, blank=True)
 
     class Meta:
         verbose_name = "风险证据"
@@ -239,6 +255,7 @@ class ReviewTask(models.Model):
         max_length=32, choices=ReviewStatus.choices, default=ReviewStatus.PENDING
     )
     needs_focus = models.BooleanField(default=False)
+    focus_reasons = models.JSONField(default=list, blank=True)
     final_action = models.CharField(max_length=32, choices=RecommendedAction.choices, blank=True)
     reviewed_by = models.ForeignKey(
         settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL
