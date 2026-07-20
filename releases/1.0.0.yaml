@@ -1,6 +1,6 @@
 version: 1.0.0
 previous: null
-commit: 2d522bd932e760094bbe81fb2477f2da1462e359
+historical_release_commit: 2d522bd932e760094bbe81fb2477f2da1462e359
 changes:
   - 新增由 Supervisor 托管的 AI 自动处置 Worker 与人工复审工作台。
   - 新增 AI 自动处置审计、资格校验和受限上游写入边界。

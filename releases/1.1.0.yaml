@@ -1,0 +1,27 @@
+version: 1.1.0
+previous: 1.0.1
+changes:
+  - 新增原创帖作者用户 ID、按游戏禁言状态同步和禁言管理工作台。
+  - 优化人工禁言与解除禁言的写前核验、有限回读和审计结果判定。
+  - 新增一次性历史作者状态回填 Job，补齐已有原创帖的作者关联与禁言状态。
+  - 建立多端版本化升级协议和历史发布清单。
+upgrade:
+  dependencies: uv-sync
+  database: migrate
+  static: collectstatic
+  restart:
+    mode: supervisor
+    services: []
+  once_jobs:
+    - id: author-mute-status-backfill-v1
+      enqueue: uv run python manage.py enqueue_author_mute_status_backfill
+      completion:
+        task_type: AUTHOR_MUTE_STATUS_BACKFILL
+        checkpoint_complete: true
+      required: true
+  manual:
+    - 确认受控 Chrome 已登录，并保持人工补采 Worker 运行以消费回填任务。
+verification:
+  - uv run python manage.py check
+  - 确认 Supervisor 健康检查通过。
+  - 确认 AUTHOR_MUTE_STATUS_BACKFILL 后台任务成功且 checkpoint.complete=true。

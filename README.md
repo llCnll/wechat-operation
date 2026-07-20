@@ -261,10 +261,10 @@ SQLite 部署仅启动一个 Scheduler Worker。`run_scheduler --once` 仅用于
 
 多个端点更新本仓库时，必须以发布版本而非口头描述判断升级步骤。**每次推送 `main` 都必须创建一个新的发布版本**；不得只推送代码而遗漏版本、发布清单或 tag。发布版本采用 `MAJOR.MINOR.PATCH`：不兼容变更递增 `MAJOR`，向后兼容的新能力递增 `MINOR`，向后兼容的修复递增 `PATCH`。
 
-版本历史从下列基线开始：`1.0.0` 对应 `2d522bd932e760094bbe81fb2477f2da1462e359`；`1.0.1` 对应当前可达提交 `12a5a17`（原提交 `2905bcb04509e2ffae3877ee1a2aabcc026fa190` 因作者信息重写而不应再作为 tag 目标）。下一次推送 `main` 必须发布为 `1.1.0`，并同时完成下列项目：
+版本历史从下列基线开始：`1.0.0` 对应 `2d522bd932e760094bbe81fb2477f2da1462e359`；`1.0.1` 对应当前可达提交 `12a5a17`（原提交 `2905bcb04509e2ffae3877ee1a2aabcc026fa190` 因作者信息重写而不应再作为 tag 目标）。首个按本协议发布的版本为 `1.1.0`；后续每次推送 `main` 均必须在上一个已发布版本上递增，并同时完成下列项目：
 
 1. 更新 `pyproject.toml` 的 `project.version`。
-2. 新增 `releases/<version>.yaml`，以机器可解析的形式记录从 `previous` 版本到当前版本的变更、依赖同步、数据库迁移、静态资源、一次性 Job、重启范围与验证步骤。
+2. 新增 `releases/<version>.yaml`，以机器可解析的形式记录从 `previous` 版本到当前版本的变更、依赖同步、数据库迁移、静态资源、一次性 Job、重启范围与验证步骤；发布提交由同名 Git tag 唯一标识，清单不得填写自身提交 SHA。
 3. 创建指向该发布提交的 `v<version>` Git tag，并用 `git push --follow-tags` 推送。
 4. 运行发布校验，确保版本递增、`previous` 链连续、发布清单完整且声明的操作类型合法。
 
@@ -273,7 +273,6 @@ SQLite 部署仅启动一个 Scheduler Worker。`run_scheduler --once` 仅用于
 ```yaml
 version: 1.1.0
 previous: 1.0.1
-commit: <release-commit>
 changes: []
 upgrade:
   dependencies: none # none | uv-sync

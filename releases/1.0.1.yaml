@@ -1,7 +1,7 @@
 version: 1.0.1
 previous: 1.0.0
-commit: 12a5a17168a27ee3088b18e708389c4a6c117510
-historical_commit: 2905bcb04509e2ffae3877ee1a2aabcc026fa190
+historical_release_commit: 12a5a17168a27ee3088b18e708389c4a6c117510
+original_release_commit: 2905bcb04509e2ffae3877ee1a2aabcc026fa190
 changes:
   - 补充可移植 FFmpeg/ffprobe 视频预检说明。
 upgrade:
