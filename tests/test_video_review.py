@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 
 import httpx
 import pytest
@@ -30,6 +31,7 @@ from reviews.video import (
     candidate_times,
     extract_frame,
     media_fingerprint,
+    media_tool_path,
     safe_error,
     video_workdir,
 )
@@ -232,6 +234,36 @@ def test_video_workdir_cleans_up_on_success_and_error():
 def test_video_errors_do_not_persist_unexpected_exception_messages():
     assert safe_error(VideoExtractionError("video_dns_lookup_failed")) == "video_dns_lookup_failed"
     assert safe_error(ValueError("https://private.example/signed-token")) == "ValueError"
+
+
+def test_explicit_media_tools_dir_resolves_relative_to_project_runtime(monkeypatch, tmp_path):
+    project_root = tmp_path / "project"
+    runtime_dir = project_root / "runtime"
+    tools_dir = runtime_dir / "video-tools" / "bin"
+    tools_dir.mkdir(parents=True)
+    ffmpeg = tools_dir / ("ffmpeg.exe" if os.name == "nt" else "ffmpeg")
+    ffprobe = tools_dir / ("ffprobe.exe" if os.name == "nt" else "ffprobe")
+    ffmpeg.touch()
+    ffprobe.touch()
+    if os.name != "nt":
+        ffmpeg.chmod(0o755)
+        ffprobe.chmod(0o755)
+
+    monkeypatch.setattr("reviews.video.BASE_DIR", project_root)
+    monkeypatch.setattr("reviews.video.RUNTIME_DIR", runtime_dir)
+    monkeypatch.setattr("reviews.video.runtime.video_media_tools_dir", "runtime/video-tools/bin")
+
+    assert media_tool_path("ffmpeg") == str(ffmpeg)
+    assert media_tool_path("ffprobe") == str(ffprobe)
+
+
+def test_explicit_media_tools_dir_rejects_paths_outside_runtime(monkeypatch, tmp_path):
+    monkeypatch.setattr("reviews.video.BASE_DIR", tmp_path)
+    monkeypatch.setattr("reviews.video.RUNTIME_DIR", tmp_path / "runtime")
+    monkeypatch.setattr("reviews.video.runtime.video_media_tools_dir", "outside/bin")
+    monkeypatch.setattr("reviews.video.which", lambda _name: "/system/ffmpeg")
+
+    assert media_tool_path("ffmpeg") is None
 
 
 def test_http_logs_redact_media_urls_even_without_query_parameters():

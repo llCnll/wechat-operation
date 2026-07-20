@@ -17,7 +17,7 @@ from urllib.parse import urljoin, urlparse
 
 import httpx
 
-from config.settings import RUNTIME_DIR, runtime
+from config.settings import BASE_DIR, RUNTIME_DIR, runtime
 
 
 class VideoExtractionError(RuntimeError):
@@ -34,8 +34,36 @@ _LOCAL_MEDIA_TOOLS = {
 }
 
 
+def _configured_media_tools_dir() -> Path | None:
+    """Resolve an explicit tool directory only when it stays under runtime/."""
+    configured = runtime.video_media_tools_dir.strip()
+    if not configured:
+        return None
+    candidate = Path(configured).expanduser()
+    if not candidate.is_absolute():
+        candidate = BASE_DIR / candidate
+    try:
+        resolved = candidate.resolve(strict=False)
+        resolved.relative_to(RUNTIME_DIR.resolve(strict=False))
+    except (OSError, ValueError):
+        return None
+    return resolved
+
+
+def _tool_in_directory(directory: Path, name: str) -> str | None:
+    names = (f"{name}.exe", name) if os.name == "nt" else (name,)
+    for filename in names:
+        candidate = directory / filename
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            return str(candidate)
+    return None
+
+
 def media_tool_path(name: str) -> str | None:
-    """Find a system media tool, or the explicitly provisioned local fallback."""
+    """Find a configured local media tool, a system tool, or the macOS fallback."""
+    if runtime.video_media_tools_dir.strip():
+        configured = _configured_media_tools_dir()
+        return _tool_in_directory(configured, name) if configured else None
     if path := which(name):
         return path
     fallback = _LOCAL_MEDIA_TOOLS.get(name)

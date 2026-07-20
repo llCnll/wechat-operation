@@ -167,7 +167,15 @@ SQLite 部署中每类 Worker 只能运行一个实例。页面只能控制固�
 
 ### 可选：视频审核
 
-视频审核默认关闭。先安装本机 `ffmpeg`、`ffprobe` 和 OpenCV，再使用已获授权的真实视频样本验证“无 Cookie HTTPS 读取、重定向和临时文件清理”；预检失败不得启用，也不得回退到 CDP Cookie。随后在 Pipeline 的“视频审核 Worker”配置中设置 `VIDEO_ENABLED=true`（默认时长上限 30 秒，可提高至 60 秒）并启动该 Worker。
+视频审核默认关闭。先安装本机 `ffmpeg`、`ffprobe` 和 OpenCV，再使用已获授权的真实视频样本验证“无 Cookie HTTPS 读取、媒体探测/抽帧和临时文件清理”；预检失败不得启用，也不得回退到 CDP Cookie。程序仍会对上游重定向逐跳重新校验 HTTPS 与公网地址，但不要求为启用前置条件额外准备真实重定向样本。随后在 Pipeline 的“视频审核 Worker”配置中设置 `VIDEO_ENABLED=true`（默认时长上限 30 秒，可提高至 60 秒）并启动该 Worker。
+
+程序默认从系统 `PATH` 查找 `ffmpeg` 和 `ffprobe`。若使用项目本地的可移植工具目录，可在 `runtime/.env` 设置（相对路径固定按项目根目录解析，且必须位于 `runtime/` 内）：
+
+```env
+VIDEO_MEDIA_TOOLS_DIR=runtime/video-tools/ffmpeg-8.1.2-full_build/bin
+```
+
+该值是可选的目录配置，不是命令；目录中必须同时存在 `ffmpeg`/`ffprobe`（Windows 为 `.exe`）。设置后重启 Supervisor，之后可直接执行 `uv run python -m service_supervisor`，无需手动修改 `PATH`。macOS 已通过 `PATH` 提供工具时不需设置；按下述 Darwin 本地回退方式安装到 `runtime/video-tools` 时，同样无需设置该值。
 
 macOS 12 Intel 没有当前 Homebrew FFmpeg bottle，`brew install ffmpeg` 会从源码构建。已验证可执行的替代方案是项目本地安装 Darwin x64 的 FFmpeg 4.1 与 ffprobe 4.0.2：
 
@@ -175,7 +183,7 @@ macOS 12 Intel 没有当前 Homebrew FFmpeg bottle，`brew install ffmpeg` 会�
 npm install --prefix runtime/video-tools @ffmpeg-installer/darwin-x64@4.1.0 ffprobe-static
 ```
 
-程序优先使用系统 `PATH` 中的工具；仅当系统工具不存在时才使用上述 `runtime/video-tools` 路径。该目录被忽略，不提交二进制文件。安装后仍须完成受控样本预检，才可启用视频 Worker。系统配置首页的“视频审核 Worker”→“配置视频审核”可设置启用开关、预检确认、时长/字节/视频数量/分辨率/dHash/OCR 预算、各超时和 ASR 地址、模型、密钥、超时；密钥只可写入，不会回显。
+未设置 `VIDEO_MEDIA_TOOLS_DIR` 时，程序优先使用系统 `PATH` 中的工具；仅当系统工具不存在时才使用上述 `runtime/video-tools` 路径。该目录被忽略，不提交二进制文件。安装后仍须完成受控样本预检，才可启用视频 Worker。系统配置首页的“视频审核 Worker”→“配置视频审核”可设置启用开关、预检确认、时长/字节/视频数量/分辨率/dHash/OCR 预算、各超时和 ASR 地址、模型、密钥、超时；密钥只可写入，不会回显。
 
 视频只在本机短生命周期目录中读取：开场和收尾每 250ms 抽帧、中段每秒抽帧，先本地检测二维码、再 dHash 去重。系统仅持久化带时间位置的 OCR/语音文本和固定的“检测到二维码”提示；不会保存原视频、帧、音频、完整视频 URL、Cookie 或二维码目标，也不会将它们传给 OCR、ASR 或 AI。
 

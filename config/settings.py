@@ -42,6 +42,7 @@ class RuntimeSettings(BaseSettings):
     asr_enabled: bool = False
     video_enabled: bool = False
     video_preflight_verified: bool = False
+    video_media_tools_dir: str = ""
     video_max_bytes: int = Field(default=50 * 1024 * 1024, ge=1_048_576, le=200 * 1024 * 1024)
     video_max_duration_seconds: int = Field(default=30, ge=1, le=60)
     video_max_per_post: int = Field(default=3, ge=1, le=10)
