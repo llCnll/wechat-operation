@@ -265,8 +265,10 @@ SQLite 部署仅启动一个 Scheduler Worker。`run_scheduler --once` 仅用于
 
 1. 更新 `pyproject.toml` 的 `project.version`。
 2. 新增 `releases/<version>.yaml`，以机器可解析的形式记录从 `previous` 版本到当前版本的变更、依赖同步、数据库迁移、静态资源、一次性 Job、重启范围与验证步骤；发布提交由同名 Git tag 唯一标识，清单不得填写自身提交 SHA。
-3. 创建指向该发布提交的 `v<version>` Git tag，并用 `git push --follow-tags` 推送。
+3. 通过受保护 `main` 的发布工作流创建指向该发布提交的 `v<version>` Git tag；紧急手动发布才可使用 `git push --follow-tags`。
 4. 运行发布校验，确保版本递增、`previous` 链连续、发布清单完整且声明的操作类型合法。
+
+必须为 `main` 配置分支保护：禁止绕过 Pull Request 的直接推送，并将 `Release protocol` 工作流的 `validate` job 设为必需检查。发布工作流会在合并后的 `main` 上创建或核验同名 tag；如果 tag 已存在但不指向当前提交，工作流必须失败而不得移动 tag。
 
 本仓库**不维护面向人工阅读的 changelog**。`releases/<version>.yaml` 是唯一发布事实来源；不得从 Git diff 自动推断迁移、一次性 Job 或重启要求，发布者必须显式声明。发布清单至少包含以下升级字段：
 
@@ -298,4 +300,12 @@ verification: []
 
 `schema_version`、`applied_version`、`applied_commit` 和 `applied_at` 均为必填字段；版本必须为三段 SemVer，提交必须等于该版本 tag 指向的提交，时间必须为 UTC ISO-8601。该文件不得保存密钥、作者身份、迁移状态、一次性 Job 状态或服务状态：数据库是否完成以 Django 迁移记录为准；一次性 Job 是否完成以对应 `BackgroundJob` 的成功状态和 checkpoint 为准；服务是否运行以 Supervisor 状态为准。写入时必须先写入同目录临时文件并原子替换目标文件，避免中断留下无效 JSON。缺失本机版本文件的旧端点不得自行假定版本，必须先核验当前 commit、迁移和运行态后，由操作者显式设定基线。
 
-升级 Agent 必须先读取本机版本、当前代码版本及两者之间全部发布清单，再按顺序执行其中的操作并完成验证，最后才写入本机版本。涉及迁移、静态资源或 Supervisor 自身代码时，发布清单必须要求重启整个 Supervisor；仅明确列出的 Worker 或 Web 代码变化才允许 `services` 级重启。完整 Supervisor 启动会执行迁移和静态资源收集，单独重启 Worker 不会执行这些预检。
+升级 Agent 必须先执行 `uv run python manage.py upgrade_plan --json`，读取本机版本、当前代码版本及两者之间全部发布清单；再按顺序执行其中的操作并完成验证。旧端点缺少状态文件时，必须人工核验后使用 `uv run python manage.py upgrade_init <历史版本> --confirmed` 建立基线。最后执行 `upgrade_ack` 并明确确认不能由程序可靠证明的操作，例如：
+
+```bash
+uv run python manage.py upgrade_ack <version> \
+  --confirm-dependencies --confirm-static --confirm-restart \
+  --confirm-manual --confirm-verification
+```
+
+`upgrade_ack` 会拒绝未应用迁移、未成功完成的精确一次性 Job 或缺少上述确认的升级，并以临时文件原子替换本机状态文件。涉及迁移、静态资源或 Supervisor 自身代码时，发布清单必须要求重启整个 Supervisor；仅明确列出的 Worker 或 Web 代码变化才允许 `services` 级重启。完整 Supervisor 启动会执行迁移和静态资源收集，单独重启 Worker 不会执行这些预检。

@@ -1,0 +1,18 @@
+version: 1.1.1
+previous: 1.1.0
+changes:
+  - 新增发布清单严格校验、只读升级计划、显式基线初始化和受条件保护的升级确认命令。
+  - 一次性 Job 升级验证改为按精确幂等键、任务类型、成功状态和检查点判定。
+  - 新增 main 发布工作流，自动创建或核验与项目版本匹配的不可移动 Git tag。
+upgrade:
+  dependencies: uv-sync
+  database: none
+  static: none
+  restart:
+    mode: none
+    services: []
+  once_jobs: []
+  manual: []
+verification:
+  - uv run python manage.py validate_releases
+  - uv run python manage.py check

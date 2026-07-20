@@ -13,4 +13,5 @@ upgrade:
     services: []
   once_jobs: []
   manual: []
-verification: []
+verification:
+  - uv run python manage.py check

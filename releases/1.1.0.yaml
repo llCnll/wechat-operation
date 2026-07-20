@@ -17,6 +17,7 @@ upgrade:
       enqueue: uv run python manage.py enqueue_author_mute_status_backfill
       completion:
         task_type: AUTHOR_MUTE_STATUS_BACKFILL
+        idempotency_key: once:author-mute-status-backfill:v1
         checkpoint_complete: true
       required: true
   manual:
