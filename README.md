@@ -177,6 +177,8 @@ VIDEO_MEDIA_TOOLS_DIR=runtime/video-tools/ffmpeg-8.1.2-full_build/bin
 
 该值是可选的目录配置，不是命令；目录中必须同时存在 `ffmpeg`/`ffprobe`（Windows 为 `.exe`）。设置后重启 Supervisor，之后可直接执行 `uv run python -m service_supervisor`，无需手动修改 `PATH`。macOS 已通过 `PATH` 提供工具时不需设置；按下述 Darwin 本地回退方式安装到 `runtime/video-tools` 时，同样无需设置该值。
 
+Windows 中若 WinGet 无法完成可移植安装，可将已校验的 FFmpeg ZIP 解压至 `runtime/video-tools/ffmpeg-<version>-full_build/bin`，确认其中有 `ffmpeg.exe` 与 `ffprobe.exe`，再按上述方式配置并重启 Supervisor。工具识别后，使用已获授权的视频样本完成预检：样本 URL 仅临时设置在当前终端的 `VIDEO_SAMPLE_URL`，验证无 Cookie HTTPS 读取、媒体探测/首帧提取和临时目录清理；不将 URL、Cookie、令牌、视频或帧写入配置、数据库或日志。预检通过后才可启动视频审核 Worker。
+
 macOS 12 Intel 没有当前 Homebrew FFmpeg bottle，`brew install ffmpeg` 会从源码构建。已验证可执行的替代方案是项目本地安装 Darwin x64 的 FFmpeg 4.1 与 ffprobe 4.0.2：
 
 ```bash
