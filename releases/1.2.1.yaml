@@ -1,0 +1,18 @@
+version: 1.2.1
+previous: 1.2.0
+changes:
+  - 将根 README 收敛为首次启动与端点升级入口，并将详细操作分流到 docs 指南。
+  - 新增部署初始化、发布升级和视频审核专用手册，明确视频审核的最小预检方式。
+  - 在运行恢复手册中移除重复的视频细节，统一链接到视频审核手册。
+upgrade:
+  dependencies: none
+  database: none
+  static: none
+  restart:
+    mode: none
+    services: []
+  once_jobs: []
+  manual: []
+verification:
+  - uv run python manage.py validate_releases
+  - 确认 Markdown 相对链接检查通过。

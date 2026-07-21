@@ -62,8 +62,7 @@ uv run python manage.py enqueue_author_mute_status_backfill
 ## 任务恢复
 
 - `run_scheduler` 只创建任务，不认领业务任务；`run_realtime_ingestion_worker` 认领 `SCHEDULED_INGEST_WINDOW` 与 `STATUS_SYNC`，`run_backfill_ingestion_worker` 认领 `MANUAL_INGEST_WINDOW`、`METRICS_REFRESH_WINDOW`、`AUTHOR_MUTE_STATUS_BACKFILL` 和历史 `INGEST_WINDOW`，`run_review_worker` 只认领 OCR/AI 任务，`run_video_extraction_worker` 只认领 `VIDEO_EXTRACT`；采集任务可从 checkpoint 继续。它们由 Supervisor 统一启停，页面不执行任意系统命令。`run_ingestion_worker` 保留为实时命令的兼容别名。
-- 视频 Worker 默认关闭。启用前检查 `ffmpeg`、`ffprobe`、OpenCV、无 Cookie 真实样本读取、媒体探测/抽帧和临时目录清理；失败时保持关闭，视频任务记录脱敏状态并使审核进入重点人工核验。上游重定向在实现中会逐跳重新校验 HTTPS 与公网地址，但不要求为启用前置条件额外准备真实重定向样本。默认从系统 `PATH` 查找工具；如使用可移植工具目录，可在 `runtime/.env` 设置 `VIDEO_MEDIA_TOOLS_DIR=runtime/.../bin`，相对路径按项目根目录解析且必须位于 `runtime/` 内。显式配置目录时两个工具必须同时存在；修改后重启 Supervisor。macOS 12 Intel 没有当前 Homebrew bottle 时，可在被忽略的 `runtime/video-tools` 安装 `@ffmpeg-installer/darwin-x64@4.1.0` 与 `ffprobe-static`；未设置该配置时程序会在系统工具缺失后使用此本地路径。停止或回滚时先停止视频 Worker、关闭 `VIDEO_ENABLED`，已有本地文本证据可保留追溯。
-- 当前部署将 `ASR_ENABLED=false` 视为正式的降级运行模式：视频仍会抽帧、检测二维码并调用 OCR；没有语音转写时，提取记录会标为“部分完成”，AI 与人工工作台必须将其作为需重点核验，而不是“未发现风险”。待办：后续接入明确支持 `/audio/transcriptions` 的受控 ASR 模型后，重新执行 ASR 成功链路验收，再启用该开关。
+- 视频 Worker 默认关闭。工具安装、受控样本预检、ASR 降级和停止/回滚步骤见[视频审核手册](video-review-runbook.md)。失败时保持关闭，视频任务记录脱敏状态并进入重点人工核验。
 - SQLite 中每个 Worker 职责都只能运行一个实例。实时采集和人工补采分别串行处理所属任务：长时间历史补采或范围互动刷新不会使后续 15 分钟采集、状态巡检积压。AI 审核 Worker 独立消费 OCR/AI 队列，不会被任一采集队列阻塞。
 - 任务生产者为：自动调度器创建 `SCHEDULED_INGEST_WINDOW` 与 `STATUS_SYNC`；系统配置首页“帖子采集 Worker”的“创建历史补采”创建 `MANUAL_INGEST_WINDOW`；运营分析页创建 `METRICS_REFRESH_WINDOW`；`enqueue_author_mute_status_backfill` 仅创建一次性 `AUTHOR_MUTE_STATUS_BACKFILL`；原创帖采集、单帖刷新和人工重新评估创建 `OCR_EXTRACT` 与 `AI_EVALUATE`。`enqueue_ingestion` 仅保留为故障诊断入口。完整生产/消费图见[系统总览](system-overview.md#运行架构与任务流)。
 - 契约变更或会话失效会保留已脱敏错误摘要。修复后重新排队，不应修改数据库中的会话字段。
@@ -115,4 +114,5 @@ uv run python manage.py enqueue_ingestion --appid wx6d2454a8afcd9706 --hours 6
 
 - [文档中心](../README.md)
 - [系统总览](system-overview.md)
+- [视频审核手册](video-review-runbook.md)
 - [数据库数据字典](../technical/database-schema.md)

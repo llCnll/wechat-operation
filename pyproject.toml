@@ -1,6 +1,6 @@
 [project]
 name = "wechat-content-operations"
-version = "1.2.0"
+version = "1.2.1"
 description = "微信游戏圈内容运营服务"
 readme = "README.md"
 requires-python = ">=3.12"

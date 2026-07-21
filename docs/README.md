@@ -1,12 +1,15 @@
 # 文档中心
 
-根目录 [README](../README.md) 是唯一的启动入口，包含可直接交给 Agent 的基础启动提示词和完整初始化流程。本文档中心用于按角色和任务查找补充资料；OpenSpec 主规格和归档位于仓库根目录 `openspec/`，不与业务文档混放。
+根目录 [README](../README.md) 是首次启动和已有端点升级的简明入口。本文档中心按任务提供详细手册、产品与技术资料；OpenSpec 主规格和归档位于仓库根目录 `openspec/`，不与业务文档混放。
 
 ## 按任务查找
 
 ### 启动与运行
 
-- [README：Agent 快速启动提示词与完整初始化流程](../README.md)：新部署、Agent 接手和基础 Web 启动的唯一入口。
+- [README：快速启动与升级入口](../README.md)：基础 Web 首次启动、已有端点升级和常用入口。
+- [部署与首次初始化](guides/deployment-and-initialization.md)：uv、运行态、Supervisor、受控 Chrome、扫码、AI/OCR 与 Worker 启用。
+- [发布与多端升级](guides/release-and-upgrade.md)：版本、发布清单、端点升级、一次性 Job 和重启约束。
+- [视频审核手册](guides/video-review-runbook.md)：FFmpeg、受控样本预检、ASR 降级、视频 Worker 启停与回滚。
 - [系统总览](guides/system-overview.md)：模块、数据流、工作台交互和安全边界。
 - [运行与恢复手册](guides/operations-runbook.md)：打包、备份、会话、Worker 与故障恢复。
 
@@ -26,10 +29,11 @@
 
 ## 建议阅读路径
 
-1. 新部署或由 Agent 接手：先执行根目录 [README](../README.md) 的“Agent 快速启动提示词”；需要采集与 AI 能力时，继续其完整初始化流程，不要从单个 Worker 命令开始。
-2. 运营人员：阅读[系统总览](guides/system-overview.md)，再按需查看[运行与恢复手册](guides/operations-runbook.md)。
-3. 开发或排障：先查[数据库数据字典](technical/database-schema.md)，再查对应接口调研与 OpenSpec 主规格。
-4. 评估范围或后续迭代：阅读[内容运营平台需求方案](prd/content-operations-platform-requirements.md)。
+1. 新部署或由 Agent 接手：先执行根目录 [README](../README.md)，再按[部署与首次初始化](guides/deployment-and-initialization.md)启用受控 Chrome、外部能力和 Worker；不要从单个 Worker 命令开始。
+2. 已有端点更新：先读[发布与多端升级](guides/release-and-upgrade.md)，从 `upgrade_plan --json` 开始，不要凭提交信息猜测操作。
+3. 运营人员：阅读[系统总览](guides/system-overview.md)，再按需查看[运行与恢复手册](guides/operations-runbook.md)或[视频审核手册](guides/video-review-runbook.md)。
+4. 开发或排障：先查[数据库数据字典](technical/database-schema.md)，再查对应接口调研与 OpenSpec 主规格。
+5. 评估范围或后续迭代：阅读[内容运营平台需求方案](prd/content-operations-platform-requirements.md)。
 
 ## 文档边界
 
