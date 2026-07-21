@@ -21,7 +21,7 @@ class ManagedGameAdmin(ReadOnlyAdmin):
     actions = ("sync_from_authorized_platform",)
 
     def get_actions(self, request):
-        action = self.sync_from_authorized_platform
+        action = type(self).sync_from_authorized_platform
         return {action.__name__: (action, action.__name__, action.short_description)}
 
     @admin.action(description="从受控微信同步可管理游戏", permissions=("view",))

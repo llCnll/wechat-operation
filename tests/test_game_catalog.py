@@ -82,3 +82,23 @@ def test_admin_sync_failure_keeps_cached_catalog(monkeypatch):
 
     assert ManagedGame.objects.get(pk=game.pk).name == "缓存游戏"
     assert messages == ["同步失败，已保留本地游戏目录。"]
+
+
+@pytest.mark.django_db
+def test_admin_registers_sync_action_as_unbound_method(monkeypatch):
+    game = ManagedGame.objects.create(appid="wx-sync", name="待同步游戏")
+    admin = ManagedGameAdmin(ManagedGame, AdminSite())
+    request = RequestFactory().post("/admin/posts/managedgame/")
+    messages = []
+    monkeypatch.setattr(
+        "posts.admin.list_managed_games", lambda: [ManagedGameDTO("wx-sync", "已同步游戏")]
+    )
+    monkeypatch.setattr(
+        admin, "message_user", lambda request, message, **kwargs: messages.append(message)
+    )
+
+    action, _, _ = admin.get_actions(request)["sync_from_authorized_platform"]
+    action(admin, request, ManagedGame.objects.filter(pk=game.pk))
+
+    assert ManagedGame.objects.get(pk=game.pk).name == "已同步游戏"
+    assert messages == ["已同步 1 个可管理游戏。"]
