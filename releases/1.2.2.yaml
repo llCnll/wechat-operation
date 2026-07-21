@@ -1,0 +1,18 @@
+version: 1.2.2
+previous: 1.2.1
+changes:
+  - 修复内容管理右下角的操作反馈与作者禁言状态互相遮挡的问题。
+  - 将内容管理和系统后台的默认正文字体调整为微软雅黑优先，不影响显式衬线标题和技术日志字体。
+upgrade:
+  dependencies: none
+  database: none
+  static: collectstatic
+  restart:
+    mode: services
+    services:
+      - web
+  once_jobs: []
+  manual: []
+verification:
+  - uv run python manage.py validate_releases
+  - 确认 Web 健康检查通过，右下角操作反馈与作者禁言状态可同时显示。
