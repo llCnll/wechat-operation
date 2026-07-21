@@ -11,13 +11,13 @@
 <body>
   {% include "posts/includes/topbar.html" %}
   <main class="shell">
-    {% if messages %}
-    <section class="workspace-feedback" aria-label="操作反馈" aria-live="polite">
-      {% for message in messages %}<p class="{{ message.tags|default:'info' }}"><span>{{ message }}</span><button class="workspace-feedback-dismiss" type="button" data-workspace-feedback-dismiss aria-label="关闭提示">关闭</button></p>{% endfor %}
-    </section>
-    {% endif %}
-    {% if selected_post and selected_post.author_mute_presentation %}
-    <section class="workspace-feedback" aria-label="作者禁言状态"><p class="author-mute-status {% if selected_post.author_mute_presentation.active %}is-muted{% elif selected_post.author_mute_status %}is-clear{% else %}is-unknown{% endif %}"><span>作者禁言状态：{{ selected_post.author_mute_presentation.label }}{% if selected_post.author_mute_presentation.until %}<small>有效期至 {{ selected_post.author_mute_presentation.until|date:"Y-m-d H:i:s" }}</small>{% endif %}</span></p></section>
+    {% if messages or selected_post and selected_post.author_mute_presentation %}
+    <aside class="workspace-notice-stack" aria-live="polite">
+      {% if messages %}<section class="workspace-feedback" aria-label="操作反馈">
+        {% for message in messages %}<p class="{{ message.tags|default:'info' }}"><span>{{ message }}</span><button class="workspace-feedback-dismiss" type="button" data-workspace-feedback-dismiss aria-label="关闭提示">关闭</button></p>{% endfor %}
+      </section>{% endif %}
+      {% if selected_post and selected_post.author_mute_presentation %}<section class="workspace-feedback" aria-label="作者禁言状态"><p class="author-mute-status {% if selected_post.author_mute_presentation.active %}is-muted{% elif selected_post.author_mute_status %}is-clear{% else %}is-unknown{% endif %}"><span>作者禁言状态：{{ selected_post.author_mute_presentation.label }}{% if selected_post.author_mute_presentation.until %}<small>有效期至 {{ selected_post.author_mute_presentation.until|date:"Y-m-d H:i:s" }}</small>{% endif %}</span></p></section>{% endif %}
+    </aside>
     {% if selected_post.author_mute_presentation.active %}<script>document.addEventListener("DOMContentLoaded",()=>document.querySelectorAll('[data-operation="MUTE"]').forEach((button)=>{button.disabled=true;button.removeAttribute("data-operation")}));</script>{% endif %}
     {% endif %}
     {% block content %}{% endblock %}
