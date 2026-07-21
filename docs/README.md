@@ -16,6 +16,7 @@
 ### 产品与规划
 
 - [内容运营平台需求方案](prd/content-operations-platform-requirements.md)：业务痛点、目标、范围、验收和后续规划；规划不等同于已交付能力。
+- [回复 FAQ 资料维护](guides/reply-faq-guidance.md)：受控 FAQ 原始资料、运行时 JSON、版本递增、固定样本与 Worker 重启要求。
 
 ### 技术实现
 
