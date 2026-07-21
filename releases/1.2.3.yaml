@@ -1,0 +1,21 @@
+version: 1.2.3
+previous: 1.2.2
+changes:
+  - 修复后台“从受控微信同步可管理游戏”操作的注册方式，确保管理员可执行同步。
+  - 发布流程自动从不可移动版本 tag 生成源码 ZIP 和 SHA-256 校验文件，并作为 GitHub Release 附件发布。
+  - Release 附件重跑时只补传缺失文件；已存在文件与 tag 重建结果不一致时失败且不覆盖。
+  - 忽略本地 .workbuddy 运行记录，不纳入版本控制或源码归档。
+upgrade:
+  dependencies: none
+  database: none
+  static: none
+  restart:
+    mode: services
+    services:
+      - web
+  once_jobs: []
+  manual: []
+verification:
+  - uv run python manage.py validate_releases
+  - uv run pytest -q tests/test_release_protocol.py tests/test_release_source_archive.py
+  - 确认后台“从受控微信同步可管理游戏”操作可执行并保留同步结果提示。
