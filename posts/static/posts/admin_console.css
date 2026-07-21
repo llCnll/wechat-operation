@@ -1,5 +1,5 @@
 :root { --console-ink:#17262b; --console-paper:#f6f2e8; --console-card:#fffdf8; --console-line:#d8d1c3; --console-teal:#16766c; --console-coral:#e75d45; --console-muted:#68716c; }
-body { color:var(--console-ink); background:radial-gradient(circle at 92% 0%,#d8ebe4 0,transparent 27rem),var(--console-paper); font-family:"Avenir Next","Noto Sans SC",sans-serif; }
+body { color:var(--console-ink); background:radial-gradient(circle at 92% 0%,#d8ebe4 0,transparent 27rem),var(--console-paper); font-family:"Microsoft YaHei","微软雅黑","Noto Sans SC",sans-serif; }
 #header.admin-topbar { height:68px; min-height:68px; padding:0 max(24px,calc((100vw - 1320px)/2)); justify-content:flex-start; gap:40px; color:var(--console-ink); background:rgba(255,253,248,.88); border-bottom:1px solid var(--console-line); box-shadow:none; backdrop-filter:blur(12px); }
 #header.admin-topbar .brand { color:var(--console-ink); }
 #header.admin-topbar .brand span { display:inline-grid; width:27px; height:27px; margin-right:8px; border-radius:50%; place-items:center; color:#fff; background:var(--console-coral); font-family:Georgia,serif; }
