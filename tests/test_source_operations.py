@@ -50,7 +50,9 @@ def test_verified_block_operation_uses_reason_bitmask(monkeypatch):
 
 def test_verified_mute_reuses_preflight_author_identity_without_second_read(monkeypatch):
     client, calls = _client_with_captured_post(monkeypatch)
-    monkeypatch.setattr(client, "get_post_metrics", lambda _topic_id: pytest.fail("unexpected read"))
+    monkeypatch.setattr(
+        client, "get_post_metrics", lambda _topic_id: pytest.fail("unexpected read")
+    )
     mute_calls = []
     monkeypatch.setattr(
         client,
@@ -85,7 +87,9 @@ def test_verified_mute_reuses_preflight_author_identity_without_second_read(monk
 
 def test_verified_unmute_reuses_preflight_author_identity_and_module(monkeypatch):
     client, calls = _client_with_captured_post(monkeypatch)
-    monkeypatch.setattr(client, "get_post_metrics", lambda _topic_id: pytest.fail("unexpected read"))
+    monkeypatch.setattr(
+        client, "get_post_metrics", lambda _topic_id: pytest.fail("unexpected read")
+    )
     unmute_calls = []
     monkeypatch.setattr(
         client,

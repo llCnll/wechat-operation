@@ -148,7 +148,11 @@ class Supervisor:
         log_path = self.store.log_path("preflight")
         self._rotate_log(log_path)
         with log_path.open("a", encoding="utf-8") as output:
-            commands = (("migrate",), ("collectstatic", "--noinput"), ("ensure_default_policy",))
+            commands = (
+                ("migrate",),
+                ("collectstatic", "--noinput"),
+                ("ensure_default_policy",),
+            )
             for command in commands:
                 result = subprocess.run(
                     [sys.executable, str(self.project_root / "manage.py"), *command],

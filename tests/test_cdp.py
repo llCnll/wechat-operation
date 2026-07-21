@@ -1,6 +1,5 @@
-from unittest.mock import Mock, patch
-
 import json
+from unittest.mock import Mock, patch
 
 from config.cdp import (
     CONTROLLED_LOGIN_URL,

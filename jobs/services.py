@@ -16,6 +16,10 @@ class JobDeferred(RuntimeError):
         self.delay_seconds = delay_seconds
 
 
+class JobTerminalError(RuntimeError):
+    """The worker classified an error as non-retryable for this job."""
+
+
 @dataclass(frozen=True)
 class EnqueueResult:
     """A persisted job plus whether this call created it."""
@@ -101,6 +105,14 @@ def fail_job(job: BackgroundJob, error_summary: str) -> None:
     job.save()
 
 
+def fail_job_terminal(job: BackgroundJob, error_summary: str) -> None:
+    """Persist a classified terminal failure without consuming retry attempts."""
+    job.status = JobStatus.FAILED
+    job.error_summary = error_summary[:500]
+    job.finished_at = timezone.now()
+    job.save(update_fields=["status", "error_summary", "finished_at", "updated_at"])
+
+
 def defer_job(job: BackgroundJob, reason: str, *, delay_seconds: int = 5) -> None:
     """Release a job while its dependencies are active without treating it as a failure."""
     job.status = JobStatus.PENDING
@@ -141,6 +153,8 @@ def execute_next_job(
         handler(job)
     except JobDeferred as exc:
         defer_job(job, str(exc), delay_seconds=exc.delay_seconds)
+    except JobTerminalError as exc:
+        fail_job_terminal(job, str(exc))
     except Exception as exc:  # The task error is intentionally persisted without a traceback.
         fail_job(job, str(exc))
     else:

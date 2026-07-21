@@ -12,4 +12,6 @@ class Command(BaseCommand):
         parser.add_argument("--poll-seconds", type=float, default=2, help="空队列轮询间隔。")
 
     def handle(self, *args, **options):
-        consume_jobs(self, WORKER_HANDLERS, loop=options["loop"], poll_seconds=options["poll_seconds"])
+        consume_jobs(
+            self, WORKER_HANDLERS, loop=options["loop"], poll_seconds=options["poll_seconds"]
+        )

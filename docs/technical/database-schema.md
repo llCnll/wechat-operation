@@ -30,7 +30,6 @@
 | `classification_error` | 字符串，最长 500，可留空 | 判定失败的脱敏摘要。 |
 | `classified_at` | 日期时间，可空 | 最近一次完成判定的时间。 |
 | `source_appid` | 字符串，最长 128，可留空 | 所属小游戏 AppID。 |
-| `author_openid` | 字符串，最长 255，可留空、有索引 | 管理详情返回的作者用户 ID；仅用于禁言状态和同作者历史原创帖关联。 |
 | `created_at` | 日期时间，自动写入 | 首次采集时间。 |
 | `updated_at` | 日期时间，自动更新 | 最近更新时间。 |
 
@@ -59,6 +58,7 @@
 | `status` | 整数，可空 | 帖子管理状态；包含本地删除状态位。 |
 | `recommend_status` | 整数，可空 | 原平台推荐状态原值，当前未确认稳定枚举。 |
 | `source_appid` | 字符串，最长 128，可留空 | 所属小游戏 AppID。 |
+| `author_openid` | 字符串，最长 255，可留空、有索引 | 管理详情返回的作者用户 ID；仅用于禁言状态和同作者历史原创帖关联。 |
 | `created_at` | 日期时间，自动写入 | 首次入库时间。 |
 | `updated_at` | 日期时间，自动更新 | 最近同步时间。 |
 
@@ -171,6 +171,7 @@
 | `priority` | 正小整数，默认 `50` | 规则优先级，数值越大越优先。 |
 | `exceptions` | JSON 数组，可留空，默认 `[]` | 不适用该规则的例外条件。 |
 | `enabled` | 布尔，默认 `true` | 是否参与策略计算。 |
+| `auto_execution_enabled` | 布尔，默认 `false` | 是否允许该规则进入受限 AI 自动沉底/屏蔽资格判断。 |
 
 `recommended_action` 枚举也适用于 `reviews_aiassessment`、`reviews_reviewtask` 和 `reviews_operationaudit`：
 
@@ -201,8 +202,10 @@
 | `overall_confidence` | 浮点数 | AI 总体置信度。 |
 | `needs_human_review` | 布尔，默认 `true` | 是否要求进入人工审核。 |
 | `model_version` | 字符串，最长 200 | 产生结论的模型标识。 |
-| `prompt_version` | 字符串，最长 100，可留空 | 预留的提示词版本；当前评估流程尚未写入。 |
+| `prompt_version` | 字符串，最长 100，可留空 | 产生当前评估的有效提示词版本。 |
 | `policy_version_id` | 外键，可空，指向 `reviews_policyversion`，置空删除 | 评估采用的策略版本。 |
+| `deciding_policy_rule_id` | 外键，可空，指向 `reviews_policyrule`，置空删除 | 产生当前建议动作的策略规则。 |
+| `deciding_risk_evidence_id` | 外键，可空，指向 `reviews_riskevidence`，置空删除 | 产生当前建议动作的决定性风险证据。 |
 | `raw_error_summary` | 字符串，最长 500，可留空 | 预留的 AI 调用失败脱敏摘要；当前失败信息记录在对应后台任务。 |
 | `created_at` | 日期时间，自动写入 | 评估完成时间。 |
 
@@ -249,6 +252,8 @@ AI 评估中的单项风险证据，可保存多段命中内容。
 | `label` | 字符串，最长 100 | 风险标签。 |
 | `confidence` | 浮点数 | 该风险的置信度。 |
 | `evidence` | JSON 数组，默认 `[]` | 命中的证据片段或位置。 |
+| `ocr_source_refs` | JSON 数组，默认 `[]` | 与证据匹配的 OCR 来源记录和文本指纹。 |
+| `media_source_refs` | JSON 数组，默认 `[]` | 当前图片 OCR 或视频证据的本地记录标识、文本指纹和视频时间位置；不保存媒体 URL 或认证数据。 |
 
 ## `reviews_reviewtask`（人工审核任务）
 
@@ -261,8 +266,9 @@ AI 评估中的单项风险证据，可保存多段命中内容。
 | `assessment_id` | 外键，可空，指向 `reviews_aiassessment`，置空删除 | 关联的 AI 评估。 |
 | `suggested_action` | 字符串，最长 32，枚举 | AI 或策略建议动作。 |
 | `priority` | 正小整数，默认 `50` | 人工审核优先级，数值越大越优先。 |
-| `status` | 字符串，最长 16，枚举，默认 `PENDING` | 任务审核进度。 |
+| `status` | 字符串，最长 32，枚举，默认 `PENDING` | 任务审核进度。 |
 | `needs_focus` | 布尔，默认 `false` | 是否需要运营重点关注。 |
+| `focus_reasons` | JSON 数组，默认 `[]` | 新评估仅使用 `EVIDENCE_MISSING`：空文字输入且媒体证据不足；历史记录可保留旧原因。 |
 | `final_action` | 字符串，最长 32，枚举，可留空 | 人工最终选择动作。 |
 | `reviewed_by_id` | 外键，可空，指向 `auth_user`，置空删除 | 完成审核的后台用户。 |
 | `reviewed_at` | 日期时间，可空 | 人工审核完成时间。 |
@@ -275,12 +281,14 @@ AI 评估中的单项风险证据，可保存多段命中内容。
 | 值 | 含义 |
 | --- | --- |
 | `PENDING` | 待人工审核。 |
+| `AUTO_EXECUTED_PENDING_REVIEW` | AI 已执行，等待人工事后复审。 |
+| `AUTO_REVIEW_ESCALATED` | AI 复审异常，等待人工跟进。 |
 | `REVIEWED` | 已完成人工审核。 |
 | `CANCELED` | 已取消，不再处理。 |
 
 ## `reviews_replydraft`（回复草案）
 
-反馈或建议类帖子可用的 AI 回复建议，不直接发布到原平台。内容管理仅在对应帖子已有草案时提供查看、编辑、复制和标记本地采纳入口；这些操作只读写本表。
+安全原创帖可用的本地 AI 回复建议，覆盖反馈、建议、问题、活动、攻略和安全社区互动；命中受控 FAQ 时保存受控引用，未命中时可保存明确标识的通用草案。草案不直接发布到原平台。内容管理仅在对应帖子已有当前可用草案时提供查看、编辑、复制和标记本地采纳入口；这些操作只读写本表。
 
 | 字段 | 类型与约束 | 含义 |
 | --- | --- | --- |
@@ -294,12 +302,16 @@ AI 评估中的单项风险证据，可保存多段命中内容。
 | `risk_notice` | 文本，可留空 | 发布前的风险提示。 |
 | `adopted` | 布尔，默认 `false` | 是否被标记为本地采用；不代表已经回复或发布。 |
 | `adopted_with_edits` | 布尔，默认 `false` | 是否在草案改动后标记本地采用。 |
-| `suppressed_reason` | 字符串，最长 500，可留空 | 预留的不生成或不采用草案原因；当前正常评估流程不写入该字段。 |
+| `suppressed_reason` | 字符串，最长 500，可留空 | 草案不适用于当前风险评估时的脱敏原因；未抑制时为空。 |
+| `faq_rule_id` | 字符串，最长 100，可留空 | 命中的受控 FAQ 规则 ID；历史草案为空。 |
+| `faq_version` | 字符串，最长 100，可留空 | 生成草案时使用的 FAQ 资料版本。 |
+| `style_variants` | JSON 数组，默认 `[]` | 新 FAQ 草案的 `WARM`、`CONCISE`、`FORMAL` 三种候选正文；历史草案为空。 |
+| `selected_style` | 字符串，最长 16，可留空 | 当前带入编辑、复制和本地采纳的候选风格。 |
 | `updated_at` | 日期时间，自动更新 | 草案最近更新时间。 |
 
 ## `reviews_operationaudit`（上游操作审计）
 
-每次人工确认的处置尝试及状态回读结果；不保存 Cookie、令牌或作者身份标识。
+每次人工确认或受限 AI 自动处置的尝试及状态回读结果；不保存 Cookie、令牌或作者身份标识。
 
 | 字段 | 类型与约束 | 含义 |
 | --- | --- | --- |
@@ -315,10 +327,26 @@ AI 评估中的单项风险证据，可保存多段命中内容。
 | `result_code` | 字符串，最长 100，可留空 | 上游或本地结果码。 |
 | `error_summary` | 字符串，最长 500，可留空 | 失败的脱敏摘要。 |
 | `executor_id` | 外键，可空，指向 `auth_user`，置空删除 | 执行确认的后台用户。 |
+| `execution_source` | 字符串，最长 16，枚举，默认 `HUMAN` | 处置来源：人工或 AI 自动。 |
+| `automation_snapshot` | JSON 对象，默认 `{}` | AI 自动处置时的不可变授权、模型、策略和证据摘要；人工操作为空。 |
 | `executed_at` | 日期时间，可空 | 实际调用上游的时间。 |
 | `created_at` | 日期时间，自动写入 | 审计记录创建时间。 |
 
 `result_code` 常见取值包括：`EXECUTING`（确认已持久化，正在执行上游读写）、`OK`（状态回读验证成功）、`ACTION_FAILED`（上游调用或回读失败）、`SKIPPED_UPSTREAM_NOT_NORMAL`（目标已不是正常帖，跳过重复处置）和 `CAPABILITY_DISABLED`（对应上游写能力未启用）。审计用于操作防重和追溯，不作为审核任务状态的强依赖。
+
+## `reviews_aioperationreview`（AI 操作复审）
+
+每条成功 AI 自动沉底/屏蔽审计对应一条人工事后复审记录。复审不会自动恢复上游状态；异常纠正仍走既有人工二次确认与审计。
+
+| 字段 | 类型与约束 | 含义 |
+| --- | --- | --- |
+| `id` | 整数，自增，主键 | 本地记录编号。 |
+| `audit_id` | 一对一外键，指向 `reviews_operationaudit`，保护删除 | 对应 AI 自动操作审计。 |
+| `status` | 字符串，最长 16，枚举，默认 `PENDING` | `PENDING`、`CONFIRMED`、`ESCALATED` 或 `RESTORED`。 |
+| `reviewer_id` | 外键，可空，指向 `auth_user`，置空删除 | 完成复审的后台用户。 |
+| `reviewed_at` | 日期时间，可空 | 最近复审时间。 |
+| `reason` | 文本，可留空 | 复审说明或升级原因。 |
+| `created_at` / `updated_at` | 日期时间，自动写入/更新 | 创建和最近更新时间。 |
 
 ## `jobs_backgroundjob`（后台任务）
 
@@ -363,10 +391,41 @@ AI 评估中的单项风险证据，可保存多段命中内容。
 | `OCR_EXTRACT` | 原创帖图片 OCR。 | AI 审核 Worker（Supervisor 服务 `review`） |
 | `AI_EVALUATE` | 原创帖 AI 内容评估。 | AI 审核 Worker（Supervisor 服务 `review`） |
 | `VIDEO_EXTRACT` | 原创帖视频的本地受限证据提取。任务摘要仅含本地提取记录 ID、帖子 ID、URL 指纹与版本。 | 视频提取 Worker（Supervisor 服务 `video_extraction`） |
+| `AI_AUTOMATED_MODERATION` | 已授权 AI 沉底或屏蔽的一次性上游操作与复审建档。 | AI 自动处置 Worker（Supervisor 服务 `ai_moderation`） |
+| `AUTHOR_MUTE_STATUS_BACKFILL` | 一次性补全历史原创帖作者禁言状态。 | 人工补采 Worker（Supervisor 服务 `backfill_ingestion`） |
+| `METRIC_DAILY_SYNC` / `METRIC_WEEKLY_SYNC` / `METRIC_BACKFILL` | 游戏圈日/周聚合指标同步或人工范围回填；当前工作区已实现、待发布。 | 指标快照 Worker（Supervisor 服务 `metric_sync`） |
+
+## `reporting_gamecirclemetricsnapshot`（游戏圈指标快照，待发布）
+
+当前工作区的指标能力按单游戏、单来源、单业务周期保存白名单聚合数值；不保存原始响应、认证上下文、排名对象或作者明细。稳定业务键为 `(appid, source, period_start, period_end, scope)`。
+
+| 字段 | 类型与约束 | 含义 |
+| --- | --- | --- |
+| `id` | 整数，自增，主键 | 本地记录编号。 |
+| `appid` | 字符串，最长 64 | 游戏 AppID。 |
+| `source` | 字符串，最长 40，枚举 | 指标来源，如日粉丝、内容消费或周度运营效果。 |
+| `period_start` / `period_end` | 日期 | 业务日或业务周的起止日期。 |
+| `scope` | 字符串，最长 16，默认 `ALL` | 首期固定全量范围。 |
+| `metrics` | JSON 对象 | 来源白名单指标值；不同来源不得混写字段。 |
+| `publication_state` | 字符串，最长 24，默认 `VERIFIED` | 周度数据为 `VERIFIED` 或 `PENDING_RECHECK`；日来源固定已验证。 |
+| `captured_at` | 日期时间 | 最近一次成功获取时间。 |
+| `latest_job_id` | 外键，可空，指向 `jobs_backgroundjob`，置空删除 | 最近写入该快照的后台任务。 |
+| `created_at` / `updated_at` | 日期时间，自动写入/更新 | 创建和最近更新时间。 |
+
+## `reporting_metricjoblease`（指标任务租约，待发布）
+
+同一人工指标范围只允许一个待执行或运行中的任务。终态后可创建新批次，快照仍按稳定业务键更新。
+
+| 字段 | 类型与约束 | 含义 |
+| --- | --- | --- |
+| `id` | 整数，自增，主键 | 本地记录编号。 |
+| `dedupe_key` | 字符串，最长 255，唯一 | 人工范围请求的语义去重键。 |
+| `active_job_id` | 外键，可空，指向 `jobs_backgroundjob`，置空删除 | 当前活跃指标任务。 |
+| `updated_at` | 日期时间，自动更新 | 最近租约更新时间。 |
 
 ## `reviews_videoextraction` 与 `reviews_videoevidence`
 
-视频审核仅持久化可复核的文本与时间位置。`VideoExtraction` 保存帖子、媒体外键、媒体 URL 的 SHA-256 指纹、提取器版本、尝试序号、状态、时长、帧数和脱敏错误；同一媒体每次显式重试创建新的尝试记录，旧证据保持可追溯。`VideoEvidence` 保存来源（帧 OCR、二维码、语音）、起止毫秒、顺序、文本、置信度和提供方。二维码文本固定为“检测到二维码”。两表均不保存视频、音频、帧、完整 URL、副本 Cookie、令牌、二维码解码字符串/目标或模型原始响应。
+视频审核仅持久化可复核的文本与时间位置。`VideoExtraction` 保存帖子、媒体外键、媒体 URL 的 SHA-256 指纹、提取器版本、尝试序号、状态、实际时长、提取时的时长上限快照、帧数和脱敏错误；同一媒体每次显式重试创建新的尝试记录，旧证据保持可追溯。`VideoEvidence` 保存来源（帧 OCR、二维码、语音）、起止毫秒、顺序、文本、置信度和提供方。二维码文本固定为“检测到二维码”。两表均不保存视频、音频、帧、完整 URL、副本 Cookie、令牌、二维码解码字符串/目标或模型原始响应。
 
 ## Supervisor 运行态文件
 

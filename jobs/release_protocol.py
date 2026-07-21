@@ -56,8 +56,10 @@ def _require_mapping(value: object, *, context: str) -> dict[str, Any]:
 
 
 def _require_string_list(value: object, *, context: str) -> list[str]:
-    if not isinstance(value, list) or not value or not all(
-        isinstance(item, str) and item for item in value
+    if (
+        not isinstance(value, list)
+        or not value
+        or not all(isinstance(item, str) and item for item in value)
     ):
         raise ReleaseProtocolError(f"{context} 必须为非空字符串列表")
     return value
@@ -205,15 +207,15 @@ def build_upgrade_plan(
         "from_version": from_version,
         "to_version": to_version,
         "releases": [release.version for release in applicable],
-        "dependencies": "uv-sync" if any(
-            release.document["upgrade"]["dependencies"] == "uv-sync" for release in applicable
-        ) else "none",
-        "database": "migrate" if any(
-            release.document["upgrade"]["database"] == "migrate" for release in applicable
-        ) else "none",
-        "static": "collectstatic" if any(
-            release.document["upgrade"]["static"] == "collectstatic" for release in applicable
-        ) else "none",
+        "dependencies": "uv-sync"
+        if any(release.document["upgrade"]["dependencies"] == "uv-sync" for release in applicable)
+        else "none",
+        "database": "migrate"
+        if any(release.document["upgrade"]["database"] == "migrate" for release in applicable)
+        else "none",
+        "static": "collectstatic"
+        if any(release.document["upgrade"]["static"] == "collectstatic" for release in applicable)
+        else "none",
         "once_jobs": once_jobs,
         "manual": [],
         "verification": [],

@@ -10,8 +10,8 @@ from posts.models import (
     POST_STATUS_NORMAL,
     POST_STATUS_SELF_VISIBLE,
     POST_STATUS_SUNK,
-    CandidatePost,
     AuthorMuteStatus,
+    CandidatePost,
     InteractionSnapshot,
     MediaType,
     OriginalPost,
@@ -25,12 +25,14 @@ from posts.models import (
 from posts.services import (
     classify_content_card,
     refresh_post_status_and_metrics,
-    sync_author_mute_status,
     store_post_metrics,
+    sync_author_mute_status,
 )
 
 
-def _author_detail(*, appid="wx-game", openid="author-1", nick_name="作者", local_end=0, global_end=0):
+def _author_detail(
+    *, appid="wx-game", openid="author-1", nick_name="作者", local_end=0, global_end=0
+):
     return {
         "data": {
             "topic": {
@@ -251,10 +253,14 @@ def test_management_detail_recovery_clears_local_deletion_bit():
 
 @pytest.mark.django_db
 def test_author_mute_sync_normalizes_and_clears_expired_statuses():
-    post = OriginalPost.objects.create(topic_id=14, content_id="author-status", source_appid="wx-game")
+    post = OriginalPost.objects.create(
+        topic_id=14, content_id="author-status", source_appid="wx-game"
+    )
     future = int((timezone.now() + timedelta(days=1)).timestamp())
     state = sync_author_mute_status(
-        post, _author_detail(local_end=future, global_end=future), source_requested_at=timezone.now()
+        post,
+        _author_detail(local_end=future, global_end=future),
+        source_requested_at=timezone.now(),
     )
     assert state.local_muted_until is not None
     assert state.global_muted_until is not None
@@ -270,8 +276,12 @@ def test_author_mute_sync_normalizes_and_clears_expired_statuses():
 
 @pytest.mark.django_db
 def test_author_mute_sync_creates_unmuted_observation_and_updates_nickname():
-    first = OriginalPost.objects.create(topic_id=15, content_id="author-first", source_appid="wx-game")
-    second = OriginalPost.objects.create(topic_id=16, content_id="author-second", source_appid="wx-game")
+    first = OriginalPost.objects.create(
+        topic_id=15, content_id="author-first", source_appid="wx-game"
+    )
+    second = OriginalPost.objects.create(
+        topic_id=16, content_id="author-second", source_appid="wx-game"
+    )
     sync_author_mute_status(
         first, _author_detail(nick_name="旧昵称", local_end=0), source_requested_at=timezone.now()
     )
@@ -288,8 +298,12 @@ def test_author_mute_sync_creates_unmuted_observation_and_updates_nickname():
 
 @pytest.mark.django_db
 def test_author_mute_sync_isolated_by_game_and_ignores_out_of_order_detail():
-    first = OriginalPost.objects.create(topic_id=17, content_id="author-game-a", source_appid="game-a")
-    second = OriginalPost.objects.create(topic_id=18, content_id="author-game-b", source_appid="game-b")
+    first = OriginalPost.objects.create(
+        topic_id=17, content_id="author-game-a", source_appid="game-a"
+    )
+    second = OriginalPost.objects.create(
+        topic_id=18, content_id="author-game-b", source_appid="game-b"
+    )
     now = timezone.now()
     later = now + timedelta(seconds=10)
     local_end = int((now + timedelta(days=1)).timestamp())
@@ -326,7 +340,9 @@ def test_author_mute_sync_keeps_the_post_game_scope_when_detail_appid_differs():
 
 @pytest.mark.django_db
 def test_author_mute_sync_does_not_create_observation_without_openid():
-    post = OriginalPost.objects.create(topic_id=19, content_id="author-missing", source_appid="wx-game")
+    post = OriginalPost.objects.create(
+        topic_id=19, content_id="author-missing", source_appid="wx-game"
+    )
     payload = _author_detail()
     del payload["data"]["topic"]["creater"]["openid"]
     assert sync_author_mute_status(post, payload) is None

@@ -5,6 +5,8 @@ import pytest
 
 from jobs.models import BackgroundJob
 from posts.models import CandidatePost, OriginalPost, OriginType
+from reporting.metric_workspace import build_metric_workspace
+from reporting.models import GameCircleMetricSnapshot, MetricPublicationState, MetricSource
 from reporting.services import (
     build_live_operations_analysis,
     default_analysis_date_range,
@@ -100,9 +102,7 @@ def test_live_analysis_is_game_scoped_and_uses_current_assessment_and_review_tas
         ),
     )
 
-    report = build_live_operations_analysis(
-        date(2026, 7, 18), date(2026, 7, 18), "game-a"
-    )
+    report = build_live_operations_analysis(date(2026, 7, 18), date(2026, 7, 18), "game-a")
 
     assert report.metrics["original_count"] == 1
     assert report.metrics["assessment_count"] == 1
@@ -117,9 +117,7 @@ def test_live_analysis_is_game_scoped_and_uses_current_assessment_and_review_tas
 def test_live_analysis_is_read_only_and_returns_empty_metrics_for_an_empty_range():
     jobs_before = BackgroundJob.objects.count()
 
-    report = build_live_operations_analysis(
-        date(2026, 7, 18), date(2026, 7, 18), "game-a"
-    )
+    report = build_live_operations_analysis(date(2026, 7, 18), date(2026, 7, 18), "game-a")
 
     assert report.metrics["candidate_count"] == 0
     assert report.metrics["original_count"] == 0
@@ -147,9 +145,7 @@ def test_live_analysis_includes_both_beijing_range_boundaries():
     first.interaction_snapshots.create(source="first", view_count=2)
     last.interaction_snapshots.create(source="last", view_count=3)
 
-    analysis = build_live_operations_analysis(
-        date(2026, 7, 17), date(2026, 7, 18), "game-a"
-    )
+    analysis = build_live_operations_analysis(date(2026, 7, 17), date(2026, 7, 18), "game-a")
 
     assert analysis.metrics["original_count"] == 2
     assert analysis.metrics["views"] == 5
@@ -159,3 +155,142 @@ def test_analysis_range_defaults_to_seven_days_and_rejects_more_than_maximum():
     assert default_analysis_date_range(date(2026, 7, 19)) == (date(2026, 7, 13), date(2026, 7, 19))
     with pytest.raises(ValueError, match="最长"):
         validate_analysis_date_range(date(2026, 7, 1), date(2026, 8, 1))
+
+
+@pytest.mark.django_db
+def test_metric_workspace_reads_persisted_snapshots_without_an_inline_upstream_request():
+    snapshot = GameCircleMetricSnapshot.objects.create(
+        appid="wx6d2454a8afcd9706",
+        source=MetricSource.CIRCLE_FANS_DAILY,
+        period_start=date(2026, 7, 18),
+        period_end=date(2026, 7, 18),
+        scope="ALL",
+        metrics={"total_user": 120, "add_user": 12, "del_user": 5},
+        captured_at=_at(10),
+    )
+    GameCircleMetricSnapshot.objects.bulk_create(
+        [
+            GameCircleMetricSnapshot(
+                appid="wx6d2454a8afcd9706",
+                source=MetricSource.GROUP_PUBLISH_DAILY,
+                period_start=date(2026, 7, 18),
+                period_end=date(2026, 7, 18),
+                scope="ALL",
+                metrics={"publish_pv": 9, "publish_uv": 4},
+                captured_at=_at(10),
+            ),
+            GameCircleMetricSnapshot(
+                appid="wx6d2454a8afcd9706",
+                source=MetricSource.GROUP_CONSUME_DAILY,
+                period_start=date(2026, 7, 18),
+                period_end=date(2026, 7, 18),
+                scope="ALL",
+                metrics={"daily_active_user": 16, "content_consume_cnt": 40},
+                captured_at=_at(10),
+            ),
+            GameCircleMetricSnapshot(
+                appid="wx6d2454a8afcd9706",
+                source=MetricSource.GROUP_SHARE_DAILY,
+                period_start=date(2026, 7, 18),
+                period_end=date(2026, 7, 18),
+                scope="ALL",
+                metrics={"share_cnt": 6, "share_uv": 5},
+                captured_at=_at(10),
+            ),
+            GameCircleMetricSnapshot(
+                appid="wx6d2454a8afcd9706",
+                source=MetricSource.GROUP_RETAIN_DAILY,
+                period_start=date(2026, 7, 18),
+                period_end=date(2026, 7, 18),
+                scope="ALL",
+                metrics={"quanzi_dau": 13},
+                captured_at=_at(10),
+            ),
+        ]
+    )
+
+    workspace = build_metric_workspace(
+        start_day=date(2026, 7, 18),
+        end_day=date(2026, 7, 18),
+        appid="wx6d2454a8afcd9706",
+    )
+
+    assert snapshot.pk
+    assert workspace.complete_business_day == date(2026, 7, 18)
+    assert workspace.p0_cards[0].value == "120"
+    assert workspace.p0_cards[0].detail.endswith("净增 7")
+    assert workspace.p0_cards[1].value == "9"
+    assert workspace.p0_cards[2].value == "40"
+    assert workspace.p0_cards[3].value == "6"
+    assert workspace.p0_cards[4].label == "日均游戏圈活跃用户"
+    assert workspace.p0_cards[4].detail.endswith("非留存率")
+    assert "净增 7" in workspace.fan_chart.points[0].tooltip
+    assert workspace.daily_rows[0]["active"] == "13"
+
+
+@pytest.mark.django_db
+def test_metric_workspace_marks_partial_days_and_never_selects_a_cross_source_day():
+    GameCircleMetricSnapshot.objects.create(
+        appid="wx6d2454a8afcd9706",
+        source=MetricSource.CIRCLE_FANS_DAILY,
+        period_start=date(2026, 7, 19),
+        period_end=date(2026, 7, 19),
+        scope="ALL",
+        metrics={"total_user": 130, "add_user": 10, "del_user": 2},
+        captured_at=_at(11),
+    )
+    GameCircleMetricSnapshot.objects.create(
+        appid="wx6d2454a8afcd9706",
+        source=MetricSource.GROUP_CONSUME_DAILY,
+        period_start=date(2026, 7, 18),
+        period_end=date(2026, 7, 18),
+        scope="ALL",
+        metrics={"daily_active_user": 16, "content_consume_cnt": 40},
+        captured_at=_at(10),
+    )
+
+    workspace = build_metric_workspace(
+        start_day=date(2026, 7, 18),
+        end_day=date(2026, 7, 19),
+        appid="wx6d2454a8afcd9706",
+    )
+
+    assert workspace.complete_business_day is None
+    assert workspace.daily_status.startswith("不完整日数据")
+    assert workspace.p0_cards[0].business_day == date(2026, 7, 19)
+    assert workspace.p0_cards[2].value == "40"
+    assert any("缺少每日快照" in alert for alert in workspace.alerts)
+
+
+@pytest.mark.django_db
+def test_metric_workspace_hides_pending_weekly_zero_snapshot():
+    GameCircleMetricSnapshot.objects.create(
+        appid="wx6d2454a8afcd9706",
+        source=MetricSource.OPERATION_EFFECT_WEEKLY,
+        period_start=date(2026, 7, 6),
+        period_end=date(2026, 7, 12),
+        scope="ALL",
+        metrics={"avg_quanzi_dau_cur_week": 120, "avg_content_expose_cnt_cur_week": 900},
+        captured_at=_at(10),
+    )
+    GameCircleMetricSnapshot.objects.create(
+        appid="wx6d2454a8afcd9706",
+        source=MetricSource.OPERATION_EFFECT_WEEKLY,
+        period_start=date(2026, 7, 13),
+        period_end=date(2026, 7, 19),
+        scope="ALL",
+        metrics={"avg_quanzi_dau_cur_week": 0, "avg_content_expose_cnt_cur_week": 0},
+        publication_state=MetricPublicationState.PENDING_RECHECK,
+        captured_at=_at(11),
+    )
+
+    workspace = build_metric_workspace(
+        start_day=date(2026, 7, 18),
+        end_day=date(2026, 7, 18),
+        appid="wx6d2454a8afcd9706",
+    )
+
+    assert workspace.weekly_cards[0].value == "120"
+    assert workspace.weekly_rows[0]["period"] == "07/06–07/12"
+    assert workspace.weekly_status.startswith("2026-07-13–2026-07-19")
+    assert "待上游稳定性复核" in workspace.weekly_status

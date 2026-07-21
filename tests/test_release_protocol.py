@@ -41,7 +41,7 @@ def _project(root: Path, documents: list[dict]):
         encoding="utf-8",
     )
     for document in documents:
-        (root / "releases" / f'{document["version"]}.yaml').write_text(
+        (root / "releases" / f"{document['version']}.yaml").write_text(
             yaml.safe_dump(document, allow_unicode=True), encoding="utf-8"
         )
 

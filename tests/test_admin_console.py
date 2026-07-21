@@ -104,9 +104,7 @@ def test_admin_home_degrades_when_supervisor_is_unavailable(admin_client, monkey
 
 
 def test_service_reason_formats_heartbeat_in_local_time():
-    reason = _service_reason(
-        {"running": True, "heartbeat_at": "2026-07-19T18:12:43.074687+00:00"}
-    )
+    reason = _service_reason({"running": True, "heartbeat_at": "2026-07-19T18:12:43.074687+00:00"})
 
     assert reason == "运行中；最近心跳 2026-07-20 02:12:43"
 

@@ -44,9 +44,12 @@ class ExclusiveFileLock:
                 lock_file.close()
                 raise SupervisorLockedError("已有 Supervisor 正在运行") from exc
         else:  # pragma: no cover - Windows only.
+            lock_file.seek(0, 2)
+            if lock_file.tell() == 0:
+                lock_file.seek(0)
+                lock_file.write(b"\0")
+                lock_file.flush()
             lock_file.seek(0)
-            lock_file.write(b"\\0")
-            lock_file.flush()
             try:
                 msvcrt.locking(lock_file.fileno(), msvcrt.LK_NBLCK, 1)
             except OSError as exc:
@@ -76,7 +79,12 @@ class RuntimeStore:
         self.logs_dir = self.root / "logs"
 
     def ensure(self) -> None:
-        for directory in (self.root, self.services_dir, self.heartbeats_dir, self.logs_dir):
+        for directory in (
+            self.root,
+            self.services_dir,
+            self.heartbeats_dir,
+            self.logs_dir,
+        ):
             directory.mkdir(parents=True, exist_ok=True)
 
     @property

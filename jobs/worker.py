@@ -34,9 +34,12 @@ def _try_lock(lock_file) -> bool:
         return True
 
     # Windows locks a byte range, so ensure the first byte exists before locking it.
+    lock_file.seek(0, 2)
+    if lock_file.tell() == 0:
+        lock_file.seek(0)
+        lock_file.write("\0")
+        lock_file.flush()
     lock_file.seek(0)
-    lock_file.write("\\0")
-    lock_file.flush()
     try:
         msvcrt.locking(lock_file.fileno(), msvcrt.LK_NBLCK, 1)
     except OSError:
