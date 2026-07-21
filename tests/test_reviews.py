@@ -7,12 +7,17 @@ from django.db import connection
 from config.settings import runtime
 from jobs.models import BackgroundJob
 from posts.models import POST_STATUS_DELETED, CandidatePost, OriginalPost, OriginType
+from reviews import reply_faq
 from reviews.adapters import (
     AssessmentOutput,
     OpenAiCompatibleReviewClient,
     ReplyOutput,
+    ReplyStyleOutput,
     RiskOutput,
+    _normalize_reply_suggestion,
+    _schema_error_summary,
     normalize_assessment_output,
+    review_prompt_version,
     review_system_prompt,
 )
 from reviews.models import (
@@ -22,6 +27,7 @@ from reviews.models import (
     RecommendedAction,
     ReviewStatus,
 )
+from reviews.reply_faq import CITY_LORD_APPID, select_reply_faq_rules
 from reviews.services import (
     _read_mute_state_with_verification,
     create_confirmed_operation,
@@ -35,18 +41,124 @@ from reviews.tasks import AI_EVALUATE_TASK, evaluate_post_handler
 @pytest.mark.django_db
 def test_assessment_always_creates_pending_human_review_and_safe_reply_draft():
     post = OriginalPost.objects.create(
-        topic_id=201, content_id="review-201", content_text="建议优化活动"
+        topic_id=201,
+        content_id="review-201",
+        content_text="活动建议",
+        source_appid=CITY_LORD_APPID,
     )
     output = AssessmentOutput(
         content_category="SUGGESTION",
         recommended_action="KEEP",
         overall_confidence=0.9,
-        reply_suggestion=ReplyOutput(user_intent_summary="活动建议", reply_draft="感谢反馈"),
+        reply_suggestion=ReplyOutput(
+            user_intent_summary="活动建议",
+            faq_rule_id="activity-suggestion",
+            style_variants=[
+                ReplyStyleOutput(style="WARM", draft="感谢城主的活动创意。"),
+                ReplyStyleOutput(style="CONCISE", draft="已记录活动建议。"),
+                ReplyStyleOutput(style="FORMAL", draft="您的活动建议已登记参考。"),
+            ],
+        ),
     )
     assessment, task = persist_assessment(post, output)
     assert assessment.needs_human_review is True
     assert task.status == ReviewStatus.PENDING
-    assert post.reply_draft.draft == "感谢反馈"
+    assert post.reply_draft.draft == "感谢城主的活动创意。"
+    assert post.reply_draft.selected_style == "WARM"
+    assert len(post.reply_draft.style_variants) == 3
+
+
+def test_reply_faq_candidates_require_the_matching_game_appid():
+    assert select_reply_faq_rules(appid="", content="活动建议") == ()
+    assert select_reply_faq_rules(appid="other-game", content="活动建议") == ()
+    assert [rule.rule_id for rule in select_reply_faq_rules(
+        appid=CITY_LORD_APPID, content="活动建议"
+    )] == ["activity-suggestion"]
+
+
+def test_reply_faq_catalog_rejects_empty_rule_keywords(monkeypatch, tmp_path):
+    payload = json.loads(reply_faq._catalog_path().read_text(encoding="utf-8"))
+    payload["rules"][0]["keywords"] = []
+    catalog_path = tmp_path / "invalid-faq.json"
+    catalog_path.write_text(json.dumps(payload), encoding="utf-8")
+    reply_faq.load_city_lord_reply_faq.cache_clear()
+    monkeypatch.setattr(reply_faq, "_catalog_path", lambda: catalog_path)
+
+    with pytest.raises(ValueError, match="规则字段无效"):
+        reply_faq.load_city_lord_reply_faq()
+
+    reply_faq.load_city_lord_reply_faq.cache_clear()
+
+
+@pytest.mark.django_db
+def test_safe_reassessment_without_a_valid_faq_suppresses_an_older_reply_draft():
+    post = OriginalPost.objects.create(
+        topic_id=220,
+        content_id="reply-draft-stale",
+        content_text="活动建议",
+        source_appid=CITY_LORD_APPID,
+    )
+    persist_assessment(
+        post,
+        AssessmentOutput(
+            content_category="SUGGESTION",
+            recommended_action="KEEP",
+            overall_confidence=0.9,
+            reply_suggestion=ReplyOutput(
+                user_intent_summary="活动建议",
+                faq_rule_id="activity-suggestion",
+                style_variants=[
+                    ReplyStyleOutput(style="WARM", draft="感谢城主的活动创意。"),
+                    ReplyStyleOutput(style="CONCISE", draft="已记录活动建议。"),
+                    ReplyStyleOutput(style="FORMAL", draft="您的活动建议已登记参考。"),
+                ],
+            ),
+        ),
+    )
+
+    persist_assessment(
+        post,
+        AssessmentOutput(
+            content_category="SUGGESTION",
+            recommended_action="KEEP",
+            overall_confidence=0.9,
+            reply_suggestion=ReplyOutput(
+                user_intent_summary="活动建议",
+                faq_rule_id="unknown-rule",
+                style_variants=[
+                    ReplyStyleOutput(style="WARM", draft="感谢城主的活动创意。"),
+                    ReplyStyleOutput(style="CONCISE", draft="已记录活动建议。"),
+                    ReplyStyleOutput(style="FORMAL", draft="您的活动建议已登记参考。"),
+                ],
+            ),
+        ),
+    )
+
+    post.reply_draft.refresh_from_db()
+    assert post.reply_draft.suppressed_reason == "当前评估未命中有效受控 FAQ"
+
+
+@pytest.mark.django_db
+def test_assessment_suppresses_reply_draft_for_risky_human_review():
+    post = OriginalPost.objects.create(
+        topic_id=202, content_id="review-202", content_text="加群领取福利"
+    )
+    output = AssessmentOutput(
+        content_category="FEEDBACK",
+        recommended_action="HUMAN_REVIEW",
+        overall_confidence=0.7,
+        risk_labels=[
+            RiskOutput(
+                label="TRAFFIC_DIVERSION", confidence=0.7, evidence=["加群领取福利"]
+            )
+        ],
+        reply_suggestion=ReplyOutput(user_intent_summary="反馈", reply_draft="感谢反馈"),
+    )
+
+    _, task = persist_assessment(post, output)
+
+    assert task.suggested_action == RecommendedAction.HUMAN_REVIEW
+    assert not hasattr(post, "reply_draft")
 
 
 def test_normalize_assessment_output_handles_non_structured_nested_values():
@@ -97,6 +209,55 @@ def test_normalize_assessment_output_compacts_and_merges_repeated_risk_evidence(
     ]
 
 
+def test_normalize_assessment_output_accepts_named_reply_style_mapping():
+    normalized = normalize_assessment_output(
+        {
+            "reply_suggestion": {
+                "user_intent_summary": "活动建议",
+                "faq_rule_id": "activity-suggestion",
+                "style_variants": {
+                    "亲和互动": "感谢你的建议。",
+                    "CONCISE": "已记录建议。",
+                    "正式稳妥": "建议已登记参考。",
+                },
+            }
+        }
+    )
+
+    assert normalized["reply_suggestion"]["style_variants"] == [
+        {"style": "WARM", "draft": "感谢你的建议。"},
+        {"style": "CONCISE", "draft": "已记录建议。"},
+        {"style": "FORMAL", "draft": "建议已登记参考。"},
+    ]
+
+
+def test_reply_suggestion_normalization_leaves_unknown_style_for_strict_rejection():
+    normalized = _normalize_reply_suggestion(
+        {"style_variants": {"未知风格": "不应被伪造为有效风格"}}
+    )
+
+    assert normalized == {
+        "style_variants": [{"style": "未知风格", "draft": "不应被伪造为有效风格"}]
+    }
+
+
+def test_schema_diagnostic_only_reports_field_paths_not_model_content():
+    with pytest.raises(Exception) as captured:
+        AssessmentOutput.model_validate(
+            {
+                "content_category": "OTHER",
+                "recommended_action": "KEEP",
+                "overall_confidence": "not-a-number",
+                "reply_suggestion": {"user_intent_summary": "包含不应写入日志的帖子原文"},
+            }
+        )
+
+    summary = _schema_error_summary(captured.value)
+
+    assert "overall_confidence" in summary
+    assert "包含不应写入日志的帖子原文" not in summary
+
+
 def test_review_prompt_adds_video_rules_only_when_video_evidence_is_present():
     without_video = review_system_prompt(has_video_evidence=False)
     with_video = review_system_prompt(has_video_evidence=True)
@@ -105,6 +266,18 @@ def test_review_prompt_adds_video_rules_only_when_video_evidence_is_present():
     assert "【视频审核规则】" in with_video
     assert "对同一视频风险必须形成一次聚合结论" in with_video
     assert "强引流组合" in with_video
+
+
+def test_faq_prompt_requires_three_styles_to_preserve_controlled_facts():
+    rules = select_reply_faq_rules(appid=CITY_LORD_APPID, content="充值未到账")
+
+    prompt = review_system_prompt(has_video_evidence=False, faq_rules=rules)
+
+    assert "三项必须以同一 faq_rule_id 的受控要点、待补充信息、来源和禁止承诺为准" in prompt
+    assert "仅可改变语气、篇幅和互动方式" in prompt
+    assert review_prompt_version(
+        has_video_evidence=False, faq_version="city-lord-reply-faq-v1"
+    ) == "review-v5-city-lord-reply-faq-v1"
 
 
 def test_review_request_contains_only_textual_assessment_context(monkeypatch):
@@ -266,7 +439,7 @@ def test_ai_review_input_includes_ballot_title_and_option_text(monkeypatch):
     class ReviewClient:
         content = ""
 
-        def evaluate(self, content, ocr_text, *, has_video_evidence=False):
+        def evaluate(self, content, ocr_text, *, has_video_evidence=False, faq_rules=()):
             self.content = content
             assert ocr_text == ""
             return AssessmentOutput(

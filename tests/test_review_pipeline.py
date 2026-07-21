@@ -3,28 +3,35 @@ from django.contrib.auth import get_user_model
 from django.test import Client
 
 from jobs.models import BackgroundJob
-from posts.models import CandidatePost, OriginalPost, OriginType, POST_STATUS_DELETED, PostMedia
-from reviews.models import OcrExtraction
-from reviews.adapters import AssessmentOutput, ReplyOutput
-from reviews.models import RecommendedAction
-from reviews.services import persist_assessment
+from posts.models import POST_STATUS_DELETED, CandidatePost, OriginalPost, OriginType, PostMedia
+from reviews.adapters import AssessmentOutput, ReplyOutput, ReplyStyleOutput
+from reviews.models import OcrExtraction, RecommendedAction
+from reviews.reply_faq import CITY_LORD_APPID
 from reviews.services import (
     AI_EVALUATE_TASK,
     OCR_EXTRACT_TASK,
     build_evaluation_input,
     enqueue_evaluation_pipeline,
+    persist_assessment,
 )
 
 
 @pytest.mark.django_db
 def test_pipeline_is_idempotent_and_includes_poll_copy():
     post = OriginalPost.objects.create(
-        topic_id=801, content_id="pipeline-801", title="标题", content_text="正文",
+        topic_id=801,
+        content_id="pipeline-801",
+        title="标题",
+        content_text="正文",
         ballot_text="投票：竖着读\n选项 1：联 系 我",
     )
-    CandidatePost.objects.create(topic_id=801, content_id="pipeline-801", origin_type=OriginType.ORIGINAL)
+    CandidatePost.objects.create(
+        topic_id=801, content_id="pipeline-801", origin_type=OriginType.ORIGINAL
+    )
     media = PostMedia.objects.create(post=post, url="https://example.test/image.jpg")
-    OcrExtraction.objects.create(post=post, media=media, provider="test", text="图片文字", confidence=0.9)
+    OcrExtraction.objects.create(
+        post=post, media=media, provider="test", text="图片文字", confidence=0.9
+    )
     first = enqueue_evaluation_pipeline(post)
     second = enqueue_evaluation_pipeline(post)
     assert first[0].pk == second[0].pk
@@ -39,7 +46,9 @@ def test_pipeline_is_idempotent_and_includes_poll_copy():
 @pytest.mark.django_db
 def test_pipeline_rejects_forward_but_allows_deleted_post_history_evaluation():
     post = OriginalPost.objects.create(topic_id=802, content_id="pipeline-802")
-    CandidatePost.objects.create(topic_id=802, content_id="pipeline-802", origin_type=OriginType.FORWARD)
+    CandidatePost.objects.create(
+        topic_id=802, content_id="pipeline-802", origin_type=OriginType.FORWARD
+    )
     with pytest.raises(ValueError, match="原创"):
         enqueue_evaluation_pipeline(post)
     CandidatePost.objects.filter(topic_id=802).update(origin_type=OriginType.ORIGINAL)
@@ -53,14 +62,30 @@ def test_pipeline_rejects_forward_but_allows_deleted_post_history_evaluation():
 @pytest.mark.django_db
 def test_workspace_saves_reply_without_publishing():
     user = get_user_model().objects.create_user(username="reviewer", password="test")
-    post = OriginalPost.objects.create(topic_id=803, content_id="pipeline-803", content_text="建议")
-    CandidatePost.objects.create(topic_id=803, content_id="pipeline-803", origin_type=OriginType.ORIGINAL)
+    post = OriginalPost.objects.create(
+        topic_id=803,
+        content_id="pipeline-803",
+        content_text="活动建议",
+        source_appid=CITY_LORD_APPID,
+    )
+    CandidatePost.objects.create(
+        topic_id=803, content_id="pipeline-803", origin_type=OriginType.ORIGINAL
+    )
     persist_assessment(
         post,
         AssessmentOutput(
-            content_category="FEEDBACK", recommended_action=RecommendedAction.KEEP,
+            content_category="FEEDBACK",
+            recommended_action=RecommendedAction.KEEP,
             overall_confidence=0.8,
-            reply_suggestion=ReplyOutput(user_intent_summary="诉求", reply_draft="初始草案"),
+            reply_suggestion=ReplyOutput(
+                user_intent_summary="诉求",
+                faq_rule_id="activity-suggestion",
+                style_variants=[
+                    ReplyStyleOutput(style="WARM", draft="感谢城主的活动创意。"),
+                    ReplyStyleOutput(style="CONCISE", draft="已记录活动建议。"),
+                    ReplyStyleOutput(style="FORMAL", draft="您的活动建议已登记参考。"),
+                ],
+            ),
         ),
     )
     client = Client()
@@ -78,13 +103,27 @@ def test_workspace_saves_reply_without_publishing():
 @pytest.mark.django_db
 def test_workspace_rejects_invalid_or_missing_local_reply_drafts_without_creating_jobs():
     user = get_user_model().objects.create_user(username="reply-draft-validation", password="test")
-    post = OriginalPost.objects.create(topic_id=804, content_id="pipeline-804", content_text="建议")
+    post = OriginalPost.objects.create(
+        topic_id=804,
+        content_id="pipeline-804",
+        content_text="活动建议",
+        source_appid=CITY_LORD_APPID,
+    )
     persist_assessment(
         post,
         AssessmentOutput(
-            content_category="SUGGESTION", recommended_action=RecommendedAction.KEEP,
+            content_category="SUGGESTION",
+            recommended_action=RecommendedAction.KEEP,
             overall_confidence=0.8,
-            reply_suggestion=ReplyOutput(user_intent_summary="诉求", reply_draft="初始草案"),
+                reply_suggestion=ReplyOutput(
+                    user_intent_summary="诉求",
+                    faq_rule_id="activity-suggestion",
+                    style_variants=[
+                        ReplyStyleOutput(style="WARM", draft="感谢城主的活动创意。"),
+                        ReplyStyleOutput(style="CONCISE", draft="已记录活动建议。"),
+                        ReplyStyleOutput(style="FORMAL", draft="您的活动建议已登记参考。"),
+                    ],
+                ),
         ),
     )
     without_draft = OriginalPost.objects.create(topic_id=805, content_id="pipeline-805")
@@ -102,6 +141,6 @@ def test_workspace_rejects_invalid_or_missing_local_reply_drafts_without_creatin
 
     assert blank.status_code == too_long.status_code == missing.status_code == 302
     post.reply_draft.refresh_from_db()
-    assert post.reply_draft.draft == "初始草案"
+    assert post.reply_draft.draft == "感谢城主的活动创意。"
     assert BackgroundJob.objects.count() == job_count
     assert not hasattr(without_draft, "reply_draft")

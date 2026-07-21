@@ -13,14 +13,14 @@ from posts.models import (
     POST_STATUS_DELETED,
     POST_STATUS_SELF_VISIBLE,
     POST_STATUS_SUNK,
-    CandidatePost,
     AuthorMuteStatus,
+    CandidatePost,
     InteractionSnapshot,
     ManagedGame,
     OriginalPost,
     OriginType,
 )
-from reviews.adapters import AssessmentOutput, ReplyOutput, RiskOutput
+from reviews.adapters import AssessmentOutput, ReplyOutput, ReplyStyleOutput, RiskOutput
 from reviews.models import (
     AiOperationReview,
     AiOperationReviewStatus,
@@ -33,6 +33,7 @@ from reviews.models import (
     VideoEvidenceKind,
     VideoExtraction,
 )
+from reviews.reply_faq import CITY_LORD_APPID
 from reviews.services import AI_EVALUATE_TASK, OCR_EXTRACT_TASK, persist_assessment
 from reviews.video import media_fingerprint
 from reviews.video_tasks import VIDEO_EXTRACTOR_VERSION
@@ -214,7 +215,10 @@ def test_operations_dashboard_shows_existing_local_reply_draft_without_publish_c
         username="reply-draft-operator", password="test-password"
     )
     post = OriginalPost.objects.create(
-        topic_id=1099, content_id="reply-draft-content", content_text="希望增加编队预设"
+        topic_id=1099,
+        content_id="reply-draft-content",
+        content_text="希望增加编队预设",
+        source_appid=CITY_LORD_APPID,
     )
     persist_assessment(
         post,
@@ -224,9 +228,12 @@ def test_operations_dashboard_shows_existing_local_reply_draft_without_publish_c
             overall_confidence=0.91,
             reply_suggestion=ReplyOutput(
                 user_intent_summary="希望减少重复配队操作",
-                reply_draft="感谢建议，我们已记录编队预设需求。",
-                missing_information=["常用阵容数量"],
-                knowledge_sources=["已发布功能说明"],
+                faq_rule_id="feature-request",
+                style_variants=[
+                    ReplyStyleOutput(style="WARM", draft="感谢建议，我们已记录编队预设需求。"),
+                    ReplyStyleOutput(style="CONCISE", draft="已记录编队预设需求。"),
+                    ReplyStyleOutput(style="FORMAL", draft="您的编队预设需求已登记参考。"),
+                ],
                 risk_notice="不要承诺具体上线时间。",
             ),
         ),
@@ -239,11 +246,49 @@ def test_operations_dashboard_shows_existing_local_reply_draft_without_publish_c
     assert "有回复建议" in page
     assert "回复建议" in page
     assert "希望减少重复配队操作" in page
+    assert "功能/内容期望 · feature-request" in page
     assert "仅供运营准备回复，不会发送或发布到原平台。" in page
     assert "标记本地已采纳" in page
     assert "data-copy-reply-draft" in page
     assert f"/posts/{post.topic_id}/reply-draft/" in page
     assert "/publish/" not in page
+
+
+@pytest.mark.django_db
+def test_operations_dashboard_labels_a_generic_unmatched_reply_draft():
+    user = get_user_model().objects.create_user(
+        username="generic-reply-draft-operator", password="test-password"
+    )
+    post = OriginalPost.objects.create(
+        topic_id=1102,
+        content_id="generic-reply-draft-content",
+        content_text="就问你还有多少和我一样的",
+        source_appid=CITY_LORD_APPID,
+    )
+    persist_assessment(
+        post,
+        AssessmentOutput(
+            content_category="SOCIAL",
+            recommended_action=RecommendedAction.KEEP,
+            overall_confidence=0.9,
+            reply_suggestion=ReplyOutput(
+                user_intent_summary="社区互动",
+                style_variants=[
+                    ReplyStyleOutput(style="WARM", draft="感谢分享，欢迎聊聊你的体验。"),
+                    ReplyStyleOutput(style="CONCISE", draft="感谢分享，欢迎交流。"),
+                    ReplyStyleOutput(style="FORMAL", draft="感谢分享，欢迎在评论区交流体验。"),
+                ],
+            ),
+        ),
+    )
+    client = Client()
+    client.force_login(user)
+
+    page = client.get("/", {"topic": post.topic_id}).content.decode()
+
+    assert "未命中 FAQ 规则（通用草案）" in page
+    assert "参考来源" not in page
+    assert "待补充信息" not in page
 
 
 @pytest.mark.django_db

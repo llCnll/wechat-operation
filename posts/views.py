@@ -22,13 +22,14 @@ from reviews.models import (
     AiOperationReview,
     AiOperationReviewStatus,
     ContentCategory,
+    OperationAudit,
     RecommendedAction,
     ReplyDraft,
     ReviewStatus,
     ReviewTask,
-    OperationAudit,
     risk_label_display,
 )
+from reviews.reply_faq import city_lord_reply_faq_rule
 from reviews.services import (
     BLOCK_REASON_OPTIONS,
     OperationExecutionConflict,
@@ -434,6 +435,10 @@ def operations_dashboard(request):
     selected_post = posts[selected_index] if posts else None
     evaluation = {"state": "IDLE", "label": "尚未评估", "error": ""}
     if selected_post:
+        reply_draft = getattr(selected_post, "reply_draft", None)
+        if reply_draft and reply_draft.faq_rule_id:
+            rule = city_lord_reply_faq_rule(reply_draft.faq_rule_id)
+            reply_draft.faq_scene = rule.scene if rule else ""
         selected_post.author_mute_status = _author_mute_status_for_post(selected_post, appid)
         selected_post.author_mute_presentation = _author_mute_presentation(
             selected_post.author_mute_status
@@ -1181,7 +1186,12 @@ def save_dashboard_reply_draft(request, topic_id: int):
     if action == "save" and not adopted:
         adopted = reply_draft.adopted
     try:
-        save_reply_draft(post, draft=request.POST.get("draft", ""), adopted=adopted)
+        save_reply_draft(
+            post,
+            draft=request.POST.get("draft", ""),
+            adopted=adopted,
+            selected_style=request.POST.get("selected_style", ""),
+        )
     except ValueError as exc:
         messages.error(request, str(exc))
     except ReplyDraft.DoesNotExist:

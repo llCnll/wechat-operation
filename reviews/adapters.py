@@ -9,10 +9,12 @@ from base64 import b64encode
 from typing import Literal
 
 import httpx
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 
 from config.settings import runtime
 from jobs.adapters import SourceContractError, SourceTransportError
+
+from .reply_faq import ReplyFaqRule, reply_faq_prompt
 
 
 class RiskOutput(BaseModel):
@@ -21,12 +23,31 @@ class RiskOutput(BaseModel):
     evidence: list[str] = Field(default_factory=list)
 
 
+class ReplyStyleOutput(BaseModel):
+    style: str
+    draft: str
+
+
+REPLY_STYLE_ALIASES = {
+    "WARM": "WARM",
+    "CONCISE": "CONCISE",
+    "FORMAL": "FORMAL",
+    "亲和互动": "WARM",
+    "简洁处理": "CONCISE",
+    "正式稳妥": "FORMAL",
+}
+
+
 class ReplyOutput(BaseModel):
     user_intent_summary: str
-    reply_draft: str
+    faq_rule_id: str = ""
+    style_variants: list[ReplyStyleOutput] = Field(default_factory=list)
+    reply_draft: str = ""
     missing_information: list[str] = Field(default_factory=list)
     knowledge_sources: list[str] = Field(default_factory=list)
     risk_notice: str = ""
+
+
 
 
 class AssessmentOutput(BaseModel):
@@ -76,16 +97,45 @@ def normalize_assessment_output(payload: object) -> dict:
                     risk_by_label[label] = risk
             normalized_risks.append(risk)
         normalized["risk_labels"] = normalized_risks
-    reply = normalized.get("reply_suggestion")
+    normalized["reply_suggestion"] = _normalize_reply_suggestion(
+        normalized.get("reply_suggestion")
+    )
+    return normalized
+
+
+def _normalize_reply_suggestion(reply: object) -> object:
+    """Normalize known provider reply shapes before strict Schema validation."""
     if isinstance(reply, str):
-        normalized["reply_suggestion"] = {
+        return {
             "user_intent_summary": "",
             "reply_draft": reply,
             "missing_information": [],
             "knowledge_sources": [],
             "risk_notice": "模型未按结构返回回复依据，须由人工核验。",
         }
-    return normalized
+    if isinstance(reply, dict) and isinstance(reply.get("style_variants"), dict):
+        normalized_reply = dict(reply)
+        normalized_reply["style_variants"] = [
+            {"style": REPLY_STYLE_ALIASES.get(str(style).upper(), style), "draft": draft}
+            for style, draft in reply["style_variants"].items()
+        ]
+        return normalized_reply
+    return reply
+
+
+def _schema_error_summary(exc: Exception) -> str:
+    """Return a field-only contract diagnostic without retaining model or post text."""
+    if isinstance(exc, json.JSONDecodeError):
+        return "AI 评估输出不是有效 JSON"
+    if isinstance(exc, ValidationError):
+        errors = exc.errors()
+        locations = [
+            ".".join(str(part) for part in error.get("loc", ()))
+            for error in errors[:3]
+            if error.get("loc")
+        ]
+        return f"AI 评估输出 Schema 字段无效：{', '.join(locations) or '未知字段'}"[:500]
+    return "AI 评估输出不是预期对象"
 
 
 def _compact_risk_evidence(items: list[object]) -> list[object]:
@@ -122,15 +172,18 @@ VIDEO_EVIDENCE_PROMPT = (
     "- 孤立奖励数值不得定性私服或引流，可低置信度标记 CONTENT_ANOMALY。系统不验证官方活动；"
     "高额奖励仍须设置 needs_focus 供人工复核，但不得覆盖上述强引流组合的 BLOCK 建议。\n"
 )
-REVIEW_PROMPT_VERSION = "review-v4"
+REVIEW_PROMPT_VERSION = "review-v5"
 
 
-def review_prompt_version(*, has_video_evidence: bool) -> str:
+def review_prompt_version(*, has_video_evidence: bool, faq_version: str = "") -> str:
     """Version the effective system-prompt variant used for a persisted assessment."""
-    return f"{REVIEW_PROMPT_VERSION}-video" if has_video_evidence else REVIEW_PROMPT_VERSION
+    version = f"{REVIEW_PROMPT_VERSION}-video" if has_video_evidence else REVIEW_PROMPT_VERSION
+    return f"{version}-{faq_version}" if faq_version else version
 
 
-def review_system_prompt(*, has_video_evidence: bool) -> str:
+def review_system_prompt(
+    *, has_video_evidence: bool, faq_rules: tuple[ReplyFaqRule, ...] = ()
+) -> str:
     prompt = (
         "你是《城主别慌张》微信小游戏官方游戏圈的内容运营审核助手。\n\n"
         "【业务背景】\n"
@@ -149,10 +202,19 @@ def review_system_prompt(*, has_video_evidence: bool) -> str:
     )
     if has_video_evidence:
         prompt += "\n" + VIDEO_EVIDENCE_PROMPT
+    prompt += "\n" + reply_faq_prompt(faq_rules) + "\n"
     return (
         prompt + "- evidence 必须摘录命中的正文、投票或 OCR 原文；"
         "无法提供证据时降低置信度并建议 HUMAN_REVIEW。\n"
-        "- 若建议 BLOCK、MUTE 或 BLOCK_AND_MUTE，reply_suggestion 必须为 null。\n\n"
+        "- 若建议 BLOCK、MUTE 或 BLOCK_AND_MUTE，或存在引流、私服、外挂、诈骗、色情或人身攻击风险，"
+        "reply_suggestion 必须为 null。\n"
+        "- 命中受控 FAQ 候选时，faq_rule_id 必须是候选中的一个。"
+        "未命中任何候选但内容安全时，可生成通用 reply_suggestion，此时 faq_rule_id 必须为空，"
+        "不得填写来源、待补充信息、客服路径、活动事实或任何无来源的事实性承诺；"
+        "只要存在任意风险标签，reply_suggestion 必须为 null。"
+        "style_variants 必须恰好含 WARM、CONCISE、FORMAL 三项，三项正文均非空且不能重复。"
+        "三项必须以同一 faq_rule_id 的受控要点、待补充信息、来源和禁止承诺为准，"
+        "仅可改变语气、篇幅和互动方式；不得编造客服路径、活动事实、处理结果或任何承诺。\n\n"
         "【输出约束】\n"
         "只返回一个合法 JSON 对象，不要 Markdown、解释或额外字段。\n"
         "needs_human_review 必须为 true。\n"
@@ -167,9 +229,8 @@ def review_system_prompt(*, has_video_evidence: bool) -> str:
         "label 只能使用 TRAFFIC_DIVERSION、PRIVATE_SERVER、CHEAT、PERSONAL_ATTACK、FRAUD_SCAM、"
         "PORNOGRAPHY、POLITICAL_SENSITIVE、ADVERTISEMENT_SPAM、TRANSACTION_RISK、OFF_TOPIC、"
         "NEGATIVE_SPAM、CONTENT_ANOMALY；具体场景只能写入 evidence，不得自造一级风险标签。\n"
-        "reply_suggestion 必须为 null，或为含 user_intent_summary、reply_draft、"
-        "missing_information、"
-        "knowledge_sources、risk_notice 的对象；不得只返回字符串。"
+        "reply_suggestion 必须为 null，或为含 user_intent_summary、faq_rule_id、style_variants、"
+        "missing_information、knowledge_sources、risk_notice 的对象；不得只返回字符串。"
     )
 
 
@@ -180,7 +241,12 @@ class OpenAiCompatibleReviewClient:
         self.client = client or httpx.Client(timeout=runtime.ai_timeout_seconds, trust_env=False)
 
     def evaluate(
-        self, content: str, ocr_text: str, *, has_video_evidence: bool = False
+        self,
+        content: str,
+        ocr_text: str,
+        *,
+        has_video_evidence: bool = False,
+        faq_rules: tuple[ReplyFaqRule, ...] = (),
     ) -> AssessmentOutput:
         try:
             response = self.client.post(
@@ -192,7 +258,9 @@ class OpenAiCompatibleReviewClient:
                     "messages": [
                         {
                             "role": "system",
-                            "content": review_system_prompt(has_video_evidence=has_video_evidence),
+                            "content": review_system_prompt(
+                                has_video_evidence=has_video_evidence, faq_rules=faq_rules
+                            ),
                         },
                         {"role": "user", "content": f"正文：{content}\nOCR：{ocr_text}"},
                     ],
@@ -210,7 +278,7 @@ class OpenAiCompatibleReviewClient:
                 normalize_assessment_output(json.loads(content_json))
             )
         except Exception as exc:
-            raise SourceContractError("AI 评估输出不符合 Schema") from exc
+            raise SourceContractError(_schema_error_summary(exc)) from exc
 
 
 class OpenAiCompatibleOcrClient:

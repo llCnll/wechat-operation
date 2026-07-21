@@ -47,6 +47,13 @@ from .models import (
     VideoExtraction,
     VideoExtractionStatus,
 )
+from .reply_faq import (
+    STYLE_ORDER,
+    ReplyFaqRule,
+    available_reply_faq_rules,
+    available_reply_faq_version,
+    reply_faq_guidance_is_available,
+)
 from .video import media_fingerprint
 from .video_tasks import VIDEO_EXTRACT_TASK, VIDEO_EXTRACTOR_VERSION, normalized_ocr_text
 
@@ -82,6 +89,33 @@ DEFAULT_REVIEW_PROMPT_VERSION = "review-v4"
 MUTE_VERIFY_DELAYS_SECONDS = (0, 2, 5, 10)
 MUTE_VERIFY_MAX_WAIT_SECONDS = 20
 MUTE_VERIFY_REQUEST_OVERHEAD_SECONDS = 0.5
+PUBLIC_REPLY_SUPPRESSION_RISK_LABELS = frozenset(
+    {
+        "TRAFFIC_DIVERSION",
+        "PRIVATE_SERVER",
+        "CHEAT",
+        "FRAUD_SCAM",
+        "PORNOGRAPHY",
+        "PERSONAL_ATTACK",
+    }
+)
+GENERIC_REPLY_CATEGORIES = frozenset(
+    {
+        ContentCategory.FEEDBACK,
+        ContentCategory.SUGGESTION,
+        ContentCategory.QUESTION,
+        ContentCategory.ACTIVITY,
+        ContentCategory.GUIDE,
+        ContentCategory.SOCIAL,
+    }
+)
+
+
+@dataclass(frozen=True)
+class ReplyDraftPlan:
+    kind: str
+    rule: ReplyFaqRule | None = None
+    variants: tuple[dict[str, str], ...] = ()
 
 
 class OperationExecutionConflict(ValueError):
@@ -598,6 +632,36 @@ def enqueue_evaluation_pipeline(
     return ocr_job, ai_job
 
 
+def _reply_draft_plan(
+    *,
+    suggestion,
+    candidates: tuple[ReplyFaqRule, ...],
+    risky: bool,
+    allow_generic: bool,
+) -> ReplyDraftPlan:
+    """Resolve exactly one matched, generic, or rejected local-draft outcome."""
+    if suggestion is None or risky:
+        return ReplyDraftPlan("rejected")
+    variants = tuple(
+        {"style": item.style, "draft": item.draft.strip()}
+        for item in suggestion.style_variants
+        if item.draft.strip()
+    )
+    styles = [item["style"] for item in variants]
+    normalized = {re.sub(r"\W+", "", item["draft"]).casefold() for item in variants}
+    if set(styles) != set(STYLE_ORDER) or len(variants) != 3 or len(normalized) != 3:
+        return ReplyDraftPlan("rejected")
+    rule_id = suggestion.faq_rule_id.strip()
+    if not rule_id:
+        if allow_generic:
+            return ReplyDraftPlan("generic", variants=variants)
+        return ReplyDraftPlan("rejected")
+    rule = next((candidate for candidate in candidates if candidate.rule_id == rule_id), None)
+    if rule:
+        return ReplyDraftPlan("matched", rule=rule, variants=variants)
+    return ReplyDraftPlan("rejected")
+
+
 @transaction.atomic
 def persist_assessment(
     post: OriginalPost,
@@ -605,6 +669,8 @@ def persist_assessment(
     policy: PolicyVersion | None = None,
     *,
     prompt_version: str = DEFAULT_REVIEW_PROMPT_VERSION,
+    faq_rules=None,
+    faq_version: str = "",
 ):
     decision = policy_recommendation(output, policy)
     assessment = AiAssessment.objects.create(
@@ -684,23 +750,61 @@ def persist_assessment(
         RecommendedAction.BLOCK,
         RecommendedAction.MUTE,
         RecommendedAction.BLOCK_AND_MUTE,
-    }
-    if (
-        output.reply_suggestion
-        and output.content_category in {ContentCategory.FEEDBACK, ContentCategory.SUGGESTION}
-        and not risky
-    ):
+    } or any(
+        risk.label in PUBLIC_REPLY_SUPPRESSION_RISK_LABELS for risk in output.risk_labels
+    )
+    candidates = tuple(faq_rules) if faq_rules is not None else available_reply_faq_rules(
+        appid=post.source_appid,
+        content="\n".join((post.title, post.content_text, post.ballot_text)),
+    )
+    guidance_available = reply_faq_guidance_is_available(appid=post.source_appid)
+    plan = _reply_draft_plan(
+        suggestion=output.reply_suggestion,
+        candidates=candidates,
+        risky=risky,
+        allow_generic=(
+            guidance_available
+            and not output.risk_labels
+            and output.content_category in GENERIC_REPLY_CATEGORIES
+        ),
+    )
+    if plan.kind != "rejected":
+        variant_by_style = {item["style"]: item for item in plan.variants}
+        ordered_variants = [variant_by_style[style] for style in STYLE_ORDER]
         ReplyDraft.objects.update_or_create(
             post=post,
             defaults={
                 "assessment": assessment,
                 "intent_summary": output.reply_suggestion.user_intent_summary,
-                "draft": output.reply_suggestion.reply_draft,
-                "missing_information": output.reply_suggestion.missing_information,
-                "knowledge_sources": output.reply_suggestion.knowledge_sources,
+                "draft": ordered_variants[0]["draft"],
+                "missing_information": list(plan.rule.missing_information)
+                if plan.rule
+                else [],
+                "knowledge_sources": [plan.rule.source] if plan.rule else [],
                 "risk_notice": output.reply_suggestion.risk_notice,
+                "faq_rule_id": plan.rule.rule_id if plan.rule else "",
+                "faq_version": (
+                    faq_version or available_reply_faq_version(appid=post.source_appid)
+                )
+                if plan.rule
+                else "",
+                "style_variants": ordered_variants,
+                "selected_style": STYLE_ORDER[0],
+                "suppressed_reason": "",
+                "adopted": False,
+                "adopted_with_edits": False,
             },
         )
+    else:
+        suppression_reason = (
+            "当前评估含公开回复不安全风险"
+            if risky
+            else "当前评估未命中有效受控 FAQ"
+        )
+        # A re-evaluation without a safe, validated FAQ draft must not leave an
+        # older draft looking like a current recommendation.  Keep it for local
+        # history, but remove edit/adopt controls through the existing suppression state.
+        ReplyDraft.objects.filter(post=post).update(suppressed_reason=suppression_reason)
     eligible, _, _ = ai_automation_eligibility(task, assessment=assessment)
     if eligible:
         enqueue_job(
@@ -897,7 +1001,9 @@ def complete_review(task: ReviewTask, *, user, action: str, reason: str):
 
 
 @transaction.atomic
-def save_reply_draft(post: OriginalPost, *, draft: str, adopted: bool) -> ReplyDraft:
+def save_reply_draft(
+    post: OriginalPost, *, draft: str, adopted: bool, selected_style: str = ""
+) -> ReplyDraft:
     """Persist an existing local draft without creating any upstream side effect."""
     draft = draft.strip()
     if not draft:
@@ -905,11 +1011,22 @@ def save_reply_draft(post: OriginalPost, *, draft: str, adopted: bool) -> ReplyD
     if len(draft) > MAX_REPLY_DRAFT_LENGTH:
         raise ValueError(f"回复草案不能超过 {MAX_REPLY_DRAFT_LENGTH} 个字符")
     reply = ReplyDraft.objects.select_for_update().get(post=post)
+    if reply.suppressed_reason:
+        raise ValueError("该回复草案已不适用于当前风险评估。")
+    variant_styles = {
+        item.get("style") for item in reply.style_variants if isinstance(item, dict)
+    }
+    if selected_style and selected_style not in variant_styles:
+        raise ValueError("回复风格无效。")
     edited = draft != reply.draft
     reply.draft = draft
+    if selected_style:
+        reply.selected_style = selected_style
     reply.adopted = adopted
     reply.adopted_with_edits = adopted and edited
-    reply.save()
+    reply.save(
+        update_fields=("draft", "selected_style", "adopted", "adopted_with_edits", "updated_at")
+    )
     return reply
 
 
@@ -1064,7 +1181,9 @@ def execute_confirmed_operation(
                     expected_end_time=payload.get("mute_end_time"),
                 )
                 if write_error is not None:
-                    error_summary = f"上游调用失败，回读状态已同步：{type(write_error).__name__}"[:500]
+                    error_summary = (
+                        f"上游调用失败，回读状态已同步：{type(write_error).__name__}"[:500]
+                    )
                 elif action == RecommendedAction.MUTE:
                     expected_end_time = payload["mute_end_time"]
                     if after_state["local_block_end_time"] < expected_end_time:
@@ -1082,7 +1201,11 @@ def execute_confirmed_operation(
             else:
                 after_requested_at = timezone.now()
                 after_payload = source.get_post_metrics(task.post.topic_id)
-                sync_author_mute_status(task.post, after_payload, source_requested_at=after_requested_at)
+                sync_author_mute_status(
+                    task.post,
+                    after_payload,
+                    source_requested_at=after_requested_at,
+                )
                 after_state = _operation_state(after_payload)
             expected_status = EXPECTED_OPERATION_STATUS.get(action)
             if action in {RecommendedAction.MUTE, RecommendedAction.UNMUTE}:

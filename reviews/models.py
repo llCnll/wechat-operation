@@ -281,6 +281,10 @@ class ReplyDraft(models.Model):
     adopted = models.BooleanField(default=False)
     adopted_with_edits = models.BooleanField(default=False)
     suppressed_reason = models.CharField(max_length=500, blank=True)
+    faq_rule_id = models.CharField(max_length=100, blank=True)
+    faq_version = models.CharField(max_length=100, blank=True)
+    style_variants = models.JSONField(default=list, blank=True)
+    selected_style = models.CharField(max_length=16, blank=True)
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:

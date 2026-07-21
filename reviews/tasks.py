@@ -9,6 +9,7 @@ from .adapters import (
     review_prompt_version,
 )
 from .models import OcrExtraction, PolicyVersion
+from .reply_faq import available_reply_faq_rules, available_reply_faq_version
 from .services import (
     OCR_EXTRACT_TASK,
     build_evaluation_input,
@@ -46,14 +47,21 @@ def evaluate_post_handler(job: BackgroundJob) -> None:
     if expected_fingerprint and expected_fingerprint != fingerprint:
         raise RuntimeError("帖子内容已变化，等待重新入队")
     has_video_evidence = bool(current_video_extractions(post))
+    faq_version = available_reply_faq_version(appid=post.source_appid)
+    faq_rules = available_reply_faq_rules(appid=post.source_appid, content=f"{content}\n{ocr_text}")
     output = OpenAiCompatibleReviewClient().evaluate(
-        content, ocr_text, has_video_evidence=has_video_evidence
+        content, ocr_text, has_video_evidence=has_video_evidence, faq_rules=faq_rules
     )
     persist_assessment(
         post,
         output,
         policy,
-        prompt_version=review_prompt_version(has_video_evidence=has_video_evidence),
+        prompt_version=review_prompt_version(
+            has_video_evidence=has_video_evidence,
+            faq_version=faq_version,
+        ),
+        faq_rules=faq_rules,
+        faq_version=faq_version,
     )
 
 

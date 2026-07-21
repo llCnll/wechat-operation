@@ -5,8 +5,12 @@
   </summary>
   <div class="reply-draft-body">
     <p class="reply-draft-notice">仅供运营准备回复，不会发送或发布到原平台。</p>
+    {% if selected_post.reply_draft.suppressed_reason %}
+      <p class="reply-draft-suppressed">当前评估已将此历史草案标记为不适用：{{ selected_post.reply_draft.suppressed_reason }}</p>
+    {% else %}
     <dl class="reply-draft-context">
       <div><dt>用户诉求</dt><dd>{{ selected_post.reply_draft.intent_summary|default:"未提供" }}</dd></div>
+      {% if selected_post.reply_draft.faq_rule_id %}<div><dt>FAQ 场景</dt><dd>{{ selected_post.reply_draft.faq_scene|default:selected_post.reply_draft.faq_rule_id }} · {{ selected_post.reply_draft.faq_rule_id }} · {{ selected_post.reply_draft.faq_version }}</dd></div>{% elif selected_post.reply_draft.style_variants %}<div><dt>FAQ 场景</dt><dd>未命中 FAQ 规则（通用草案）</dd></div>{% endif %}
       {% if selected_post.reply_draft.missing_information %}<div><dt>待补充信息</dt><dd>{% for item in selected_post.reply_draft.missing_information %}<span>{{ item }}</span>{% endfor %}</dd></div>{% endif %}
       {% if selected_post.reply_draft.knowledge_sources %}<div><dt>参考来源</dt><dd>{% for item in selected_post.reply_draft.knowledge_sources %}<span>{{ item }}</span>{% endfor %}</dd></div>{% endif %}
       {% if selected_post.reply_draft.risk_notice %}<div class="reply-risk-notice"><dt>风险提示</dt><dd>{{ selected_post.reply_draft.risk_notice }}</dd></div>{% endif %}
@@ -14,6 +18,8 @@
     <form method="post" action="{% url 'save-dashboard-reply-draft' selected_post.topic_id %}" class="reply-draft-form">
       {% csrf_token %}
       <input type="hidden" name="return_query" value="{{ return_query }}">
+      <input type="hidden" name="selected_style" id="reply-draft-style" value="{{ selected_post.reply_draft.selected_style }}">
+      {% if selected_post.reply_draft.style_variants %}<div class="reply-style-options" aria-label="回复风格">{% for variant in selected_post.reply_draft.style_variants %}<button type="button" data-reply-style data-style="{{ variant.style }}" data-draft="{{ variant.draft }}" class="{% if variant.style == selected_post.reply_draft.selected_style %}is-active{% endif %}">{% if variant.style == "WARM" %}亲和互动{% elif variant.style == "CONCISE" %}简洁处理{% else %}正式稳妥{% endif %}</button>{% endfor %}</div>{% endif %}
       <label for="reply-draft-text">建议回复</label>
       <textarea id="reply-draft-text" name="draft" rows="6" maxlength="4000" required>{{ selected_post.reply_draft.draft }}</textarea>
       <div class="reply-draft-actions">
@@ -23,5 +29,6 @@
         {% if not selected_post.reply_draft.adopted %}<button type="submit" name="action" value="adopt" class="reply-adopt">标记本地已采纳</button>{% else %}<span class="reply-adopted">已标记本地采纳{% if selected_post.reply_draft.adopted_with_edits %}（已修改）{% endif %}</span>{% endif %}
       </div>
     </form>
+    {% endif %}
   </div>
 </details>
