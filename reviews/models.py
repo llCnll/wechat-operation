@@ -123,6 +123,7 @@ class VideoExtraction(models.Model):
         max_length=20, choices=VideoExtractionStatus.choices, default=VideoExtractionStatus.PENDING
     )
     duration_ms = models.PositiveIntegerField(null=True, blank=True)
+    duration_limit_seconds = models.PositiveIntegerField(null=True, blank=True)
     frame_count = models.PositiveIntegerField(default=0)
     error_summary = models.CharField(max_length=500, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
@@ -240,6 +241,7 @@ class RiskEvidence(models.Model):
     confidence = models.FloatField()
     evidence = models.JSONField(default=list)
     ocr_source_refs = models.JSONField(default=list, blank=True)
+    media_source_refs = models.JSONField(default=list, blank=True)
 
     class Meta:
         verbose_name = "风险证据"

@@ -226,8 +226,6 @@ def probe_video(path: Path) -> VideoProbe:
         raise VideoExtractionError("video_probe_invalid") from exc
     if duration_ms <= 0:
         raise VideoExtractionError("video_duration_invalid")
-    if duration_ms > runtime.video_max_duration_seconds * 1000:
-        raise VideoLimitError("video_duration_limit_exceeded")
     return VideoProbe(duration_ms=duration_ms, has_audio=has_audio)
 
 

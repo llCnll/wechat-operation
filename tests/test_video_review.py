@@ -821,3 +821,52 @@ def test_ai_job_waits_for_video_without_consuming_its_retry_budget():
     assert ai_job.error_summary == "等待视频提取任务完成"
     assert ai_job.next_run_at is not None
     assert ai_job.started_at is None
+
+
+@pytest.mark.django_db
+def test_duration_limit_uses_extraction_snapshot_and_persists_actual_duration(monkeypatch):
+    post = OriginalPost.objects.create(topic_id=319, content_id="duration-snapshot")
+    media = PostMedia.objects.create(
+        post=post, url="https://media.example/too-long.mp4", media_type=MediaType.VIDEO
+    )
+    extraction = VideoExtraction.objects.create(
+        post=post,
+        media=media,
+        media_fingerprint=media_fingerprint(media.url),
+        extractor_version=VIDEO_EXTRACTOR_VERSION,
+        duration_limit_seconds=30,
+    )
+    job = BackgroundJob.objects.create(
+        task_type="VIDEO_EXTRACT",
+        idempotency_key="duration-snapshot",
+        parameter_summary={"video_extraction_id": extraction.pk},
+    )
+    monkeypatch.setattr("reviews.video_tasks.runtime.video_max_duration_seconds", 60)
+    monkeypatch.setattr("reviews.video_tasks.VideoMediaReader.download", lambda *_args: None)
+    monkeypatch.setattr("reviews.video_tasks.probe_video", lambda _path: VideoProbe(31_000, False))
+
+    extract_video_handler(job)
+    extraction.refresh_from_db()
+
+    assert extraction.status == VideoExtractionStatus.SKIPPED_LIMIT
+    assert extraction.error_summary == "video_duration_limit_exceeded"
+    assert extraction.duration_ms == 31_000
+    assert extraction.duration_limit_seconds == 30
+
+
+@pytest.mark.django_db
+def test_video_extraction_captures_duration_limit_when_enqueued(monkeypatch):
+    post = OriginalPost.objects.create(topic_id=320, content_id="duration-limit-enqueue")
+    CandidatePost.objects.create(
+        topic_id=post.topic_id, content_id=post.content_id, origin_type=OriginType.ORIGINAL
+    )
+    PostMedia.objects.create(
+        post=post, url="https://media.example/duration-limit.mp4", media_type=MediaType.VIDEO
+    )
+    monkeypatch.setattr("reviews.services.runtime.video_enabled", True)
+    monkeypatch.setattr("reviews.services.runtime.video_preflight_verified", True)
+    monkeypatch.setattr("reviews.services.runtime.video_max_duration_seconds", 30)
+
+    enqueue_evaluation_pipeline(post)
+
+    assert VideoExtraction.objects.get(post=post).duration_limit_seconds == 30

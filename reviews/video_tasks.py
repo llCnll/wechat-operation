@@ -106,8 +106,19 @@ def extract_video_handler(job: BackgroundJob) -> None:
             video = directory / "input.bin"
             VideoMediaReader().download(media.url, video)
             probe = probe_video(video)
+            if extraction.duration_limit_seconds is None:
+                extraction.duration_limit_seconds = runtime.video_max_duration_seconds
             extraction.duration_ms = probe.duration_ms
-            extraction.save(update_fields=("duration_ms", "updated_at"))
+            extraction.save(
+                update_fields=("duration_ms", "duration_limit_seconds", "updated_at")
+            )
+            if probe.duration_ms > extraction.duration_limit_seconds * 1000:
+                _set_status(
+                    extraction,
+                    VideoExtractionStatus.SKIPPED_LIMIT,
+                    "video_duration_limit_exceeded",
+                )
+                return
             hashes: list[int] = []
             selected: list[tuple[int, Path, bool]] = []
             qr_spans: list[QrSpan] = []

@@ -27,7 +27,7 @@ from posts.models import (
 )
 from posts.services import sync_author_mute_status
 
-from .adapters import AssessmentOutput
+from .adapters import REVIEW_PROMPT_VERSION, AssessmentOutput
 from .models import (
     AiAssessment,
     AiOperationReview,
@@ -44,6 +44,8 @@ from .models import (
     ReviewStatus,
     ReviewTask,
     RiskEvidence,
+    VideoEvidence,
+    VideoEvidenceKind,
     VideoExtraction,
     VideoExtractionStatus,
 )
@@ -73,7 +75,7 @@ BLOCK_REASON_OPTIONS = (
 OCR_EXTRACT_TASK = "OCR_EXTRACT"
 AI_EVALUATE_TASK = "AI_EVALUATE"
 AI_AUTOMATED_MODERATION_TASK = "AI_AUTOMATED_MODERATION"
-EVALUATION_PIPELINE_VERSION = "v3"
+EVALUATION_PIPELINE_VERSION = "v4"
 MAX_REPLY_DRAFT_LENGTH = 4000
 VIDEO_OCR_SUMMARY_GAP_MS = 1_500
 VIDEO_OCR_SUMMARY_MAX_SPAN_MS = 5_000
@@ -85,7 +87,7 @@ MAX_VIDEO_EVIDENCE_CHARS = 12_000
 MAX_EVALUATION_OCR_CHARS = 20_000
 AI_AUTOMATED_DAILY_LIMIT = 100
 OCR_GROUNDED_EVIDENCE_MIN_LENGTH = 6
-DEFAULT_REVIEW_PROMPT_VERSION = "review-v4"
+DEFAULT_REVIEW_PROMPT_VERSION = REVIEW_PROMPT_VERSION
 MUTE_VERIFY_DELAYS_SECONDS = (0, 2, 5, 10)
 MUTE_VERIFY_MAX_WAIT_SECONDS = 20
 MUTE_VERIFY_REQUEST_OVERHEAD_SECONDS = 0.5
@@ -196,7 +198,13 @@ def _read_mute_metrics(source, topic_id: int, *, timeout_seconds: float) -> dict
     return source.get_post_metrics(topic_id)
 
 
-def _read_mute_state_with_verification(source, post: OriginalPost, *, action: str, expected_end_time: int | None) -> dict:
+def _read_mute_state_with_verification(
+    source,
+    post: OriginalPost,
+    *,
+    action: str,
+    expected_end_time: int | None,
+) -> dict:
     """Read at most four times after a mute write; never repeats the write itself."""
     latest_state: dict = {}
     started_at = monotonic()
@@ -436,26 +444,109 @@ def _ocr_source_refs(post: OriginalPost, evidence: list[str]) -> list[dict]:
     return refs
 
 
-def _focus_reasons(
-    post: OriginalPost,
-    output: AssessmentOutput,
-    *,
-    high_reward: bool,
-    video_incomplete: bool,
-) -> list[str]:
-    """Make the existing human-focus conditions individually auditable."""
-    reasons: list[str] = []
-    if not post.content_text:
-        reasons.append(FocusReason.EMPTY_BODY)
-    if post.ocr_extractions.filter(error_summary__gt="").exists():
-        reasons.append(FocusReason.OCR_FAILED)
-    if any(not risk.evidence for risk in output.risk_labels):
-        reasons.append(FocusReason.EVIDENCE_MISSING)
-    if video_incomplete:
-        reasons.append(FocusReason.VIDEO_INCOMPLETE)
-    if high_reward:
-        reasons.append(FocusReason.HIGH_REWARD)
-    return reasons
+def _evidence_matches_media_text(snippet: str, text: str, *, kind: str) -> bool:
+    normalized_snippet = normalized_ocr_text(snippet)
+    if kind == VideoEvidenceKind.QR_CODE:
+        return "二维码" in normalized_snippet
+    return (
+        len(normalized_snippet) >= OCR_GROUNDED_EVIDENCE_MIN_LENGTH
+        and normalized_snippet in normalized_ocr_text(text)
+    )
+
+
+def _media_source_refs(post: OriginalPost, evidence: list[str]) -> list[dict]:
+    """Persist only verified local image/video evidence references for a risk row."""
+    refs: list[dict] = []
+    successful_ocr = list(
+        post.ocr_extractions.filter(error_summary="").exclude(text="").order_by("pk")
+    )
+    current_video = current_video_extractions(post)
+    for evidence_index, snippet in enumerate(evidence):
+        if not isinstance(snippet, str):
+            continue
+        for extraction in successful_ocr:
+            if not _evidence_matches_media_text(snippet, extraction.text, kind="IMAGE_OCR"):
+                continue
+            refs.append(
+                {
+                    "source_type": "IMAGE_OCR",
+                    "ocr_extraction_id": extraction.pk,
+                    "media_id": extraction.media_id,
+                    "text_fingerprint": _normalized_text_fingerprint(extraction.text),
+                    "evidence_index": evidence_index,
+                    "evidence_fingerprint": _normalized_text_fingerprint(snippet),
+                }
+            )
+        for video_extraction in current_video:
+            if video_extraction.status not in {
+                VideoExtractionStatus.SUCCEEDED,
+                VideoExtractionStatus.PARTIAL,
+            }:
+                continue
+            for video_evidence in video_extraction.evidence.all():
+                if not _evidence_matches_media_text(
+                    snippet, video_evidence.text, kind=video_evidence.kind
+                ):
+                    continue
+                refs.append(
+                    {
+                        "source_type": "VIDEO_EVIDENCE",
+                        "video_extraction_id": video_extraction.pk,
+                        "video_evidence_id": video_evidence.pk,
+                        "media_id": video_extraction.media_id,
+                        "start_ms": video_evidence.start_ms,
+                        "end_ms": video_evidence.end_ms,
+                        "text_fingerprint": _normalized_text_fingerprint(video_evidence.text),
+                        "evidence_index": evidence_index,
+                        "evidence_fingerprint": _normalized_text_fingerprint(snippet),
+                    }
+                )
+    return refs
+
+
+def _has_usable_image_ocr(post: OriginalPost, media_id: int) -> bool:
+    return post.ocr_extractions.filter(
+        media_id=media_id, error_summary=""
+    ).exclude(text="").exists()
+
+
+def _has_usable_video_evidence(extraction: VideoExtraction | None) -> bool:
+    if extraction is None or extraction.status not in {
+        VideoExtractionStatus.SUCCEEDED,
+        VideoExtractionStatus.PARTIAL,
+    }:
+        return False
+    return extraction.evidence.filter(
+        kind__in=(
+            VideoEvidenceKind.FRAME_OCR,
+            VideoEvidenceKind.QR_CODE,
+            VideoEvidenceKind.AUDIO_TRANSCRIPT,
+        )
+    ).exclude(text="").exists()
+
+
+def _has_textual_input(post: OriginalPost) -> bool:
+    return any(value.strip() for value in (post.title, post.content_text, post.ballot_text))
+
+
+def _focus_reasons(post: OriginalPost) -> list[str]:
+    """Only missing media evidence for a textless post requires human focus."""
+    if _has_textual_input(post):
+        return []
+    media = list(post.media.order_by("pk"))
+    if not media:
+        return [FocusReason.EVIDENCE_MISSING]
+    current_video_by_media = {
+        extraction.media_id: extraction for extraction in current_video_extractions(post)
+    }
+    for item in media:
+        if item.media_type == MediaType.IMAGE and not _has_usable_image_ocr(post, item.pk):
+            return [FocusReason.EVIDENCE_MISSING]
+        if item.media_type == MediaType.VIDEO and not _has_usable_video_evidence(
+            current_video_by_media.get(item.pk)
+        ):
+            return [FocusReason.EVIDENCE_MISSING]
+    return []
 
 
 def _video_evidence_input_lines(extraction: VideoExtraction, media_index: int) -> list[str]:
@@ -574,6 +665,7 @@ def enqueue_evaluation_pipeline(
                     media_fingerprint=fingerprint_value,
                     extractor_version=VIDEO_EXTRACTOR_VERSION,
                     attempt=1,
+                    duration_limit_seconds=runtime.video_max_duration_seconds,
                 )
             video_summary = {
                 "topic_id": post.topic_id,
@@ -607,6 +699,7 @@ def enqueue_evaluation_pipeline(
                     media_fingerprint=fingerprint_value,
                     extractor_version=VIDEO_EXTRACTOR_VERSION,
                     attempt=extraction.attempt + 1,
+                    duration_limit_seconds=runtime.video_max_duration_seconds,
                 )
                 video_summary = {
                     "topic_id": post.topic_id,
@@ -696,6 +789,7 @@ def persist_assessment(
                 confidence=risk.confidence,
                 evidence=risk.evidence,
                 ocr_source_refs=_ocr_source_refs(post, risk.evidence),
+                media_source_refs=_media_source_refs(post, risk.evidence),
             )
         )
     deciding_evidence = (
@@ -704,21 +798,7 @@ def persist_assessment(
     if deciding_evidence is not None:
         assessment.deciding_risk_evidence = deciding_evidence
         assessment.save(update_fields=["deciding_risk_evidence"])
-    high_reward = any(
-        re.search(r"(?:上千|上万|无限|巨额|\d+\s*[万千])", evidence)
-        for risk in output.risk_labels
-        for evidence in risk.evidence
-    )
-    video_incomplete = any(
-        extraction.status != VideoExtractionStatus.SUCCEEDED
-        for extraction in current_video_extractions(post)
-    )
-    focus_reasons = _focus_reasons(
-        post,
-        output,
-        high_reward=high_reward,
-        video_incomplete=video_incomplete,
-    )
+    focus_reasons = _focus_reasons(post)
     needs_focus = bool(focus_reasons)
     task = ReviewTask.objects.select_for_update().filter(post=post).first()
     if task is None:
@@ -840,25 +920,28 @@ def _automation_evidence(assessment: AiAssessment, rule: PolicyRule) -> list[dic
             "confidence": risk.confidence,
             "evidence": normalized[:3],
             "ocr_source_refs": risk.ocr_source_refs,
+            "media_source_refs": risk.media_source_refs,
         }
     ]
 
 
-def _has_verified_deciding_ocr_source(assessment: AiAssessment) -> bool:
-    """Revalidate the persisted OCR source before allowing the empty-body exception."""
+def _has_verified_deciding_media_source(assessment: AiAssessment) -> bool:
+    """Revalidate the persisted local media source before an empty-input write."""
     risk = assessment.deciding_risk_evidence
     if risk is None or risk.assessment_id != assessment.pk:
         return False
     snippets = risk.evidence if isinstance(risk.evidence, list) else []
-    refs = risk.ocr_source_refs if isinstance(risk.ocr_source_refs, list) else []
+    refs = risk.media_source_refs if isinstance(risk.media_source_refs, list) else []
+    current_video_by_id = {
+        extraction.pk: extraction for extraction in current_video_extractions(assessment.post)
+    }
     for ref in refs:
         if not isinstance(ref, dict):
             continue
-        extraction_id = ref.get("ocr_extraction_id")
         evidence_index = ref.get("evidence_index")
         text_fingerprint = ref.get("text_fingerprint")
         evidence_fingerprint = ref.get("evidence_fingerprint")
-        if not isinstance(extraction_id, int) or not isinstance(evidence_index, int):
+        if not isinstance(evidence_index, int):
             continue
         if not isinstance(text_fingerprint, str) or not isinstance(evidence_fingerprint, str):
             continue
@@ -869,20 +952,55 @@ def _has_verified_deciding_ocr_source(assessment: AiAssessment) -> bool:
             continue
         normalized_snippet = normalized_ocr_text(snippet)
         if (
-            len(normalized_snippet) < OCR_GROUNDED_EVIDENCE_MIN_LENGTH
-            or _normalized_text_fingerprint(snippet) != evidence_fingerprint
+            not normalized_snippet or _normalized_text_fingerprint(snippet) != evidence_fingerprint
         ):
             continue
-        extraction = OcrExtraction.objects.filter(pk=extraction_id, post=assessment.post).first()
-        if (
-            extraction is None
-            or extraction.error_summary
-            or not extraction.text
-            or _normalized_text_fingerprint(extraction.text) != text_fingerprint
-        ):
+        if ref.get("source_type") == "IMAGE_OCR":
+            extraction_id = ref.get("ocr_extraction_id")
+            media_id = ref.get("media_id")
+            if not isinstance(extraction_id, int) or not isinstance(media_id, int):
+                continue
+            extraction = OcrExtraction.objects.filter(
+                pk=extraction_id, post=assessment.post, media_id=media_id
+            ).first()
+            if (
+                extraction is not None
+                and not extraction.error_summary
+                and extraction.text
+                and _normalized_text_fingerprint(extraction.text) == text_fingerprint
+                and _evidence_matches_media_text(snippet, extraction.text, kind="IMAGE_OCR")
+            ):
+                return True
             continue
-        if normalized_snippet in normalized_ocr_text(extraction.text):
-            return True
+        if ref.get("source_type") == "VIDEO_EVIDENCE":
+            extraction_id = ref.get("video_extraction_id")
+            video_evidence_id = ref.get("video_evidence_id")
+            media_id = ref.get("media_id")
+            start_ms = ref.get("start_ms")
+            end_ms = ref.get("end_ms")
+            extraction = current_video_by_id.get(extraction_id)
+            if (
+                not isinstance(video_evidence_id, int)
+                or not isinstance(media_id, int)
+                or not isinstance(start_ms, int)
+                or extraction is None
+                or extraction.media_id != media_id
+                or extraction.status
+                not in {VideoExtractionStatus.SUCCEEDED, VideoExtractionStatus.PARTIAL}
+            ):
+                continue
+            video_evidence = VideoEvidence.objects.filter(
+                pk=video_evidence_id, extraction=extraction, start_ms=start_ms
+            ).first()
+            if (
+                video_evidence is None
+                or video_evidence.end_ms != end_ms
+                or not video_evidence.text
+                or _normalized_text_fingerprint(video_evidence.text) != text_fingerprint
+            ):
+                continue
+            if _evidence_matches_media_text(snippet, video_evidence.text, kind=video_evidence.kind):
+                return True
     return False
 
 
@@ -932,10 +1050,11 @@ def ai_automation_eligibility(
     if task.needs_focus != bool(focus_reasons):
         return False, "重点核验状态与原因记录不一致", snapshot
     if focus_reasons:
-        if set(focus_reasons) != {FocusReason.EMPTY_BODY}:
-            return False, "需重点人工核验", snapshot
-        if not _has_verified_deciding_ocr_source(assessment):
-            return False, "空正文缺少可验证的图片 OCR 风险依据", snapshot
+        if set(focus_reasons) == {FocusReason.EVIDENCE_MISSING}:
+            return False, "输入证据不足，需重点人工核验", snapshot
+        return False, "历史重点人工核验任务不得自动处置", snapshot
+    if not _has_textual_input(task.post) and not _has_verified_deciding_media_source(assessment):
+        return False, "空文字缺少可验证的本地媒体风险依据", snapshot
     since = timezone.now() - timedelta(hours=24)
     if (
         OperationAudit.objects.filter(

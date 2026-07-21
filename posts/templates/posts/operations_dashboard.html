@@ -38,7 +38,7 @@
             {% else %}
             <li><strong>{{ summary.evidence.get_kind_display }}</strong> · {{ summary.start_ms|floatformat:0 }}ms{% if summary.end_ms %}–{{ summary.end_ms|floatformat:0 }}ms{% endif %}{% if summary.evidence.confidence %}（{{ summary.evidence.confidence|floatformat:2 }}）{% endif %}：{{ summary.evidence.text }}</li>
             {% endif %}
-            {% empty %}<li>未生成可用视频证据；请人工核验。</li>{% endfor %}
+            {% empty %}<li>{% if extraction.limit_explanation %}{{ extraction.limit_explanation }}{% else %}未生成可用视频证据；请人工核验。{% endif %}</li>{% endfor %}
           </ul>
           {% empty %}<p>当前版本尚未生成视频提取结果。</p>{% endfor %}
           {% if selected_post.historical_video_extraction_count %}<p class="video-history-note">另有 {{ selected_post.historical_video_extraction_count }} 个历史提取记录，未用于当前 AI 审核。</p>{% endif %}

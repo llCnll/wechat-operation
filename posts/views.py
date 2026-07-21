@@ -52,8 +52,8 @@ from .models import (
     POST_STATUS_NORMAL,
     POST_STATUS_SELF_VISIBLE,
     POST_STATUS_SUNK,
-    CandidatePost,
     AuthorMuteStatus,
+    CandidatePost,
     InteractionSnapshot,
     OriginalPost,
     OriginType,
@@ -292,9 +292,7 @@ def _remaining_time_label(until, now) -> str:
 def _author_mute_status_for_post(post: OriginalPost, appid: str) -> AuthorMuteStatus | None:
     if not post.author_openid:
         return None
-    return AuthorMuteStatus.objects.filter(
-        openid=post.author_openid, source_appid=appid
-    ).first()
+    return AuthorMuteStatus.objects.filter(openid=post.author_openid, source_appid=appid).first()
 
 
 @login_required
@@ -473,6 +471,16 @@ def operations_dashboard(request):
         for extraction in current_extractions:
             extraction.media_index = media_indexes.get(extraction.media_id, "已移除媒体")
             extraction.evidence_summaries = video_evidence_summaries(extraction)
+            if (
+                extraction.status == "SKIPPED_LIMIT"
+                and extraction.error_summary == "video_duration_limit_exceeded"
+                and extraction.duration_ms is not None
+                and extraction.duration_limit_seconds is not None
+            ):
+                extraction.limit_explanation = (
+                    f"视频时长 {extraction.duration_ms / 1000:g} 秒，超过提取时资源与采样时长上限 "
+                    f"{extraction.duration_limit_seconds:g} 秒，未进行提取。"
+                )
         selected_post.current_video_extractions = sorted(
             current_extractions,
             key=lambda item: (media_indexes.get(item.media_id, float("inf")), item.pk),
@@ -493,9 +501,7 @@ def operations_dashboard(request):
         # A task may have historical review records. The dashboard should link
         # to the latest record's actual review state, not the default queue.
         selected_post.latest_ai_operation_review = (
-            selected_post.ai_operation_reviews[0]
-            if selected_post.ai_operation_reviews
-            else None
+            selected_post.ai_operation_reviews[0] if selected_post.ai_operation_reviews else None
         )
         latest_jobs = list(
             BackgroundJob.objects.filter(parameter_summary__topic_id=selected_post.topic_id)

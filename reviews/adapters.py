@@ -170,9 +170,9 @@ VIDEO_EVIDENCE_PROMPT = (
     "联系方式、二维码、外链或非官方领取/规避官方渠道等上下文，才可高置信度标记 "
     "PRIVATE_SERVER 或 TRAFFIC_DIVERSION。\n"
     "- 孤立奖励数值不得定性私服或引流，可低置信度标记 CONTENT_ANOMALY。系统不验证官方活动；"
-    "高额奖励仍须设置 needs_focus 供人工复核，但不得覆盖上述强引流组合的 BLOCK 建议。\n"
+    "不得仅因高额奖励要求人工重点复核或改变建议动作。\n"
 )
-REVIEW_PROMPT_VERSION = "review-v5"
+REVIEW_PROMPT_VERSION = "review-v6"
 
 
 def review_prompt_version(*, has_video_evidence: bool, faq_version: str = "") -> str:

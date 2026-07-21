@@ -5,7 +5,7 @@ from django.contrib.auth import get_user_model
 from django.test import Client
 
 from jobs.models import BackgroundJob
-from posts.models import CandidatePost, OriginalPost, OriginType, PostMedia
+from posts.models import CandidatePost, MediaType, OriginalPost, OriginType, PostMedia
 from reviews.adapters import REVIEW_PROMPT_VERSION, AssessmentOutput, RiskOutput
 from reviews.automation_tasks import automated_moderation_handler
 from reviews.models import (
@@ -19,6 +19,10 @@ from reviews.models import (
     PolicyVersion,
     RecommendedAction,
     ReviewStatus,
+    VideoEvidence,
+    VideoEvidenceKind,
+    VideoExtraction,
+    VideoExtractionStatus,
 )
 from reviews.services import (
     AI_AUTOMATED_MODERATION_TASK,
@@ -26,7 +30,10 @@ from reviews.services import (
     escalate_ai_operation_review,
     execute_ai_automated_moderation,
     persist_assessment,
+    reserve_ai_automated_moderation,
 )
+from reviews.video import media_fingerprint
+from reviews.video_tasks import VIDEO_EXTRACTOR_VERSION
 
 
 def _enable_automation(monkeypatch, runtime):
@@ -191,9 +198,12 @@ def test_authorized_action_uses_its_deciding_rule_threshold_not_fixed_minimum(
 
     assert task.suggested_action == action
     assert assessment.deciding_risk_evidence.label == risk_label
-    assert BackgroundJob.objects.get(task_type=AI_AUTOMATED_MODERATION_TASK).parameter_summary[
-        "assessment_id"
-    ] == assessment.pk
+    assert (
+        BackgroundJob.objects.get(task_type=AI_AUTOMATED_MODERATION_TASK).parameter_summary[
+            "assessment_id"
+        ]
+        == assessment.pk
+    )
 
 
 @pytest.mark.django_db
@@ -233,7 +243,9 @@ def test_non_deciding_low_confidence_risk_does_not_veto_authorized_recommendatio
             overall_confidence=0.86,
             risk_labels=[
                 RiskOutput(label="OFF_TOPIC", confidence=0.86, evidence=["百事可乐 PEPSI"]),
-                RiskOutput(label="ADVERTISEMENT_SPAM", confidence=0.42, evidence=["百事可乐 PEPSI"]),
+                RiskOutput(
+                    label="ADVERTISEMENT_SPAM", confidence=0.42, evidence=["百事可乐 PEPSI"]
+                ),
             ],
         ),
         policy,
@@ -415,16 +427,16 @@ def _persist_empty_body_traffic_assessment(post: OriginalPost, policy_name: str)
 
 
 @pytest.mark.django_db
-def test_empty_body_remains_focus_but_verified_deciding_ocr_can_be_automated(monkeypatch):
+def test_empty_body_with_verified_deciding_ocr_can_be_automated(monkeypatch):
     from config.settings import runtime
 
     _enable_automation(monkeypatch, runtime)
     post = _empty_body_ocr_post(9105)
     assessment, task = _persist_empty_body_traffic_assessment(post, "empty-body-ocr")
 
-    assert task.needs_focus is True
-    assert task.focus_reasons == [FocusReason.EMPTY_BODY]
-    assert assessment.deciding_risk_evidence.ocr_source_refs
+    assert task.needs_focus is False
+    assert task.focus_reasons == []
+    assert assessment.deciding_risk_evidence.media_source_refs
     assert ai_automation_eligibility(task, assessment=assessment)[0] is True
     assert BackgroundJob.objects.filter(task_type=AI_AUTOMATED_MODERATION_TASK).exists()
 
@@ -442,7 +454,7 @@ def test_empty_body_rejects_changed_ocr_source_before_write(monkeypatch):
 
     eligible, reason, _ = ai_automation_eligibility(task, assessment=assessment)
     assert eligible is False
-    assert reason == "空正文缺少可验证的图片 OCR 风险依据"
+    assert reason == "空文字缺少可验证的本地媒体风险依据"
 
 
 @pytest.mark.django_db
@@ -456,11 +468,11 @@ def test_empty_body_rejects_missing_ocr_source(monkeypatch):
     )
     assessment, task = _persist_empty_body_traffic_assessment(post, "empty-body-no-ocr")
 
-    assert task.focus_reasons == [FocusReason.EMPTY_BODY]
-    assert assessment.deciding_risk_evidence.ocr_source_refs == []
+    assert task.focus_reasons == [FocusReason.EVIDENCE_MISSING]
+    assert assessment.deciding_risk_evidence.media_source_refs == []
     eligible, reason, _ = ai_automation_eligibility(task, assessment=assessment)
     assert eligible is False
-    assert reason == "空正文缺少可验证的图片 OCR 风险依据"
+    assert reason == "输入证据不足，需重点人工核验"
     assert not BackgroundJob.objects.filter(task_type=AI_AUTOMATED_MODERATION_TASK).exists()
 
 
@@ -477,7 +489,7 @@ def test_empty_body_rejects_failed_ocr_source_before_write(monkeypatch):
 
     eligible, reason, _ = ai_automation_eligibility(task, assessment=assessment)
     assert eligible is False
-    assert reason == "空正文缺少可验证的图片 OCR 风险依据"
+    assert reason == "空文字缺少可验证的本地媒体风险依据"
 
 
 @pytest.mark.django_db
@@ -515,8 +527,229 @@ def test_empty_body_with_ocr_failure_remains_manual(monkeypatch):
         _authorized_traffic_policy("empty-body-ocr-failure"),
     )
 
-    assert FocusReason.OCR_FAILED in task.focus_reasons
+    assert task.focus_reasons == [FocusReason.EVIDENCE_MISSING]
     assert not BackgroundJob.objects.filter(task_type=AI_AUTOMATED_MODERATION_TASK).exists()
+
+
+@pytest.mark.django_db
+def test_high_reward_with_authorized_traffic_evidence_creates_automation_job(monkeypatch):
+    from config.settings import runtime
+
+    _enable_automation(monkeypatch, runtime)
+    post = OriginalPost.objects.create(
+        topic_id=9112, content_id="high-reward-authorized", content_text="扫码领取", status=2
+    )
+    CandidatePost.objects.create(
+        topic_id=post.topic_id, content_id=post.content_id, origin_type=OriginType.ORIGINAL
+    )
+
+    _, task = persist_assessment(
+        post,
+        AssessmentOutput(
+            content_category="OTHER",
+            recommended_action=RecommendedAction.BLOCK,
+            overall_confidence=0.9,
+            risk_labels=[
+                RiskOutput(
+                    label="TRAFFIC_DIVERSION",
+                    confidence=0.9,
+                    evidence=["扫码加群领取10万奖励"],
+                )
+            ],
+        ),
+        _authorized_traffic_policy("high-reward-authorized"),
+    )
+
+    assert task.focus_reasons == []
+    assert BackgroundJob.objects.filter(task_type=AI_AUTOMATED_MODERATION_TASK).exists()
+
+
+@pytest.mark.django_db
+def test_empty_body_with_partial_video_evidence_can_be_automated(monkeypatch):
+    from config.settings import runtime
+
+    _enable_automation(monkeypatch, runtime)
+    post = OriginalPost.objects.create(topic_id=9113, content_id="partial-video", status=2)
+    CandidatePost.objects.create(
+        topic_id=post.topic_id, content_id=post.content_id, origin_type=OriginType.ORIGINAL
+    )
+    media = PostMedia.objects.create(
+        post=post, url="https://example.invalid/partial-video.mp4", media_type=MediaType.VIDEO
+    )
+    extraction = VideoExtraction.objects.create(
+        post=post,
+        media=media,
+        media_fingerprint=media_fingerprint(media.url),
+        extractor_version=VIDEO_EXTRACTOR_VERSION,
+        status=VideoExtractionStatus.PARTIAL,
+    )
+    VideoEvidence.objects.create(
+        extraction=extraction,
+        kind=VideoEvidenceKind.FRAME_OCR,
+        start_ms=1_000,
+        text="扫码添加客服领取游戏礼包",
+    )
+
+    assessment, task = _persist_empty_body_traffic_assessment(
+        post, "partial-video-evidence"
+    )
+
+    assert task.focus_reasons == []
+    assert any(
+        ref["source_type"] == "VIDEO_EVIDENCE"
+        for ref in assessment.deciding_risk_evidence.media_source_refs
+    )
+    assert ai_automation_eligibility(task, assessment=assessment)[0] is True
+
+
+@pytest.mark.django_db
+def test_empty_body_failed_video_evidence_is_not_usable_for_automation(monkeypatch):
+    from config.settings import runtime
+
+    _enable_automation(monkeypatch, runtime)
+    post = OriginalPost.objects.create(topic_id=91131, content_id="failed-video", status=2)
+    CandidatePost.objects.create(
+        topic_id=post.topic_id, content_id=post.content_id, origin_type=OriginType.ORIGINAL
+    )
+    media = PostMedia.objects.create(
+        post=post, url="https://example.invalid/failed-video.mp4", media_type=MediaType.VIDEO
+    )
+    extraction = VideoExtraction.objects.create(
+        post=post,
+        media=media,
+        media_fingerprint=media_fingerprint(media.url),
+        extractor_version=VIDEO_EXTRACTOR_VERSION,
+        status=VideoExtractionStatus.FAILED,
+    )
+    VideoEvidence.objects.create(
+        extraction=extraction,
+        kind=VideoEvidenceKind.FRAME_OCR,
+        start_ms=1_000,
+        text="扫码添加客服领取游戏礼包",
+    )
+
+    assessment, task = _persist_empty_body_traffic_assessment(post, "failed-video-evidence")
+
+    assert task.focus_reasons == [FocusReason.EVIDENCE_MISSING]
+    assert assessment.deciding_risk_evidence.media_source_refs == []
+    assert ai_automation_eligibility(task, assessment=assessment)[0] is False
+
+
+@pytest.mark.django_db
+def test_empty_body_mixed_media_requires_evidence_for_every_attachment(monkeypatch):
+    from config.settings import runtime
+
+    _enable_automation(monkeypatch, runtime)
+    post = OriginalPost.objects.create(topic_id=9114, content_id="mixed-media", status=2)
+    CandidatePost.objects.create(
+        topic_id=post.topic_id, content_id=post.content_id, origin_type=OriginType.ORIGINAL
+    )
+    image = PostMedia.objects.create(post=post, url="https://example.invalid/evidence.jpg")
+    OcrExtraction.objects.create(
+        post=post, media=image, text="扫码加群领取游戏礼包", provider="test"
+    )
+    PostMedia.objects.create(
+        post=post, url="https://example.invalid/missing-video.mp4", media_type=MediaType.VIDEO
+    )
+
+    _, task = _persist_empty_body_traffic_assessment(post, "mixed-media-missing-video")
+
+    assert task.focus_reasons == [FocusReason.EVIDENCE_MISSING]
+    assert not BackgroundJob.objects.filter(task_type=AI_AUTOMATED_MODERATION_TASK).exists()
+
+
+@pytest.mark.django_db
+def test_empty_body_source_link_failure_rejects_without_rewriting_focus(monkeypatch):
+    from config.settings import runtime
+
+    _enable_automation(monkeypatch, runtime)
+    post = _empty_body_ocr_post(9115)
+    assessment, task = _persist_empty_body_traffic_assessment(post, "source-link-rejection")
+    post.ocr_extractions.update(text="已被替换的文字")
+
+    assert task.focus_reasons == []
+    assert reserve_ai_automated_moderation(
+        task.pk, assessment.pk, RecommendedAction.BLOCK
+    ) is None
+    audit = OperationAudit.objects.get(task=task)
+    assert audit.result_code == "AUTO_ELIGIBILITY_REJECTED"
+    assert audit.error_summary == "空文字缺少可验证的本地媒体风险依据"
+    task.refresh_from_db()
+    assert task.focus_reasons == []
+
+
+@pytest.mark.django_db
+def test_historical_focus_reason_rejects_pending_automation_without_write(monkeypatch):
+    from config.settings import runtime
+
+    _enable_automation(monkeypatch, runtime)
+    post = OriginalPost.objects.create(
+        topic_id=9116, content_id="historical-focus", content_text="扫码加群", status=2
+    )
+    CandidatePost.objects.create(
+        topic_id=post.topic_id, content_id=post.content_id, origin_type=OriginType.ORIGINAL
+    )
+    assessment, task = persist_assessment(
+        post,
+        AssessmentOutput(
+            content_category="OTHER",
+            recommended_action=RecommendedAction.BLOCK,
+            overall_confidence=0.9,
+            risk_labels=[
+                RiskOutput(label="TRAFFIC_DIVERSION", confidence=0.9, evidence=["扫码加群"])
+            ],
+        ),
+        _authorized_traffic_policy("historical-focus"),
+    )
+    task.focus_reasons = [FocusReason.HIGH_REWARD]
+    task.needs_focus = True
+    task.save(update_fields=("focus_reasons", "needs_focus", "updated_at"))
+
+    assert reserve_ai_automated_moderation(
+        task.pk, assessment.pk, RecommendedAction.BLOCK
+    ) is None
+    audit = OperationAudit.objects.get(task=task)
+    assert audit.result_code == "AUTO_ELIGIBILITY_REJECTED"
+    assert audit.error_summary == "历史重点人工核验任务不得自动处置"
+    task.refresh_from_db()
+    assert task.status == ReviewStatus.PENDING
+
+
+@pytest.mark.django_db
+def test_explicit_reassessment_replaces_current_legacy_focus_reason():
+    post = OriginalPost.objects.create(
+        topic_id=9117, content_id="reassessed-legacy-focus", content_text="扫码加群", status=2
+    )
+    first, task = persist_assessment(
+        post,
+        AssessmentOutput(
+            content_category="OTHER",
+            recommended_action=RecommendedAction.BLOCK,
+            overall_confidence=0.9,
+            risk_labels=[
+                RiskOutput(label="TRAFFIC_DIVERSION", confidence=0.9, evidence=["扫码加群"])
+            ],
+        ),
+    )
+    task.focus_reasons = [FocusReason.HIGH_REWARD]
+    task.needs_focus = True
+    task.save(update_fields=("focus_reasons", "needs_focus", "updated_at"))
+
+    second, current_task = persist_assessment(
+        post,
+        AssessmentOutput(
+            content_category="OTHER",
+            recommended_action=RecommendedAction.KEEP,
+            overall_confidence=0.5,
+        ),
+    )
+
+    assert second.pk != first.pk
+    assert post.ai_assessments.filter(pk=first.pk).exists()
+    assert current_task.pk == task.pk
+    assert current_task.assessment_id == second.pk
+    assert current_task.focus_reasons == []
+    assert current_task.needs_focus is False
 
 
 @pytest.mark.django_db
@@ -640,9 +873,7 @@ def test_ai_operation_review_tab_and_post_actions(monkeypatch):
     page = client.get("/ai-operation-reviews/")
     assert page.status_code == 200
     assert "AI 操作复审" in page.content.decode()
-    response = client.post(
-        f"/ai-operation-reviews/{audit.ai_operation_review.pk}/confirm/", {}
-    )
+    response = client.post(f"/ai-operation-reviews/{audit.ai_operation_review.pk}/confirm/", {})
     assert response.status_code == 302
     audit.ai_operation_review.refresh_from_db()
     assert audit.ai_operation_review.status == AiOperationReviewStatus.CONFIRMED
@@ -943,8 +1174,7 @@ def test_review_workspace_filters_and_blocks_direct_action_while_pending(monkeyp
     assert str(post.topic_id) in body
     assert "review_status=AUTO_EXECUTED_PENDING_REVIEW" in body
     assert (
-        "return_to=/ai-operation-reviews/%3Fstatus%3DPENDING%26action%3DSINK%26risk%3DCHEAT"
-        in body
+        "return_to=/ai-operation-reviews/%3Fstatus%3DPENDING%26action%3DSINK%26risk%3DCHEAT" in body
     )
     assert str(post.topic_id) not in client.get("/").content.decode()
 

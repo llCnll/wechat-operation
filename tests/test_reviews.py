@@ -71,9 +71,9 @@ def test_assessment_always_creates_pending_human_review_and_safe_reply_draft():
 def test_reply_faq_candidates_require_the_matching_game_appid():
     assert select_reply_faq_rules(appid="", content="活动建议") == ()
     assert select_reply_faq_rules(appid="other-game", content="活动建议") == ()
-    assert [rule.rule_id for rule in select_reply_faq_rules(
-        appid=CITY_LORD_APPID, content="活动建议"
-    )] == ["activity-suggestion"]
+    assert [
+        rule.rule_id for rule in select_reply_faq_rules(appid=CITY_LORD_APPID, content="活动建议")
+    ] == ["activity-suggestion"]
 
 
 def test_reply_faq_catalog_rejects_empty_rule_keywords(monkeypatch, tmp_path):
@@ -148,9 +148,7 @@ def test_assessment_suppresses_reply_draft_for_risky_human_review():
         recommended_action="HUMAN_REVIEW",
         overall_confidence=0.7,
         risk_labels=[
-            RiskOutput(
-                label="TRAFFIC_DIVERSION", confidence=0.7, evidence=["加群领取福利"]
-            )
+            RiskOutput(label="TRAFFIC_DIVERSION", confidence=0.7, evidence=["加群领取福利"])
         ],
         reply_suggestion=ReplyOutput(user_intent_summary="反馈", reply_draft="感谢反馈"),
     )
@@ -275,9 +273,10 @@ def test_faq_prompt_requires_three_styles_to_preserve_controlled_facts():
 
     assert "三项必须以同一 faq_rule_id 的受控要点、待补充信息、来源和禁止承诺为准" in prompt
     assert "仅可改变语气、篇幅和互动方式" in prompt
-    assert review_prompt_version(
-        has_video_evidence=False, faq_version="city-lord-reply-faq-v1"
-    ) == "review-v5-city-lord-reply-faq-v1"
+    assert (
+        review_prompt_version(has_video_evidence=False, faq_version="city-lord-reply-faq-v1")
+        == "review-v6-city-lord-reply-faq-v1"
+    )
 
 
 def test_review_request_contains_only_textual_assessment_context(monkeypatch):
@@ -351,7 +350,7 @@ def test_policy_risk_draft_is_suppressed_and_write_capability_is_disabled(monkey
 
 
 @pytest.mark.django_db
-def test_explicit_qr_contact_can_block_while_high_reward_stays_in_focus():
+def test_explicit_qr_contact_can_block_without_high_reward_focus():
     post = OriginalPost.objects.create(topic_id=216, content_id="review-216", content_text="内容")
     policy = PolicyVersion.objects.create(name="traffic", version="1", is_active=True)
     PolicyRule.objects.create(
@@ -379,7 +378,7 @@ def test_explicit_qr_contact_can_block_while_high_reward_stays_in_focus():
     )
 
     assert task.suggested_action == RecommendedAction.BLOCK
-    assert task.needs_focus is True
+    assert task.needs_focus is False
 
 
 @pytest.mark.django_db
@@ -454,6 +453,82 @@ def test_ai_review_input_includes_ballot_title_and_option_text(monkeypatch):
     assert "帖子正文" in review_client.content
     assert "穿梭（竖着看第一个字）" in review_client.content
     assert "卫 护山河岁月长" in review_client.content
+
+
+@pytest.mark.django_db
+def test_ai_review_selects_faq_candidates_from_image_ocr_and_video_evidence(monkeypatch):
+    post = OriginalPost.objects.create(
+        topic_id=211,
+        content_id="review-faq-evidence-input",
+        title="活动咨询",
+        content_text="请帮忙看看",
+        ballot_text="投票选项",
+        source_appid=CITY_LORD_APPID,
+    )
+    job = BackgroundJob.objects.create(
+        task_type=AI_EVALUATE_TASK,
+        idempotency_key="ai:211",
+        parameter_summary={"topic_id": post.topic_id},
+    )
+
+    class ReviewClient:
+        def evaluate(self, content, ocr_text, *, has_video_evidence=False, faq_rules=()):
+            assert content == "活动咨询\n\n请帮忙看看\n\n投票选项"
+            assert "图片 OCR：充值未到账" in ocr_text
+            assert "视频语音：活动规则怎么参加" in ocr_text
+            assert {rule.rule_id for rule in faq_rules} >= {"payment-issue", "activity-question"}
+            return AssessmentOutput(
+                content_category="QUESTION",
+                recommended_action="KEEP",
+                overall_confidence=0.9,
+            )
+
+    monkeypatch.setattr(
+        "reviews.tasks.build_evaluation_input",
+        lambda _post: (
+            "活动咨询\n\n请帮忙看看\n\n投票选项",
+            "图片 OCR：充值未到账\n视频语音：活动规则怎么参加",
+            "stable-input",
+        ),
+    )
+    monkeypatch.setattr("reviews.tasks.OpenAiCompatibleReviewClient", ReviewClient)
+
+    evaluate_post_handler(job)
+
+    assert post.ai_assessments.count() == 1
+
+
+@pytest.mark.django_db
+def test_ai_review_continues_when_optional_faq_guidance_is_unavailable(monkeypatch):
+    post = OriginalPost.objects.create(
+        topic_id=212,
+        content_id="review-faq-unavailable",
+        content_text="活动建议",
+        source_appid=CITY_LORD_APPID,
+    )
+    job = BackgroundJob.objects.create(
+        task_type=AI_EVALUATE_TASK,
+        idempotency_key="ai:212",
+        parameter_summary={"topic_id": post.topic_id},
+    )
+
+    class ReviewClient:
+        def evaluate(self, content, ocr_text, *, has_video_evidence=False, faq_rules=()):
+            assert faq_rules == ()
+            return AssessmentOutput(
+                content_category="SUGGESTION",
+                recommended_action="KEEP",
+                overall_confidence=0.9,
+            )
+
+    monkeypatch.setattr("reviews.tasks.available_reply_faq_rules", lambda **_kwargs: ())
+    monkeypatch.setattr("reviews.tasks.available_reply_faq_version", lambda **_kwargs: "")
+    monkeypatch.setattr("reviews.tasks.OpenAiCompatibleReviewClient", ReviewClient)
+
+    evaluate_post_handler(job)
+
+    assert post.ai_assessments.count() == 1
+    assert not hasattr(post, "reply_draft")
 
 
 @pytest.mark.django_db(transaction=True)
@@ -867,23 +942,45 @@ def test_mute_rejects_when_preflight_author_differs_from_saved_value(monkeypatch
     post = OriginalPost.objects.create(
         topic_id=213, content_id="mute-mismatch", source_appid="wx-test", author_openid="old-author"
     )
-    CandidatePost.objects.create(topic_id=213, content_id="mute-mismatch", origin_type=OriginType.ORIGINAL)
+    CandidatePost.objects.create(
+        topic_id=213, content_id="mute-mismatch", origin_type=OriginType.ORIGINAL
+    )
     _, task = persist_assessment(
-        post, AssessmentOutput(content_category="OTHER", recommended_action="MUTE", overall_confidence=0.9)
+        post,
+        AssessmentOutput(
+            content_category="OTHER", recommended_action="MUTE", overall_confidence=0.9
+        ),
     )
 
     class Source:
         writes = 0
 
         def get_post_metrics(self, topic_id):
-            return {"data": {"topic": {"topic_id": topic_id, "status": 2, "appid": "wx-test", "creater": {"openid": "new-author", "block_info": {"appid": "wx-test", "block_end_time": 0}, "global_block_end_time": 0}}}}
+            return {
+                "data": {
+                    "topic": {
+                        "topic_id": topic_id,
+                        "status": 2,
+                        "appid": "wx-test",
+                        "creater": {
+                            "openid": "new-author",
+                            "block_info": {"appid": "wx-test", "block_end_time": 0},
+                            "global_block_end_time": 0,
+                        },
+                    }
+                }
+            }
 
         def perform_confirmed_operation(self, **kwargs):
             self.writes += 1
 
     source = Source()
     audit = execute_confirmed_operation(
-        task, user=None, action=RecommendedAction.MUTE, reason="人工确认", source=source,
+        task,
+        user=None,
+        action=RecommendedAction.MUTE,
+        reason="人工确认",
+        source=source,
         upstream_payload={"mute_days": 1, "block_reason_code": 1},
     )
     post.refresh_from_db()
@@ -899,10 +996,17 @@ def test_mute_reads_at_bounded_delays_without_repeating_write(monkeypatch):
     monkeypatch.setattr(runtime, "enable_mute_writes", True)
     delays = []
     monkeypatch.setattr("reviews.services.sleep", delays.append)
-    post = OriginalPost.objects.create(topic_id=214, content_id="mute-delayed", source_appid="wx-test")
-    CandidatePost.objects.create(topic_id=214, content_id="mute-delayed", origin_type=OriginType.ORIGINAL)
+    post = OriginalPost.objects.create(
+        topic_id=214, content_id="mute-delayed", source_appid="wx-test"
+    )
+    CandidatePost.objects.create(
+        topic_id=214, content_id="mute-delayed", origin_type=OriginType.ORIGINAL
+    )
     _, task = persist_assessment(
-        post, AssessmentOutput(content_category="OTHER", recommended_action="MUTE", overall_confidence=0.9)
+        post,
+        AssessmentOutput(
+            content_category="OTHER", recommended_action="MUTE", overall_confidence=0.9
+        ),
     )
 
     class Source:
@@ -912,7 +1016,20 @@ def test_mute_reads_at_bounded_delays_without_repeating_write(monkeypatch):
         def get_post_metrics(self, topic_id):
             self.reads += 1
             end = 2_000_000_000 if self.reads == 3 else 0
-            return {"data": {"topic": {"topic_id": topic_id, "status": 2, "appid": "wx-test", "creater": {"openid": "delayed-author", "block_info": {"appid": "wx-test", "block_end_time": end}, "global_block_end_time": 0}}}}
+            return {
+                "data": {
+                    "topic": {
+                        "topic_id": topic_id,
+                        "status": 2,
+                        "appid": "wx-test",
+                        "creater": {
+                            "openid": "delayed-author",
+                            "block_info": {"appid": "wx-test", "block_end_time": end},
+                            "global_block_end_time": 0,
+                        },
+                    }
+                }
+            }
 
         def perform_confirmed_operation(self, **kwargs):
             self.writes += 1
@@ -920,7 +1037,11 @@ def test_mute_reads_at_bounded_delays_without_repeating_write(monkeypatch):
 
     source = Source()
     audit = execute_confirmed_operation(
-        task, user=None, action=RecommendedAction.MUTE, reason="人工确认", source=source,
+        task,
+        user=None,
+        action=RecommendedAction.MUTE,
+        reason="人工确认",
+        source=source,
         upstream_payload={"mute_days": 1, "block_reason_code": 1},
     )
     assert audit.result_code == "OK"
@@ -979,10 +1100,17 @@ def test_mute_keeps_action_failed_when_write_raises_even_if_readback_matches(mon
     monkeypatch.setattr(runtime, "enable_upstream_writes", True)
     monkeypatch.setattr(runtime, "enable_mute_writes", True)
     monkeypatch.setattr("reviews.services.sleep", lambda _seconds: None)
-    post = OriginalPost.objects.create(topic_id=215, content_id="mute-write-failed", source_appid="wx-test")
-    CandidatePost.objects.create(topic_id=215, content_id="mute-write-failed", origin_type=OriginType.ORIGINAL)
+    post = OriginalPost.objects.create(
+        topic_id=215, content_id="mute-write-failed", source_appid="wx-test"
+    )
+    CandidatePost.objects.create(
+        topic_id=215, content_id="mute-write-failed", origin_type=OriginType.ORIGINAL
+    )
     _, task = persist_assessment(
-        post, AssessmentOutput(content_category="OTHER", recommended_action="MUTE", overall_confidence=0.9)
+        post,
+        AssessmentOutput(
+            content_category="OTHER", recommended_action="MUTE", overall_confidence=0.9
+        ),
     )
 
     class Source:
@@ -992,7 +1120,20 @@ def test_mute_keeps_action_failed_when_write_raises_even_if_readback_matches(mon
         def get_post_metrics(self, topic_id):
             self.reads += 1
             end = 0 if self.reads == 1 else 2_000_000_000
-            return {"data": {"topic": {"topic_id": topic_id, "status": 2, "appid": "wx-test", "creater": {"openid": "failed-author", "block_info": {"appid": "wx-test", "block_end_time": end}, "global_block_end_time": 0}}}}
+            return {
+                "data": {
+                    "topic": {
+                        "topic_id": topic_id,
+                        "status": 2,
+                        "appid": "wx-test",
+                        "creater": {
+                            "openid": "failed-author",
+                            "block_info": {"appid": "wx-test", "block_end_time": end},
+                            "global_block_end_time": 0,
+                        },
+                    }
+                }
+            }
 
         def perform_confirmed_operation(self, **kwargs):
             self.writes += 1
@@ -1000,7 +1141,11 @@ def test_mute_keeps_action_failed_when_write_raises_even_if_readback_matches(mon
 
     source = Source()
     audit = execute_confirmed_operation(
-        task, user=None, action=RecommendedAction.MUTE, reason="人工确认", source=source,
+        task,
+        user=None,
+        action=RecommendedAction.MUTE,
+        reason="人工确认",
+        source=source,
         upstream_payload={"mute_days": 1, "block_reason_code": 1},
     )
     assert audit.result_code == "ACTION_FAILED"

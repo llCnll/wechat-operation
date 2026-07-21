@@ -130,7 +130,10 @@ def test_mute_management_filters_by_game_and_links_author_history():
     user = get_user_model().objects.create_user(username="mute-list", password="test-password")
     now = timezone.now()
     active = OriginalPost.objects.create(
-        topic_id=96, content_id="author-active", source_appid="wx6d2454a8afcd9706", author_openid="author-a"
+        topic_id=96,
+        content_id="author-active",
+        source_appid="wx6d2454a8afcd9706",
+        author_openid="author-a",
     )
     hidden = OriginalPost.objects.create(
         topic_id=97, content_id="author-other", source_appid="other-game", author_openid="author-a"
@@ -145,8 +148,12 @@ def test_mute_management_filters_by_game_and_links_author_history():
         last_source_post=active,
     )
     AuthorMuteStatus.objects.create(
-        openid="author-a", source_appid="other-game", nick_name="不应出现",
-        local_muted_until=now + timedelta(days=1), last_synced_at=now, source_requested_at=now,
+        openid="author-a",
+        source_appid="other-game",
+        nick_name="不应出现",
+        local_muted_until=now + timedelta(days=1),
+        last_synced_at=now,
+        source_requested_at=now,
         last_source_post=hidden,
     )
     client = Client()
@@ -448,6 +455,30 @@ def test_dashboard_aggregates_current_video_evidence_and_hides_history_by_defaul
     assert "查看原始 3 帧 OCR" in page
     assert "另有 1 个历史提取记录，未用于当前 AI 审核。" in page
     assert "历史逐帧证据" not in page
+
+
+@pytest.mark.django_db
+def test_dashboard_explains_duration_limited_video_with_historical_snapshot():
+    user = get_user_model().objects.create_user(username="duration-limit", password="test-password")
+    post = OriginalPost.objects.create(topic_id=1011, content_id="duration-limited-video")
+    media = post.media.create(url="https://example.test/too-long.mp4", media_type="VIDEO")
+    VideoExtraction.objects.create(
+        post=post,
+        media=media,
+        media_fingerprint=media_fingerprint(media.url),
+        extractor_version=VIDEO_EXTRACTOR_VERSION,
+        status="SKIPPED_LIMIT",
+        error_summary="video_duration_limit_exceeded",
+        duration_ms=31_000,
+        duration_limit_seconds=30,
+    )
+    client = Client()
+    client.force_login(user)
+
+    page = client.get("/", {"topic": post.topic_id}).content.decode()
+
+    assert "视频时长 31 秒，超过提取时资源与采样时长上限 30 秒，未进行提取。" in page
+    assert "未生成可用视频证据；请人工核验。" not in page
 
 
 @pytest.mark.django_db
@@ -809,9 +840,10 @@ def test_escalated_ai_operation_can_restore_and_apply_final_action_in_one_flow(m
     assert task.final_action == RecommendedAction.SINK
     assert ai_review.status == AiOperationReviewStatus.RESTORED
     assert post.status == POST_STATUS_SUNK
-    assert list(
-        task.operation_audits.exclude(pk=ai_audit.pk).values_list("action", flat=True)
-    ) == [RecommendedAction.RESTORE, RecommendedAction.SINK]
+    assert list(task.operation_audits.exclude(pk=ai_audit.pk).values_list("action", flat=True)) == [
+        RecommendedAction.RESTORE,
+        RecommendedAction.SINK,
+    ]
 
 
 @pytest.mark.django_db

@@ -106,6 +106,8 @@ uv run python manage.py upgrade_plan --json
 4. `restart.mode=supervisor`：停止当前 Supervisor 后执行 `uv run python -m service_supervisor`；`restart.mode=services`：仅重启清单列出的服务。
 5. 逐条完成 `verification` 命令和健康检查。
 
+当发布包含 Django 数据迁移时，发布清单必须声明 `database=migrate` 与 `restart.mode=supervisor`。若发布不新增一次性 Job 或长期 Worker，应明确将 `once_jobs` 置为空并沿用既有 Supervisor 服务；执行 `migrate` 后重启既有 Supervisor 即可加载 Web 与 Worker 的同一套代码。
+
 完成后，以计划的 `to_version` 运行确认命令，并且只传入计划实际要求的 `--confirm-*` 参数：
 
 ```bash
