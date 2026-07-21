@@ -9,7 +9,11 @@
 
 ### 打包
 
-打包代码时排除整个 `runtime/`，避免携带部署密钥、数据库、锁或生成的静态文件。
+常规部署从与 `v<version>` 对应的 GitHub Release 下载 `wechat-content-operations-<version>-src.zip` 及其 `.sha256` 校验文件，不手工从工作区打包。源码 ZIP 由发布 tag 生成，只包含 Git 跟踪文件，并在上传前拒绝包含整个 `runtime/`；因此不会携带部署密钥、数据库、锁或生成的静态文件。
+
+下载后的校验、解压、`runtime/` 初始化与锁定依赖安装见[发布与多端升级](release-and-upgrade.md#下载与验证-release-源码包)。首次使用某个自动 Release 时，必须完成文档列出的 SHA-256、`uv sync --locked --all-groups` 与 `validate_releases --require-current-tag` 最小验证。
+
+只有在 GitHub Release 和工作流均不可用的受控故障恢复中，才允许本地打包；该包不应被标记为正式 Release 附件。打包代码时排除整个 `runtime/`：
 
 macOS/Linux：
 

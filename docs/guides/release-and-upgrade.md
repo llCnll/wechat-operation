@@ -44,7 +44,9 @@ git commit -m "release: prepare v<version>"
 git push origin <发布分支>
 ```
 
-通过 Pull Request 合并到受保护的 `main` 后，`Release protocol` 工作流会创建 `v<version>`；若同名 tag 已存在，工作流会确认它仍指向当前提交。不得移动、删除或复用已发布 tag；修复必须递增版本并新增清单。
+通过 Pull Request 合并到受保护的 `main` 后，`Release protocol` 工作流会创建 `v<version>`，并从该 tag 生成 `wechat-content-operations-<version>-src.zip` 及同名 `.sha256` 文件，作为同名 GitHub Release 的附件发布。若同名 tag 已存在，工作流会确认它仍指向当前提交；若 Release 附件已存在，工作流只接受与当前 tag 重建结果字节一致的附件，绝不覆盖不一致附件。不得移动、删除或复用已发布 tag；修复必须递增版本并新增清单。
+
+源码 ZIP 是本服务的部署源码交付物；GitHub Packages 不承担该职责，因此 Packages 页面为空是正常状态。
 
 仅在工作流不可用的紧急情形，才人工创建 tag：
 
@@ -53,6 +55,38 @@ git tag -a v<version> -m "Release v<version>"
 uv run python manage.py validate_releases --require-current-tag
 git push origin main --follow-tags
 ```
+
+此紧急命令只恢复 tag，不会自动创建源码 Release 附件。恢复工作流后必须从同一 `main` 提交重跑；在此之前不存在正式的 Release 源码交付物。不得用其他提交或本地工作区替代该 tag 打包。
+
+## 下载与验证 Release 源码包
+
+从 `v<version>` 对应的 GitHub Release 下载以下两个附件：
+
+- `wechat-content-operations-<version>-src.zip`
+- `wechat-content-operations-<version>-src.zip.sha256`
+
+macOS/Linux 校验后解压：
+
+```bash
+sha256sum -c wechat-content-operations-<version>-src.zip.sha256
+unzip wechat-content-operations-<version>-src.zip
+cd wechat-content-operations-<version>
+mkdir runtime
+cp .env.example runtime/.env
+uv sync --locked --all-groups
+uv run python manage.py validate_releases --require-current-tag
+```
+
+Windows PowerShell 校验：
+
+```powershell
+$expected = (Get-Content wechat-content-operations-<version>-src.zip.sha256).Split()[0]
+$actual = (Get-FileHash wechat-content-operations-<version>-src.zip -Algorithm SHA256).Hash.ToLower()
+if ($actual -ne $expected) { throw '源码包 SHA-256 校验失败' }
+Expand-Archive wechat-content-operations-<version>-src.zip -DestinationPath .
+```
+
+解压后在版本目录创建 `runtime/`，复制 `.env.example` 为 `runtime/.env`，再运行锁定依赖安装和上述发布协议校验。随后按本手册的端点升级步骤执行；源码包不能替代迁移、一次性 Job、重启或 `upgrade_ack`。
 
 ## 端点升级
 
@@ -89,4 +123,4 @@ uv run python manage.py upgrade_init 1.1.1 --confirmed
 
 ## 最小验证
 
-发布前最小验证是 `validate_releases` 与 `tests/test_release_protocol.py` 均通过。端点升级后最小验证是：`upgrade_plan --json` 显示无待处理操作、`upgrade_ack` 成功、`/healthz` 返回 `{"status": "ok"}`；涉及一次性 Job 时还须确认其 `complete=true`。
+发布前最小验证是 `validate_releases`、`tests/test_release_protocol.py` 与 `tests/test_release_source_archive.py` 均通过。首次启用源码 Release 的版本还必须下载两个附件，完成 SHA-256 校验、解压后的 `uv sync --locked --all-groups` 与 `validate_releases --require-current-tag`。端点升级后最小验证是：`upgrade_plan --json` 显示无待处理操作、`upgrade_ack` 成功、`/healthz` 返回 `{"status": "ok"}`；涉及一次性 Job 时还须确认其 `complete=true`。
