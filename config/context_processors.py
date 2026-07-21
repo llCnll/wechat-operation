@@ -16,6 +16,7 @@ MANAGED_SERVICE_NAMES = (
     "scheduler",
     "ingestion",
     "backfill_ingestion",
+    "metric_sync",
     "review",
     "video_extraction",
     "ai_moderation",
@@ -233,6 +234,19 @@ def admin_console_overview(request):
             ),
         ),
     )
+    pipeline.append(
+        _pipeline_node(
+            "metric_sync",
+            "指标快照 Worker",
+            bool(services["metric_sync"]["running"]),
+            "启动指标快照 Worker",
+            _service_reason(services["metric_sync"]),
+            checked_at,
+            service="metric_sync",
+            running=bool(services["metric_sync"]["running"]),
+            description="受控 Chrome 登录后读取每日粉丝和周度运营效果，只保存聚合指标快照。",
+        )
+    )
     pipeline.extend(
         (
             _pipeline_node(
@@ -327,7 +341,7 @@ def admin_console_overview(request):
             ),
         )
     )
-    core_keys = {"web", "policy", "ai", "cdp", "scheduler", "ingestion", "review"}
+    core_keys = {"web", "policy", "ai", "cdp", "scheduler", "ingestion", "metric_sync", "review"}
     first_blocked = next(
         (node for node in pipeline if node["key"] in core_keys and not node["ready"]), None
     )

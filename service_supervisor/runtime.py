@@ -140,6 +140,7 @@ def write_worker_heartbeat() -> None:
             "scheduler",
             "ingestion",
             "backfill_ingestion",
+            "metric_sync",
             "review",
             "video_extraction",
             "ai_moderation",

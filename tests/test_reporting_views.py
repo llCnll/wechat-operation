@@ -39,12 +39,17 @@ def test_live_operations_analysis_defaults_to_seven_days_and_does_not_create_job
     page = response.content.decode()
     assert response.status_code == 200
     assert "运营分析" in page
-    assert "实时读取当前帖子、审核与互动数据" in page
+    assert "运营指标工作台" in page
+    assert "统计周期" in page
+    assert "影响整个工作台" in page
+    assert "每日运营指标" in page
+    assert "游戏圈活跃用户" in page
+    assert "非留存率" in page
     end_date = timezone.localdate()
     start_date = end_date - timedelta(days=6)
     assert f'value="{start_date.isoformat()}"' in page
     assert f'value="{end_date.isoformat()}"' in page
-    assert "每帖仅取最新互动快照" in page
+    assert "刷新帖子互动" in page
     assert "generate_daily_report" not in page
     assert "CSV" not in page
     assert BackgroundJob.objects.count() == jobs_before
@@ -80,7 +85,8 @@ def test_live_operations_analysis_scopes_the_selected_range_and_game():
 
     page = response.content.decode()
     assert response.status_code == 200
-    assert "转发排除 1" in page
+    assert "转发排除" in page
+    assert "<dd>1</dd>" in page
     assert 'value="wx-report-game" selected' in page
 
 

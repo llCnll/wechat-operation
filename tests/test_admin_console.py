@@ -44,6 +44,7 @@ def test_admin_home_is_configuration_and_traceability_console(admin_client):
     assert "初始化与运行状态" in page
     assert "自动调度器" in page
     assert "帖子采集 Worker" in page
+    assert "指标快照 Worker" in page
     assert "AI 审核 Worker" in page
     assert "配置 AI 审核" in page
     assert "配置 OCR" in page
@@ -78,6 +79,7 @@ def test_admin_pipeline_follows_the_content_flow(admin_client):
         "cdp",
         "scheduler",
         "ingestion",
+        "metric_sync",
         "ocr",
         "video_extraction",
         "ai",

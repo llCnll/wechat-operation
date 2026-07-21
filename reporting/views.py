@@ -13,6 +13,7 @@ from django.views.decorators.http import require_POST
 from posts.game_catalog import active_game_appid, managed_game_options
 from posts.ingestion_jobs import enqueue_metrics_refresh_window, latest_metrics_refresh_job
 
+from .metric_workspace import WorkspacePreferences, build_metric_workspace
 from .services import (
     analysis_datetime_range,
     build_live_operations_analysis,
@@ -41,14 +42,23 @@ def _analysis_query(*, start_day: date, end_day: date, appid: str) -> str:
     )
 
 
-def _quick_ranges(today: date) -> tuple[dict[str, date | str], ...]:
-    default_start, default_end = default_analysis_date_range(today)
-    yesterday = today - timedelta(days=1)
-    return (
-        {"label": "今天", "start_date": today, "end_date": today},
-        {"label": "昨天", "start_date": yesterday, "end_date": yesterday},
-        {"label": "近 7 天", "start_date": default_start, "end_date": default_end},
-        {"label": "近 30 天", "start_date": today - timedelta(days=29), "end_date": today},
+def _quick_ranges(
+    today: date, selected_start: date, selected_end: date
+) -> tuple[dict[str, date | str | bool], ...]:
+    data_day = today - timedelta(days=1)
+    ranges = (
+        ("昨天", data_day, data_day),
+        ("近 7 天", data_day - timedelta(days=6), data_day),
+        ("近 30 天", data_day - timedelta(days=29), data_day),
+    )
+    return tuple(
+        {
+            "label": label,
+            "start_date": start_day,
+            "end_date": end_day,
+            "active": (start_day, end_day) == (selected_start, selected_end),
+        }
+        for label, start_day, end_day in ranges
     )
 
 
@@ -60,18 +70,33 @@ def live_operations_analysis(request):
     appid = active_game_appid(request.GET.get("appid", "").strip(), persist_default=False)
     games = managed_game_options(persist_default=False)
     start_at, end_at = analysis_datetime_range(start_day, end_day)
+    analysis = build_live_operations_analysis(start_day, end_day, appid)
+    workspace_preferences = WorkspacePreferences.from_query(
+        fans_view=request.GET.get("fans_view", ""),
+        daily_view=request.GET.get("daily_view", ""),
+        daily_metrics=",".join(
+            request.GET.getlist("daily_metrics") or [request.GET.get("daily_metric", "")]
+        ),
+        daily_scale=request.GET.get("daily_scale", ""),
+    )
     return render(
         request,
         "reporting/live_operations_analysis.html",
         {
-            "analysis": build_live_operations_analysis(start_day, end_day, appid),
+            "analysis": analysis,
+            "metric_workspace": build_metric_workspace(
+                start_day=start_day,
+                end_day=end_day,
+                appid=appid,
+                preferences=workspace_preferences,
+            ),
             "start_date": start_day,
             "end_date": end_day,
             "range_error": range_error,
             "appid": appid,
             "managed_games": games,
             "active_game": next((game for game in games if game.appid == appid), None),
-            "quick_ranges": _quick_ranges(timezone.localdate()),
+            "quick_ranges": _quick_ranges(timezone.localdate(), start_day, end_day),
             "metrics_refresh_job": latest_metrics_refresh_job(
                 appid=appid,
                 start_time=int(start_at.timestamp()),

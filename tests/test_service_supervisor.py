@@ -53,6 +53,7 @@ def test_supervisor_control_server_requires_token_and_reports_status(tmp_path):
             "scheduler",
             "ingestion",
             "backfill_ingestion",
+            "metric_sync",
             "review",
             "video_extraction",
             "ai_moderation",

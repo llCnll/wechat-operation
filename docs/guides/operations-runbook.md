@@ -2,7 +2,7 @@
 
 ## 部署边界
 
-- 日常只启动一个 `uv run python -m service_supervisor`。Supervisor 是 Web、Scheduler、实时采集 Worker、人工补采 Worker 与 AI Worker 的唯一进程所有者；它使用独占文件锁防止第二个实例接管同一运行态。
+- 日常只启动一个 `uv run python -m service_supervisor`。Supervisor 是 Web、Scheduler、实时采集 Worker、人工补采 Worker、指标快照 Worker 与 AI Worker 的唯一进程所有者；它使用独占文件锁防止第二个实例接管同一运行态。
 - 所有可变运行态均位于 `runtime/`：`runtime/.env`、`runtime/operations.sqlite3`、收集后的 `runtime/static/`、`runtime/worker-locks/`、`runtime/supervisor/` 与日志。`runtime/supervisor/` 包含控制令牌、服务状态、心跳和日志，代码包和版本控制均应排除整个目录。
 - 数据库位于 `runtime/operations.sqlite3`。离线文件备份前必须停止 Web、Scheduler、实时采集 Worker、人工补采 Worker、AI Worker 和 AI 自动处置 Worker，再复制数据库文件及可能存在的 `-wal`、`-shm` 文件；只停止 Worker 不能保证没有 Web 写入。
 - 首次部署在启动 Supervisor 前，执行 Agent 必须手工运行 `uv run python manage.py migrate` 和 `uv run python manage.py createsuperuser`；不得记录管理员密码。后续迁移、静态资源收集和默认策略检查由 Supervisor 幂等执行。
@@ -65,7 +65,7 @@ uv run python manage.py enqueue_author_mute_status_backfill
 
 ## 任务恢复
 
-- `run_scheduler` 只创建任务，不认领业务任务；`run_realtime_ingestion_worker` 认领 `SCHEDULED_INGEST_WINDOW` 与 `STATUS_SYNC`，`run_backfill_ingestion_worker` 认领 `MANUAL_INGEST_WINDOW`、`METRICS_REFRESH_WINDOW`、`AUTHOR_MUTE_STATUS_BACKFILL` 和历史 `INGEST_WINDOW`，`run_review_worker` 只认领 OCR/AI 任务，`run_video_extraction_worker` 只认领 `VIDEO_EXTRACT`；采集任务可从 checkpoint 继续。它们由 Supervisor 统一启停，页面不执行任意系统命令。`run_ingestion_worker` 保留为实时命令的兼容别名。
+- `run_scheduler` 只创建任务，不认领业务任务；`run_realtime_ingestion_worker` 认领 `SCHEDULED_INGEST_WINDOW` 与 `STATUS_SYNC`，`run_backfill_ingestion_worker` 认领 `MANUAL_INGEST_WINDOW`、`METRICS_REFRESH_WINDOW`、`AUTHOR_MUTE_STATUS_BACKFILL` 和历史 `INGEST_WINDOW`，`run_metric_worker` 认领 `METRIC_DAILY_SYNC`、`METRIC_WEEKLY_SYNC` 与 `METRIC_BACKFILL`，`run_review_worker` 只认领 OCR/AI 任务，`run_video_extraction_worker` 只认领 `VIDEO_EXTRACT`；采集任务可从 checkpoint 继续。它们由 Supervisor 统一启停，页面不执行任意系统命令。`run_ingestion_worker` 保留为实时命令的兼容别名。
 - 视频 Worker 默认关闭。工具安装、受控样本预检、ASR 降级和停止/回滚步骤见[视频审核手册](video-review-runbook.md)。失败时保持关闭，视频任务记录脱敏状态并进入重点人工核验。
 - SQLite 中每个 Worker 职责都只能运行一个实例。实时采集和人工补采分别串行处理所属任务：长时间历史补采或范围互动刷新不会使后续 15 分钟采集、状态巡检积压。AI 审核 Worker 独立消费 OCR/AI 队列，不会被任一采集队列阻塞。
 - 任务生产者为：自动调度器创建 `SCHEDULED_INGEST_WINDOW` 与 `STATUS_SYNC`；系统配置首页“帖子采集 Worker”的“创建历史补采”创建 `MANUAL_INGEST_WINDOW`；运营分析页创建 `METRICS_REFRESH_WINDOW`；`enqueue_author_mute_status_backfill` 仅创建一次性 `AUTHOR_MUTE_STATUS_BACKFILL`；原创帖采集、单帖刷新和人工重新评估创建 `OCR_EXTRACT` 与 `AI_EVALUATE`。`enqueue_ingestion` 仅保留为故障诊断入口。完整生产/消费图见[系统总览](system-overview.md#运行架构与任务流)。
@@ -90,7 +90,7 @@ AI 自动沉底或屏蔽成功后，运营人员必须在内容管理的“AI �
 
 自动调度只覆盖城主别慌张（`wx6d2454a8afcd9706`）。在系统配置 Pipeline 启动 Scheduler；它由 Supervisor 托管，不应另行执行常驻 Scheduler 命令。
 
-它按北京时间每 15 分钟时间桶先入队一项最多回读 20 条待审核帖的状态巡检，再入队最近 30 分钟的 `SCHEDULED_INGEST_WINDOW`。Scheduler 不连接 CDP、不读取登录态、不执行 AI 或上游写操作，必须保持实时采集 Worker 和 AI Worker 运行以消费任务。`--once` 仅用于排障或验证当前时间桶；不再配置 cron 或 `launchd`。
+它按北京时间每 15 分钟时间桶先入队一项最多回读 20 条待审核帖的状态巡检，再入队最近 30 分钟的 `SCHEDULED_INGEST_WINDOW`；每日 07:30 后还会创建前一日为主、复核近三日的 `METRIC_DAILY_SYNC`，周一 17:30 后创建已完成周为主、复核近三周的 `METRIC_WEEKLY_SYNC`。Scheduler 不连接 CDP、不读取登录态、不执行 AI 或上游写操作，必须保持实时采集 Worker、指标快照 Worker 和 AI Worker 运行以消费任务。`--once` 仅用于排障或验证当前时间桶；不再配置 cron 或 `launchd`。
 
 同一时间桶的重复检查会复用已有任务，但 SQLite 部署仍只能运行一个 Scheduler Worker。可通过服务日志检查 AppID、窗口和任务编号。
 

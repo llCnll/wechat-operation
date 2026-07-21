@@ -33,7 +33,7 @@ flowchart LR
 
 ## 运行架构与任务流
 
-日常只启动 Supervisor。它托管一个 Web、一个自动调度器、一个实时采集 Worker、一个人工补采 Worker、一个 AI 审核 Worker、一个可选视频提取 Worker 和一个默认停止的 AI 自动处置 Worker；各 Worker 职责严格分离。SQLite 部署不允许启动同一 Worker 职责的第二个实例。
+日常只启动 Supervisor。它托管一个 Web、一个自动调度器、一个实时采集 Worker、一个人工补采 Worker、一个指标快照 Worker、一个 AI 审核 Worker、一个可选视频提取 Worker 和一个默认停止的 AI 自动处置 Worker；各 Worker 职责严格分离。SQLite 部署不允许启动同一 Worker 职责的第二个实例。
 
 ```mermaid
 flowchart LR
@@ -79,6 +79,7 @@ flowchart LR
 | 自动调度器（Supervisor 服务 `scheduler`） | 1 | 每 15 分钟创建最近 30 分钟的采集任务和一项最多 20 条待审核帖的状态巡检任务。 | 不连接 CDP、不读取微信、不调用 AI、不消费任务。 |
 | 实时采集 Worker（Supervisor 服务 `ingestion`） | 1 | 消费自动采集与状态巡检任务；通过 CDP 读取微信并写入帖子、状态与互动快照；原创帖入库后创建 OCR/AI 任务。 | 不消费人工补采、范围互动刷新或旧采集任务；不调用 AI，不执行上游写处置。 |
 | 人工补采 Worker（Supervisor 服务 `backfill_ingestion`） | 1 | 消费人工历史补采、范围互动刷新和旧 `INGEST_WINDOW` 任务；复用相同的 CDP 分页与 checkpoint 逻辑。 | 不消费 Scheduler 创建的实时任务；不调用 AI，不执行上游写处置。 |
+| 指标快照 Worker（Supervisor 服务 `metric_sync`） | 1 | 消费每日游戏圈粉丝、周度运营效果与人工历史指标任务；仅保存白名单聚合快照。 | 不消费帖子任务；未登录时等待扫码，不保存 Cookie、token 或原始响应。 |
 | AI 审核 Worker（Supervisor 服务 `review`） | 1 | 串行消费 OCR 与 AI 评估任务，写入 OCR、风险证据、审核建议和本地草案。 | 不创建定时任务，不直接读取微信，不执行上游写处置。 |
 | AI 自动处置 Worker（Supervisor 服务 `ai_moderation`） | 1 | 仅消费已授权 AI 结论创建的自动沉底/屏蔽任务，写前后回读并建立事后复审记录。 | 不处理 OCR/AI 评估；不处理禁言、恢复、回复或未授权结论。 |
 | 视频提取 Worker（Supervisor 服务 `video_extraction`） | 1 | 可选地消费 `VIDEO_EXTRACT`，在本机临时目录提取视频时间证据。 | 不使用 CDP Cookie，不保存视频/帧/音频，不向模型传视频 URL 或二维码目标。 |
@@ -91,6 +92,7 @@ flowchart LR
 | --- | --- | --- | --- |
 | `SCHEDULED_INGEST_WINDOW` | 自动调度器。 | 实时采集 Worker | 按 AppID、时间窗口和页大小断点拉取候选帖，判定原创/转发并保存帖子、媒体、投票和互动数据。每页更新 checkpoint。 |
 | `STATUS_SYNC` | 自动调度器。 | 实时采集 Worker | 每 15 分钟回读最多 20 条最久未更新的待审核原创帖，只更新上游状态和互动快照，不修改本地审核结论。 |
+| `METRIC_DAILY_SYNC` / `METRIC_WEEKLY_SYNC` / `METRIC_BACKFILL` | 自动调度器或人工回填。 | 指标快照 Worker | 每日 07:30 后同步昨天并复核近期日窗口；周一 17:30 后同步已完成周并复核近期周窗口；同一快照按业务键更新。 |
 | `MANUAL_INGEST_WINDOW` | 系统配置首页“创建历史补采”。 | 人工补采 Worker | 按选定可管理游戏和最近小时数断点拉取候选帖；不会阻塞自动采集。`enqueue_ingestion` 仅用于诊断。 |
 | `METRICS_REFRESH_WINDOW` | 运营分析页“刷新本范围数据”。 | 人工补采 Worker | 仅按当前时间范围内已入库原创帖的 `topic_id` 回读浏览、点赞、评论和分享；不采集转发帖，不更新正文或状态。 |
 | `INGEST_WINDOW` | 升级前历史存量。 | 人工补采 Worker | 兼容旧采集窗口及其已有 checkpoint；新代码不再创建此类型。 |

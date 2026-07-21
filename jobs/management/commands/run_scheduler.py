@@ -9,6 +9,7 @@ from posts.ingestion_jobs import (
     enqueue_scheduled_jobs,
     scheduled_ingestion_window,
 )
+from reporting.metric_jobs import enqueue_due_metric_jobs
 from service_supervisor.runtime import write_worker_heartbeat
 
 
@@ -37,6 +38,7 @@ class Command(BaseCommand):
         try:
             window = scheduled_ingestion_window(now)
             scheduled = enqueue_scheduled_jobs(now)
+            metrics = enqueue_due_metric_jobs(now)
         except ValueError as exc:
             raise CommandError(str(exc)) from exc
         start_at = datetime.fromtimestamp(window.start_time, tz=SHANGHAI)
@@ -53,3 +55,14 @@ class Command(BaseCommand):
             f"待审核帖子状态巡检 {status_outcome}："
             f"appid=wx6d2454a8afcd9706，批量=20，任务={scheduled.status_sync.job.pk}。"
         )
+        if metrics.daily:
+            created = sum(result.created for result in metrics.daily)
+            self.stdout.write(
+                f"每日指标同步：{created} 个已创建，{len(metrics.daily) - created} 个已存在。"
+            )
+        if metrics.weekly:
+            created = sum(result.created for result in metrics.weekly)
+            self.stdout.write(
+                f"周度运营效果同步：{created} 个已创建，"
+                f"{len(metrics.weekly) - created} 个已存在。"
+            )

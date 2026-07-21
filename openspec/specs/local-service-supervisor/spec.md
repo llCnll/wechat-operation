@@ -5,21 +5,22 @@
 ## Requirements
 
 ### Requirement: Supervisor 启动与服务所有权
-系统 SHALL 提供独立于 Django Web 的本机 Supervisor 入口，作为 `web`、`scheduler`、`ingestion`、`backfill_ingestion` 与 `review` 五个固定服务的唯一进程所有者。`ingestion` SHALL 运行实时采集 Worker，`backfill_ingestion` SHALL 运行人工补采 Worker。Supervisor SHALL 在启动时创建所需运行态目录，执行幂等迁移、静态资源收集和默认策略初始化预检，然后启动 Web 并等待健康检查成功。
+系统 SHALL 提供独立于 Django Web 的本机 Supervisor 入口，作为 `web`、`scheduler`、`ingestion`、`backfill_ingestion`、`metric_sync` 与 `review` 六个固定服务的唯一进程所有者。`ingestion` SHALL 运行实时采集 Worker，`backfill_ingestion` SHALL 运行人工补采 Worker，`metric_sync` SHALL 运行固定的指标同步管理命令。Supervisor SHALL 在启动时创建所需运行态目录，执行幂等迁移、静态资源收集和默认策略初始化预检，然后启动 Web 并等待健康检查成功；日常部署 MUST 通过 Supervisor 启动和控制指标同步服务。
 
 #### Scenario: 首次或日常启动 Supervisor
 - **WHEN** 运营人员启动 Supervisor 且预检成功
 - **THEN** Supervisor SHALL 启动 Web 服务并在健康检查成功后报告可访问状态，且不得要求运营人员另行执行 Web 启动命令
+- **THEN** 它 SHALL 按期望状态启动 `metric_sync`，且不得要求运营人员另行执行指标 Worker 命令
 
 #### Scenario: 启动预检失败
 - **WHEN** 迁移、静态资源收集或默认策略初始化失败
 - **THEN** Supervisor SHALL 记录脱敏阶段错误并以非成功状态退出，且 MUST NOT 启动 Web 或任一 Worker
 
 ### Requirement: 固定服务的受限生命周期控制
-Supervisor SHALL 使用跨平台独占运行态文件锁保证同一部署仅有一个实例。`web` 仅接受 `status`、日志读取和延迟 `restart`；`scheduler`、`ingestion`、`backfill_ingestion` 与 `review` 接受 `start`、`stop`、`restart`、`status` 和日志读取操作。Supervisor SHALL 使用固定的受管 Python 与管理命令启动服务，且 MUST NOT 接受浏览器、数据库或配置文件提供的任意可执行命令、参数、路径或 PID。
+Supervisor SHALL 使用跨平台独占运行态文件锁保证同一部署仅有一个实例。`web` 仅接受 `status`、日志读取和延迟 `restart`；`scheduler`、`ingestion`、`backfill_ingestion`、`metric_sync` 与 `review` 接受 `start`、`stop`、`restart`、`status` 和日志读取操作。Supervisor SHALL 使用固定的受管 Python 与管理命令启动服务，且 MUST NOT 接受浏览器、数据库或配置文件提供的任意可执行命令、参数、路径或 PID。
 
 #### Scenario: 启动已配置的 Worker
-- **WHEN** Supervisor 收到对已停止的 `scheduler`、`ingestion`、`backfill_ingestion` 或 `review` 的启动请求
+- **WHEN** Supervisor 收到对已停止的 `scheduler`、`ingestion`、`backfill_ingestion`、`metric_sync` 或 `review` 的启动请求
 - **THEN** Supervisor SHALL 只启动对应固定 Worker 命令，并记录该服务为期望运行状态
 
 #### Scenario: 已有 Supervisor 正在运行
@@ -29,6 +30,10 @@ Supervisor SHALL 使用跨平台独占运行态文件锁保证同一部署仅有
 #### Scenario: 拒绝未知服务或操作
 - **WHEN** 请求包含未注册服务名或未注册操作
 - **THEN** Supervisor SHALL 拒绝请求、记录不含敏感数据的错误，并不得创建或终止任何进程
+
+#### Scenario: 指标 Worker 优雅停止
+- **WHEN** Supervisor 停止或重启 `metric_sync`
+- **THEN** 它 SHALL 使用既有优雅终止和 checkpoint 恢复机制；中断的指标任务 SHALL 保留业务日期和检查点
 
 ### Requirement: 服务状态、日志与恢复
 Supervisor SHALL 在 `runtime/supervisor/` 持久化每个托管服务的期望状态、PID、创建时间、最近退出码、启动次数、心跳和日志位置。Supervisor 重启后 SHALL 恢复 Web 以及此前期望运行的 Worker；日志 SHALL 与 Web 进程生命周期解耦。

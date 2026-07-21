@@ -1,0 +1,142 @@
+"""Metric job creation and Shanghai-time scheduling helpers."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import date, datetime, timedelta
+from uuid import uuid4
+
+from django.db import transaction
+from django.utils import timezone
+
+from jobs.models import BackgroundJob, JobStatus
+from jobs.services import EnqueueResult, enqueue_job_with_result
+from posts.ingestion_jobs import SHANGHAI
+
+from .models import MetricJobLease, MetricSource
+from .weekly_schedule import WeeklyReleasePhase, WeeklyReleaseSchedule
+
+METRIC_DAILY_SYNC_TASK = "METRIC_DAILY_SYNC"
+METRIC_WEEKLY_SYNC_TASK = "METRIC_WEEKLY_SYNC"
+METRIC_BACKFILL_TASK = "METRIC_BACKFILL"
+METRIC_APPID = "wx6d2454a8afcd9706"
+DAILY_RECHECK_DAYS = 3
+WEEKLY_RECHECK_WEEKS = 3
+METRIC_MAX_RETRIES = 3
+DAILY_METRIC_SOURCES = (
+    MetricSource.CIRCLE_FANS_DAILY,
+    MetricSource.GROUP_CONSUME_DAILY,
+    MetricSource.GROUP_PUBLISH_DAILY,
+    MetricSource.GROUP_SHARE_DAILY,
+    MetricSource.GROUP_RETAIN_DAILY,
+)
+
+
+@dataclass(frozen=True)
+class MetricScheduleResult:
+    daily: tuple[EnqueueResult, ...]
+    weekly: tuple[EnqueueResult, ...]
+
+
+def _day_code(value: date) -> int:
+    return int(value.strftime("%Y%m%d"))
+
+
+def _daily_parameters(*, run_day: date, source: MetricSource) -> dict[str, object]:
+    start_day = run_day - timedelta(days=DAILY_RECHECK_DAYS - 1)
+    return {
+        "appid": METRIC_APPID,
+        "source": source,
+        "start_ds": _day_code(start_day),
+        "end_ds": _day_code(run_day),
+        "business_day": _day_code(run_day),
+    }
+
+
+def enqueue_daily_metric_sync(run_day: date) -> tuple[EnqueueResult, ...]:
+    """Schedule every enabled daily domain under its own stable time bucket."""
+    return tuple(
+        enqueue_job_with_result(
+            task_type=METRIC_DAILY_SYNC_TASK,
+            idempotency_key=f"metric-daily:{METRIC_APPID}:{source}:{run_day.isoformat()}",
+            parameter_summary=_daily_parameters(run_day=run_day, source=source),
+            max_retries=METRIC_MAX_RETRIES,
+        )
+        for source in DAILY_METRIC_SOURCES
+    )
+
+
+def enqueue_weekly_metric_sync(
+    *, business_week_start: date, phase: WeeklyReleasePhase
+) -> EnqueueResult:
+    start_day = business_week_start - timedelta(days=7 * (WEEKLY_RECHECK_WEEKS - 1))
+    parameters = {
+        "appid": METRIC_APPID,
+        "source": MetricSource.OPERATION_EFFECT_WEEKLY,
+        "start_ds": _day_code(start_day),
+        "end_ds": _day_code(business_week_start + timedelta(days=6)),
+        "business_week_start": _day_code(business_week_start),
+        "release_phase": phase.key,
+    }
+    return enqueue_job_with_result(
+        task_type=METRIC_WEEKLY_SYNC_TASK,
+        idempotency_key=f"metric-weekly:{METRIC_APPID}:{business_week_start.isoformat()}:{phase.key}",
+        parameter_summary=parameters,
+        max_retries=METRIC_MAX_RETRIES,
+    )
+
+
+def _backfill_dedupe_key(*, source: MetricSource, start_day: date, end_day: date) -> str:
+    return f"metric-backfill:{METRIC_APPID}:{source}:{start_day.isoformat()}:{end_day.isoformat()}"
+
+
+def enqueue_metric_backfill(*, source: str, start_day: date, end_day: date) -> EnqueueResult:
+    """Reuse only a currently active manual range; terminal runs create a new batch."""
+    if start_day > end_day:
+        raise ValueError("指标回填范围无效")
+    normalized_source = MetricSource(source)
+    if normalized_source == MetricSource.CONTENT_FANS_DAILY:
+        raise ValueError("内容粉丝当前未完成权限与字段验证，禁止创建采集任务")
+    parameters = {
+        "appid": METRIC_APPID,
+        "source": normalized_source,
+        "start_ds": _day_code(start_day),
+        "end_ds": _day_code(end_day),
+    }
+    dedupe_key = _backfill_dedupe_key(
+        source=normalized_source,
+        start_day=start_day,
+        end_day=end_day,
+    )
+    with transaction.atomic():
+        lease, _ = MetricJobLease.objects.get_or_create(dedupe_key=dedupe_key)
+        lease = MetricJobLease.objects.select_for_update().get(pk=lease.pk)
+        if lease.active_job_id is not None:
+            active_job = BackgroundJob.objects.select_for_update().get(pk=lease.active_job_id)
+            if active_job.status in (JobStatus.PENDING, JobStatus.RUNNING):
+                return EnqueueResult(active_job, False)
+        job = BackgroundJob.objects.create(
+            task_type=METRIC_BACKFILL_TASK,
+            idempotency_key=f"{dedupe_key}:{uuid4().hex}",
+            parameter_summary=parameters,
+            max_retries=METRIC_MAX_RETRIES,
+        )
+        lease.active_job = job
+        lease.save(update_fields=["active_job", "updated_at"])
+    return EnqueueResult(job, True)
+
+
+def enqueue_due_metric_jobs(now: datetime | None = None) -> MetricScheduleResult:
+    local_now = (now or timezone.now()).astimezone(SHANGHAI)
+    daily: tuple[EnqueueResult, ...] = ()
+    weekly: tuple[EnqueueResult, ...] = ()
+    if (local_now.hour, local_now.minute) >= (7, 30):
+        daily = enqueue_daily_metric_sync(local_now.date() - timedelta(days=1))
+    weekly = tuple(
+        enqueue_weekly_metric_sync(
+            business_week_start=plan.business_week_start,
+            phase=plan.phase,
+        )
+        for plan in WeeklyReleaseSchedule.due_plans(local_now)
+    )
+    return MetricScheduleResult(daily=daily, weekly=weekly)

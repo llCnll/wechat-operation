@@ -25,6 +25,9 @@
 ### 上游接口调研
 
 - [微信小游戏圈帖子管理调研](research/wechat-game-circle-original-posts-research.md)：已验证的原平台读取、处置与状态回读契约。
+- [微信小游戏圈首页指标接口调研](research/wechat-game-circle-home-metrics-research.md)：首页概览、详细数据的字段映射、会话边界与最小验证方式。
+- [微信小游戏圈每日指标接口调研](research/wechat-game-circle-daily-metrics-research.md)：内容粉丝、游戏圈粉丝的历史查询能力、字段映射与保存边界。
+- [微信小游戏圈数据分析接口调研](research/wechat-game-circle-data-analysis-research.md)：内容消费、创作、分享、留存的范围查询，以及排名、能力卡和配置接口。
 - [微信公众平台二维码登录调研](research/wechat-mp-qr-login-research.md)：登录页、二维码资源与登录后游戏目录的已验证边界。
 
 ## 建议阅读路径

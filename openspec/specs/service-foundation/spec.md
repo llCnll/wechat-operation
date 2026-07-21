@@ -23,15 +23,15 @@
 - **THEN** 系统 SHALL 能在缺少 `runtime/` 的代码包中初始化该目录，并从 `runtime/.env` 读取运行时配置，而不得将数据库、密钥、Supervisor 凭据、锁文件或日志混入代码目录
 
 ### Requirement: SQLite 部署边界与专用 Worker
-系统 SHALL 在首期使用启用 WAL 模式、外键约束和 busy timeout 的 SQLite，并由本机 Supervisor 托管一个 Web 实例、一个 Scheduler Worker、一个实时采集 Worker、一个人工补采 Worker 与一个 AI 审核 Worker。四个 Worker SHALL 按职责隔离；SQLite 写入阶段会串行化，同一职责 SHALL NOT 启动多个实例。日常部署 MUST 通过 Supervisor 启动和控制这些服务；直接管理命令仅用于开发或故障诊断。
+系统 SHALL 在首期使用启用 WAL 模式、外键约束和 busy timeout 的 SQLite，并由本机 Supervisor 托管一个 Web 实例、一个 Scheduler Worker、一个实时采集 Worker、一个人工补采 Worker、一个指标同步 Worker 与一个 AI 审核 Worker。五个 Worker SHALL 按职责隔离；SQLite 写入阶段会串行化，同一职责 SHALL NOT 启动多个实例。日常部署 MUST 通过 Supervisor 启动和控制这些服务；直接管理命令仅用于开发或故障诊断。
 
 #### Scenario: 初始化数据库
 - **WHEN** 服务初始化新的 SQLite 数据库
 - **THEN** 它 SHALL 在正常处理任务前应用迁移，并配置 WAL 模式、外键约束和已配置的 busy timeout
 
 #### Scenario: 专用 Worker 不互相认领任务
-- **WHEN** Scheduler Worker、实时采集 Worker、人工补采 Worker 与 AI 审核 Worker 同时运行
-- **THEN** Scheduler Worker SHALL 仅创建调度任务而不认领业务任务；实时采集 Worker SHALL 仅认领 `SCHEDULED_INGEST_WINDOW` 与 `STATUS_SYNC`；人工补采 Worker SHALL 仅认领 `MANUAL_INGEST_WINDOW`、`METRICS_REFRESH_WINDOW` 与升级前遗留的 `INGEST_WINDOW`；AI 审核 Worker SHALL 仅认领 OCR 与 AI 评估任务，且不得将另一类任务标记为未注册或失败
+- **WHEN** Scheduler Worker、实时采集 Worker、人工补采 Worker、指标同步 Worker 与 AI 审核 Worker 同时运行
+- **THEN** Scheduler Worker SHALL 仅创建调度任务而不认领业务任务；实时采集 Worker SHALL 仅认领 `SCHEDULED_INGEST_WINDOW` 与 `STATUS_SYNC`；人工补采 Worker SHALL 仅认领 `MANUAL_INGEST_WINDOW`、`METRICS_REFRESH_WINDOW` 与升级前遗留的 `INGEST_WINDOW`；指标同步 Worker SHALL 仅认领 `METRIC_DAILY_SYNC`、`METRIC_WEEKLY_SYNC` 与 `METRIC_BACKFILL`；AI 审核 Worker SHALL 仅认领 OCR 与 AI 评估任务，且不得将另一类任务标记为未注册或失败
 
 #### Scenario: 人工长任务不阻塞自动采集
 - **WHEN** 人工补采 Worker 正在执行历史补采或范围互动刷新，且自动调度器创建新的 15 分钟任务
@@ -42,7 +42,7 @@
 - **THEN** 部署 SHALL 迁移到 PostgreSQL 后再扩展 Worker 实例，而不得在 SQLite 上横向扩容同一类 Worker
 
 ### Requirement: 持久化后台任务执行
-系统 SHALL 在数据库任务表中持久化定时和异步工作，记录任务类型、幂等键、状态、检查点、重试次数、下次执行时间和已脱敏的错误摘要。
+系统 SHALL 在数据库任务表中持久化定时和异步工作，记录任务类型、幂等键、状态、检查点、重试次数、下次执行时间和已脱敏的错误摘要。范围指标 checkpoint SHALL 至少包含来源、日期块、下一页、保存数和最后业务日；指标 Worker SHALL 在页成功落库后推进页码。
 
 #### Scenario: 中断的采集任务恢复
 - **WHEN** 采集任务在保存页检查点后停止
@@ -52,12 +52,24 @@
 - **WHEN** 任务因可重试的外部服务错误失败且仍有重试次数
 - **THEN** Worker SHALL 持久化一个有上限的指数退避下次执行时间，且 SHALL NOT 为相同幂等键创建重复任务
 
+#### Scenario: 指标范围任务中断恢复
+- **WHEN** 指标任务在已完成页后中断
+- **THEN** 后续指标 Worker SHALL 从持久化的下一页和日期块恢复，不得假设单页或重新补齐缺失日期
+
 ### Requirement: 外部服务适配器边界
-系统 SHALL 将原平台、OCR 和 AI 集成隔离在内部适配器接口之后，领域服务 SHALL 使用标准化内部数据传输对象而不是供应商原始响应。
+系统 SHALL 将原平台、OCR 和 AI 集成隔离在内部适配器接口之后，领域服务 SHALL 使用标准化内部数据传输对象而不是供应商原始响应。游戏圈私有只读接口 SHALL 隔离在指标 CDP 适配器中；领域服务 SHALL 只接收 source 特定 DTO 和白名单字段，不得持久化原始响应或认证上下文。
+
+适配器和任务 SHALL 将登录/身份问题、权限或契约问题、传输/限流/5xx 和未知业务码区分处理。仅明确权限和契约错误可直接终态；临时错误 SHALL 按指标规格有限退避。
 
 #### Scenario: 原平台响应字段变化
 - **WHEN** 原平台响应缺少预期字段或具有不兼容结构
 - **THEN** 适配器 SHALL 返回有类型的契约错误，领域服务 SHALL 记录非破坏性的失败或待处理任务状态
+
+#### Scenario: 指标接口字段或临时状态变化
+- **WHEN** 上游缺少必需字段或返回不兼容结构
+- **THEN** 适配器 SHALL 返回契约错误，调用方不得覆盖既有快照
+- **WHEN** 上游限流、5xx、传输失败或返回未知业务码
+- **THEN** 调用方 SHALL 按指标规格退避重试并保留 checkpoint 与脱敏错误类别
 
 ### Requirement: 公众平台只读页面适配器
 系统 SHALL 将公众平台外层页面的只读调用隔离在专用 CDP 适配器中。适配器 SHALL 在当前受控 `mp.weixin.qq.com` 页面上下文内临时使用会话并返回标准化 DTO；它 SHALL NOT 供 scheduler、Worker 或任何上游写操作调用。

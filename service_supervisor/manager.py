@@ -26,6 +26,7 @@ SERVICE_NAMES = (
     "scheduler",
     "ingestion",
     "backfill_ingestion",
+    "metric_sync",
     "review",
     "video_extraction",
     "ai_moderation",
@@ -34,6 +35,7 @@ WORKER_NAMES = (
     "scheduler",
     "ingestion",
     "backfill_ingestion",
+    "metric_sync",
     "review",
     "video_extraction",
     "ai_moderation",
@@ -98,6 +100,11 @@ class Supervisor:
             "backfill_ingestion": ServiceDefinition(
                 "backfill_ingestion",
                 (python, manage, "run_backfill_ingestion_worker", "--loop"),
+                frozenset(("start", "stop", "restart", "status", "logs")),
+            ),
+            "metric_sync": ServiceDefinition(
+                "metric_sync",
+                (python, manage, "run_metric_worker", "--loop"),
                 frozenset(("start", "stop", "restart", "status", "logs")),
             ),
             "review": ServiceDefinition(
