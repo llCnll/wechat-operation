@@ -35,6 +35,17 @@ Supervisor SHALL 使用跨平台独占运行态文件锁保证同一部署仅有
 - **WHEN** Supervisor 停止或重启 `metric_sync`
 - **THEN** 它 SHALL 使用既有优雅终止和 checkpoint 恢复机制；中断的指标任务 SHALL 保留业务日期和检查点
 
+### Requirement: 会话服务的受管生命周期
+
+Supervisor SHALL 将受控浏览器与游戏圈会话服务作为固定受管服务。会话服务只有在受控浏览器可用时才可执行来源会话操作；两者均 SHALL 提供既有的运行态、日志、优雅停止和恢复能力。Supervisor 只可管理自身启动并记录的浏览器进程，不得接管手动浏览器。
+
+会话服务重启后不得复用旧会话或身份材料。其本地调用接口只允许固定业务能力，不得暴露任意浏览器命令、认证材料或完整上游响应。
+
+#### Scenario: 会话 Worker 恢复
+- **WHEN** `game_circle_session` 被停止、重启或 Supervisor 自身恢复
+- **THEN** 它 SHALL 从既有 Job checkpoint/队列状态继续认领探测和刷新任务，并以新 owner epoch 建立会话
+- **THEN** 采集、指标、审核和媒体 Worker 不得接管 CDP、来源身份或会话生命周期
+
 ### Requirement: 服务状态、日志与恢复
 Supervisor SHALL 在 `runtime/supervisor/` 持久化每个托管服务的期望状态、PID、创建时间、最近退出码、启动次数、心跳和日志位置。Supervisor 重启后 SHALL 恢复 Web 以及此前期望运行的 Worker；日志 SHALL 与 Web 进程生命周期解耦。
 

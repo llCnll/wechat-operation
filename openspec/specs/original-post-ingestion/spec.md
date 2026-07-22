@@ -4,8 +4,36 @@
 
 ## Requirements
 
-### Requirement: 城主别慌张的周期性采集入队
-系统 SHALL 为城主别慌张 AppID `wx6d2454a8afcd9706` 创建周期性原创帖子采集任务。每个调度周期 SHALL 创建或取得一个页面大小为 `20` 的 `SCHEDULED_INGEST_WINDOW` 任务，其结束时间 SHALL 为调度执行时刻向下对齐到最近的北京时间 15 分钟边界，开始时间 SHALL 比结束时间早 30 分钟。
+### Requirement: 帖子和受控操作的会话服务调用
+
+帖子采集、帖子状态与互动读取、作者处置前置读取以及已确认的人工上游操作 SHALL 通过 `GameCircleSessionService` 的固定本地 IPC 契约执行。调用方 MUST 仅传递 execution scope、固定来源方法及其业务参数；不得自行扫描 CDP tab、传递 target ID/URL/token，或调用 `binduseridentity`。
+
+经认证、CSRF 二次确认的单条人工操作，以及当前游戏内最多 20 条且每条独立审计的沉底/屏蔽批量操作，可同步提交固定 `operation_id`。人工上游写操作在会话续接完成后 MUST NOT 自动重放；若写入已发送但服务在返回前中断，调用方 SHALL 标记待回读确认，不得再次发送该写请求。明确插件失效时，Worker SHALL 保留 checkpoint，并在会话服务返回活动刷新状态时延后，不增加业务 retry；网络、限流、5xx、权限、契约和普通业务错误 MUST NOT 触发刷新。
+
+会话服务对来源契约失败 SHALL 只返回固定、脱敏的原因分类；人工操作审计 SHALL 保存该固定原因，以区分写前读取失败与上游写入失败。固定 IPC 的 `POSTS_GET_METRICS` 可选 `timeout_seconds`；调用方省略时，会话服务 SHALL 使用 30 秒默认上限。
+
+#### Scenario: 人工写操作在插件失效后恢复
+- **WHEN** 已确认写操作遇到明确插件失效且刷新 Job 成功
+- **THEN** 系统 SHALL 恢复会话但不得重放该写操作，运营人员必须重新提交确认
+
+#### Scenario: 人工操作的详情回读返回非 JSON
+- **WHEN** 写前详情读取收到无法解析为 JSON 的来源响应
+- **THEN** 系统 SHALL 以固定的“来源响应不是 JSON”原因结束审计，审计前后状态保持为空，且不得发送上游写入
+
+#### Scenario: AI 建议的目标状态已由上游满足
+- **WHEN** 人工确认批量执行沉底或屏蔽建议，且写前详情回读已是建议目标状态
+- **THEN** 系统 SHALL 记录 `ALREADY_APPLIED` 审计、同步该回读状态并完成本地审核，不得发送重复上游写入
+
+### Requirement: 状态巡检的成功语义
+
+`STATUS_SYNC` SHALL 只在选中批次的每条帖子均完成来源详情回读、指标保存，或被来源明确确认删除时标记成功。任务结束 MUST 写入仅含 `attempted`、`refreshed`、`failed`、`limit` 和执行范围的检查点；没有选中帖子时以 `attempted=0` 正常成功。若任一来源读取、契约解析或指标保存失败，任务 MAY 继续处理其余帖子，但最终 MUST 进入既有有限 retry，且不得标记为 `SUCCEEDED`。
+
+#### Scenario: 来源 Frame 不可用
+- **WHEN** 状态巡检选中至少一条帖子，但任意来源读取未完成
+- **THEN** 检查点 SHALL 记录该失败，Background Job SHALL 进入既有 retry，而不是显示成功
+
+### Requirement: 当前操作游戏的周期性采集入队
+系统 SHALL 为当前操作游戏创建周期性原创帖子采集任务。每个调度周期 SHALL 创建或取得一个 `SCHEDULED_INGEST_WINDOW` 任务；时间窗口与页面大小属于可调整调度参数，不得以业务 AppID 或游戏名称写死。
 
 #### Scenario: 在非边界时刻调度
 - **WHEN** 调度器在北京时间 `10:16` 运行
@@ -20,7 +48,7 @@
 - **THEN** 系统 SHALL 使用 AppID、对齐后的开始和结束时间及页面大小创建稳定幂等键，并返回已有任务而不得创建重复 `SCHEDULED_INGEST_WINDOW` 任务
 
 ### Requirement: 受控的人工历史补采入队
-系统 SHALL 在系统配置首页的帖子采集 Worker 节点提供“创建历史补采”入口。入口 SHALL 仅允许从本地可管理游戏目录选择单个游戏，默认选择城主别慌张，并接受最近 1 至 744 小时的补采时长。系统 SHALL 创建 `MANUAL_INGEST_WINDOW` 任务而不得在 HTTP 请求内建立 CDP 会话；任务由人工补采 Worker 异步消费。直接 `enqueue_ingestion` 管理命令仅用于故障诊断。
+系统 SHALL 在系统配置首页的帖子采集 Worker 节点提供“创建历史补采”入口。入口 SHALL 仅允许从本地可管理游戏目录选择单个游戏，并接受受配置约束的补采时长。系统 SHALL 创建 `MANUAL_INGEST_WINDOW` 任务而不得在 HTTP 请求内建立 CDP 会话；任务由人工补采 Worker 异步消费。直接 `enqueue_ingestion` 管理命令仅用于故障诊断。
 
 #### Scenario: 创建可管理游戏的历史补采
 - **WHEN** 已认证运营人员选择一个本地可管理游戏并提交有效的小时数

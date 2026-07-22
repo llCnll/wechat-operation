@@ -23,7 +23,7 @@
 - **THEN** 系统 SHALL 能在缺少 `runtime/` 的代码包中初始化该目录，并从 `runtime/.env` 读取运行时配置，而不得将数据库、密钥、Supervisor 凭据、锁文件或日志混入代码目录
 
 ### Requirement: SQLite 部署边界与专用 Worker
-系统 SHALL 在首期使用启用 WAL 模式、外键约束和 busy timeout 的 SQLite，并由本机 Supervisor 托管一个 Web 实例、一个 Scheduler Worker、一个实时采集 Worker、一个人工补采 Worker、一个指标同步 Worker 与一个 AI 审核 Worker。五个 Worker SHALL 按职责隔离；SQLite 写入阶段会串行化，同一职责 SHALL NOT 启动多个实例。日常部署 MUST 通过 Supervisor 启动和控制这些服务；直接管理命令仅用于开发或故障诊断。
+系统 SHALL 在首期使用启用 WAL 模式、外键约束和 busy timeout 的 SQLite，并由本机 Supervisor 托管一个 Web 实例、一个 Scheduler Worker、一个实时采集 Worker、一个人工补采 Worker、一个指标同步 Worker、一个 AI 审核 Worker与一个游戏圈会话服务。Worker 与会话服务 SHALL 按职责隔离；SQLite 写入阶段会串行化，同一职责 SHALL NOT 启动多个实例。日常部署 MUST 通过 Supervisor 启动和控制这些服务；直接管理命令仅用于开发或故障诊断。
 
 #### Scenario: 初始化数据库
 - **WHEN** 服务初始化新的 SQLite 数据库
@@ -71,12 +71,20 @@
 - **WHEN** 上游限流、5xx、传输失败或返回未知业务码
 - **THEN** 调用方 SHALL 按指标规格退避重试并保留 checkpoint 与脱敏错误类别
 
-### Requirement: 公众平台只读页面适配器
-系统 SHALL 将公众平台外层页面的只读调用隔离在专用 CDP 适配器中。适配器 SHALL 在当前受控 `mp.weixin.qq.com` 页面上下文内临时使用会话并返回标准化 DTO；它 SHALL NOT 供 scheduler、Worker 或任何上游写操作调用。
+### Requirement: 游戏圈来源适配器边界
+游戏圈来源适配器 SHALL 仅由受管会话服务调用。调用方不得自行选择浏览器页面、持有认证材料或执行来源身份绑定。Web、Scheduler 与未确认的上游写操作不得直接访问 CDP；经认证、CSRF 二次确认的有界人工读取或写操作只可通过固定本地服务契约提交类型化业务请求。
 
-#### Scenario: 外层页面不可用
-- **WHEN** 未找到已登录的受控公众平台页面或其响应结构无效
-- **THEN** 适配器 SHALL 返回脱敏的可处理错误，调用方不得持久化认证上下文
+会话不可用时，系统 SHALL 返回脱敏的可重试结果并请求恢复；人工写操作不得在恢复后自动重放。服务不得向调用方接收或返回 target ID、任意浏览器命令、JavaScript、URL 或认证材料。
+
+#### Scenario: 有界人工操作遇到会话不可用
+- **WHEN** 运营人员已二次确认单条操作，或最多 20 条的沉底/屏蔽批量操作，但登记 PLUGIN、iframe 或 lease 不可用
+- **THEN** Web SHALL 不执行切换、建页或身份绑定
+- **THEN** 会话服务 SHALL 创建或复用 `RECOVER` Job，并向页面返回脱敏的“会话正在恢复，请稍后重新确认”结果
+- **THEN** 刷新成功后系统不得自动发送原写请求
+
+#### Scenario: 来源会话不可用
+- **WHEN** 调用方请求人工操作或来源读取但会话不可用
+- **THEN** 调用方 SHALL 不直接访问浏览器，并获得不包含认证信息的可重试结果
 
 ### Requirement: 敏感配置与可观测性
 系统 SHALL 仅从运行时配置或密钥存储获取会话凭据和第三方密钥，并 SHALL 输出带关联标识的结构化日志，同时脱敏令牌、Cookie、完整请求 URL 和非必要的个人身份标识。
