@@ -1,0 +1,21 @@
+version: 1.3.0
+previous: 1.2.3
+changes:
+  - 将游戏圈浏览器会话、来源身份与受控页面生命周期收敛到独立会话服务；Web 和业务 Worker 通过本地受限接口请求来源能力。
+  - 新增当前操作游戏范围、外层登录运行态与来源 Frame 状态投影，支持受控探测、人工扫码后的异步检查、恢复与主动保活。
+  - 将帖子、指标、作者处置和已确认人工操作接入会话服务，避免页面请求直接访问受控浏览器。
+upgrade:
+  dependencies: none
+  database: migrate
+  static: collectstatic
+  restart:
+    mode: supervisor
+    services: []
+  once_jobs: []
+  manual:
+    - 不复制旧端点的运行态、浏览器 profile、Cookie、token 或未完成的人工写操作；若运行态显示需要扫码，请在受控浏览器中人工扫码后重新检查。
+verification:
+  - uv run python manage.py validate_releases
+  - uv run pytest -q tests/test_release_protocol.py tests/test_release_source_archive.py
+  - uv run python manage.py check
+  - 确认 Supervisor 重启后 game_circle_session 正常运行，/healthz 返回成功，且系统配置页的外层会话与当前游戏 Frame 状态均可读取。
