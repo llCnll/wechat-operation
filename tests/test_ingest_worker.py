@@ -1,10 +1,14 @@
+from contextlib import contextmanager
 from unittest.mock import patch
 
 import pytest
 
 from jobs.adapters import CandidatePostDTO, SourceBusinessDeletedError, SourceTransportError
 from jobs.models import BackgroundJob
-from posts.models import POST_STATUS_DELETED, CandidatePost, OriginalPost, OriginType
+from jobs.services import execute_next_job
+from config.game_circle_ipc import GameCircleIpcError
+from posts.game_catalog import set_active_game
+from posts.models import POST_STATUS_DELETED, CandidatePost, ManagedGame, OriginalPost, OriginType
 from posts.tasks import (
     AUTHOR_MUTE_STATUS_BACKFILL_TASK,
     BACKFILL_INGESTION_WORKER_HANDLERS,
@@ -19,6 +23,13 @@ from posts.tasks import (
     sync_pending_status_handler,
 )
 from reviews.models import RecommendedAction, ReviewTask
+
+
+@pytest.fixture(autouse=True)
+def active_scope_and_source_session(monkeypatch, db):
+    game = ManagedGame.objects.create(appid="wx-test", name="测试游戏")
+    set_active_game(appid=game.appid)
+
 
 
 class OnePageSource:
@@ -42,7 +53,7 @@ def test_worker_ingests_full_window_and_persists_completion_checkpoint():
         idempotency_key="ingest:worker",
         parameter_summary={"appid": "wx-test", "start_time": 1, "end_time": 2, "page_size": 10},
     )
-    with patch("posts.tasks.CdpGameCircleClient", return_value=OnePageSource()):
+    with patch("posts.tasks.GameCirclePostClient", return_value=OnePageSource()):
         ingest_window_handler(job)
 
     job.refresh_from_db()
@@ -51,6 +62,7 @@ def test_worker_ingests_full_window_and_persists_completion_checkpoint():
         "last_processed_count": 1,
         "total_processed": 1,
         "complete": True,
+        "execution_scope": {"target_appid": "wx-test", "scope_version": 1},
     }
     assert CandidatePost.objects.get(topic_id=17).origin_type == OriginType.ORIGINAL
 
@@ -75,7 +87,7 @@ def test_status_sync_updates_pending_posts_without_changing_review_state():
         def close(self):
             pass
 
-    with patch("posts.tasks.CdpGameCircleClient", return_value=Source()):
+    with patch("posts.tasks.GameCirclePostClient", return_value=Source()):
         sync_pending_status_handler(job)
 
     post.refresh_from_db()
@@ -83,7 +95,13 @@ def test_status_sync_updates_pending_posts_without_changing_review_state():
     assert post.status == 4
     assert post.interaction_snapshots.latest("captured_at").view_count == 9
     assert task.status == "PENDING"
-    assert job.checkpoint == {"refreshed": 1, "limit": 20}
+    assert job.checkpoint == {
+        "attempted": 1,
+        "refreshed": 1,
+        "failed": 0,
+        "limit": 20,
+        "execution_scope": {"target_appid": "wx-test", "scope_version": 1},
+    }
 
 
 @pytest.mark.django_db
@@ -105,13 +123,79 @@ def test_status_sync_marks_upstream_deleted_posts_without_changing_review_state(
         def close(self):
             pass
 
-    with patch("posts.tasks.CdpGameCircleClient", return_value=Source()):
+    with patch("posts.tasks.GameCirclePostClient", return_value=Source()):
         sync_pending_status_handler(job)
 
     post.refresh_from_db()
     task.refresh_from_db()
     assert post.status == POST_STATUS_DELETED | 4
     assert task.status == "PENDING"
+
+
+@pytest.mark.django_db
+def test_status_sync_retries_instead_of_succeeding_when_source_read_is_incomplete():
+    post = OriginalPost.objects.create(
+        topic_id=20, content_id="status-unavailable", source_appid="wx-test", status=4
+    )
+    ReviewTask.objects.create(post=post, suggested_action=RecommendedAction.HUMAN_REVIEW)
+    job = BackgroundJob.objects.create(
+        task_type=STATUS_SYNC_TASK,
+        idempotency_key="status-sync:unavailable",
+        parameter_summary={"appid": "wx-test", "limit": 20},
+    )
+
+    class Source:
+        def get_post_metrics(self, topic_id):
+            assert topic_id == post.topic_id
+            raise SourceTransportError("来源暂不可用")
+
+        def close(self):
+            pass
+
+    with patch("posts.tasks.GameCirclePostClient", return_value=Source()):
+        processed = execute_next_job({STATUS_SYNC_TASK: sync_pending_status_handler})
+
+    assert processed is not None
+    job.refresh_from_db()
+    assert job.status == "PENDING"
+    assert job.retry_count == 1
+    assert job.checkpoint == {
+        "attempted": 1,
+        "refreshed": 0,
+        "failed": 1,
+        "limit": 20,
+        "execution_scope": {"target_appid": "wx-test", "scope_version": 1},
+    }
+
+
+@pytest.mark.django_db
+def test_status_sync_defers_for_active_session_recovery_without_consuming_retry_budget():
+    post = OriginalPost.objects.create(
+        topic_id=21, content_id="status-session-recovering", source_appid="wx-test", status=4
+    )
+    ReviewTask.objects.create(post=post, suggested_action=RecommendedAction.HUMAN_REVIEW)
+    job = BackgroundJob.objects.create(
+        task_type=STATUS_SYNC_TASK,
+        idempotency_key="status-sync:session-recovering",
+        max_retries=3,
+        parameter_summary={"appid": "wx-test", "limit": 20},
+    )
+
+    class Source:
+        def get_post_metrics(self, topic_id):
+            assert topic_id == post.topic_id
+            raise GameCircleIpcError("SESSION_RECOVERING", "游戏圈会话正在恢复，请稍后重试")
+
+        def close(self):
+            pass
+
+    with patch("posts.tasks.GameCirclePostClient", return_value=Source()):
+        execute_next_job({STATUS_SYNC_TASK: sync_pending_status_handler})
+
+    job.refresh_from_db()
+    assert job.status == "PENDING"
+    assert job.retry_count == 0
+    assert job.next_run_at is not None
 
 
 @pytest.mark.django_db
@@ -160,7 +244,7 @@ def test_metrics_refresh_updates_only_interaction_snapshots_and_skips_deleted_po
         def close(self):
             pass
 
-    with patch("posts.tasks.CdpGameCircleClient", return_value=Source()):
+    with patch("posts.tasks.GameCirclePostClient", return_value=Source()):
         refresh_metrics_window_handler(job)
 
     refreshed.refresh_from_db()
@@ -176,7 +260,13 @@ def test_metrics_refresh_updates_only_interaction_snapshots_and_skips_deleted_po
     assert refreshed.status == 4
     assert refreshed.content_text == "unchanged"
     assert deleted.status == 2
-    assert job.checkpoint == {"last_topic_id": 31, "processed": 1, "skipped": 1, "complete": True}
+    assert job.checkpoint == {
+        "last_topic_id": 31,
+        "processed": 1,
+        "skipped": 1,
+        "complete": True,
+        "execution_scope": {"target_appid": "wx-test", "scope_version": 1},
+    }
     assert (
         BACKFILL_INGESTION_WORKER_HANDLERS[METRICS_REFRESH_WINDOW_TASK]
         is refresh_metrics_window_handler
@@ -235,13 +325,19 @@ def test_metrics_refresh_resumes_from_its_last_topic_checkpoint():
         def close(self):
             pass
 
-    with patch("posts.tasks.CdpGameCircleClient", return_value=Source()):
+    with patch("posts.tasks.GameCirclePostClient", return_value=Source()):
         refresh_metrics_window_handler(job)
 
     job.refresh_from_db()
     assert first.interaction_snapshots.count() == 0
     assert second.interaction_snapshots.get().view_count == 7
-    assert job.checkpoint == {"last_topic_id": 41, "processed": 2, "skipped": 0, "complete": True}
+    assert job.checkpoint == {
+        "last_topic_id": 41,
+        "processed": 2,
+        "skipped": 0,
+        "complete": True,
+        "execution_scope": {"target_appid": "wx-test", "scope_version": 1},
+    }
 
 
 @pytest.mark.django_db
@@ -278,7 +374,7 @@ def test_metrics_refresh_records_one_post_failure_and_continues_the_range():
         def close(self):
             pass
 
-    with patch("posts.tasks.CdpGameCircleClient", return_value=Source()):
+    with patch("posts.tasks.GameCirclePostClient", return_value=Source()):
         refresh_metrics_window_handler(job)
 
     job.refresh_from_db()
@@ -290,6 +386,7 @@ def test_metrics_refresh_records_one_post_failure_and_continues_the_range():
         "failed": 1,
         "failure_samples": [{"topic_id": failed_post.topic_id, "error": "上游暂时不可用"}],
         "complete": True,
+        "execution_scope": {"target_appid": "wx-test", "scope_version": 1},
     }
 
 
@@ -326,7 +423,7 @@ def test_metrics_refresh_excludes_forward_candidates_from_the_upstream_scope():
         def close(self):
             pass
 
-    with patch("posts.tasks.CdpGameCircleClient", return_value=Source()):
+    with patch("posts.tasks.GameCirclePostClient", return_value=Source()):
         refresh_metrics_window_handler(job)
 
     assert requested_topic_ids == [original.topic_id]

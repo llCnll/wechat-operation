@@ -13,9 +13,12 @@ from uuid import uuid4
 from django.db import IntegrityError, transaction
 from django.utils import timezone
 
+from config.game_circle_ipc import GameCircleIpcError
 from config.settings import runtime
 from jobs.models import BackgroundJob, JobStatus
+from jobs.adapters import WriteResultUnknownError
 from jobs.services import enqueue_job
+from jobs.task_types import AI_AUTOMATED_MODERATION_TASK, AI_EVALUATE_TASK, OCR_EXTRACT_TASK
 from posts.models import (
     POST_STATUS_NORMAL,
     CandidatePost,
@@ -64,6 +67,10 @@ EXPECTED_OPERATION_STATUS = {
     RecommendedAction.SINK: 8,
     RecommendedAction.BLOCK: 4,
 }
+_TARGET_REACHED_OPERATION_RESULT_CODES = frozenset(("OK", "ALREADY_APPLIED"))
+_READBACK_STATE_OPERATION_RESULT_CODES = _TARGET_REACHED_OPERATION_RESULT_CODES | frozenset(
+    ("SKIPPED_UPSTREAM_NOT_NORMAL",)
+)
 MUTE_DURATIONS_DAYS = frozenset((1, 3, 7, 30))
 BLOCK_REASON_OPTIONS = (
     (1, "其他"),
@@ -72,9 +79,6 @@ BLOCK_REASON_OPTIONS = (
     (8, "广告欺诈"),
     (16, "欺诈钱财"),
 )
-OCR_EXTRACT_TASK = "OCR_EXTRACT"
-AI_EVALUATE_TASK = "AI_EVALUATE"
-AI_AUTOMATED_MODERATION_TASK = "AI_AUTOMATED_MODERATION"
 EVALUATION_PIPELINE_VERSION = "v4"
 MAX_REPLY_DRAFT_LENGTH = 4000
 VIDEO_OCR_SUMMARY_GAP_MS = 1_500
@@ -111,6 +115,29 @@ GENERIC_REPLY_CATEGORIES = frozenset(
         ContentCategory.SOCIAL,
     }
 )
+
+
+def operation_result_reaches_target(result_code: str) -> bool:
+    """Whether a confirmed operation has its requested upstream state without a replay."""
+    return result_code in _TARGET_REACHED_OPERATION_RESULT_CODES
+
+
+def operation_result_has_readback_state(result_code: str) -> bool:
+    """Whether the audit's state is a verified source readback safe to mirror locally."""
+    return result_code in _READBACK_STATE_OPERATION_RESULT_CODES
+
+
+def _preflight_operation_result(action: str, before_state: dict[str, object]) -> tuple[str, str] | None:
+    """Classify a non-writing SINK/BLOCK preflight from the authoritative source state."""
+    if action not in {RecommendedAction.SINK, RecommendedAction.BLOCK}:
+        return None
+    status = before_state.get("status")
+    expected_status = EXPECTED_OPERATION_STATUS[action]
+    if status == expected_status:
+        return "ALREADY_APPLIED", "上游帖子已处于目标状态，跳过重复处置"
+    if status != POST_STATUS_NORMAL:
+        return "SKIPPED_UPSTREAM_NOT_NORMAL", "上游帖子已不是正常状态，跳过重复处置"
+    return None
 
 
 @dataclass(frozen=True)
@@ -1267,12 +1294,11 @@ def execute_confirmed_operation(
             if stored_author_openid and stored_author_openid != current_author_openid:
                 raise ValueError("写前作者用户 ID与已同步记录不一致，已拒绝处置")
             payload["author_openid"] = current_author_openid
-        if (
-            action in {RecommendedAction.SINK, RecommendedAction.BLOCK}
-            and before_state["status"] != POST_STATUS_NORMAL
-        ):
-            result_code = "SKIPPED_UPSTREAM_NOT_NORMAL"
-            error_summary = "上游帖子已不是正常状态，跳过重复处置"
+        expected_status = EXPECTED_OPERATION_STATUS.get(action)
+        preflight_result = _preflight_operation_result(action, before_state)
+        if preflight_result is not None:
+            result_code, error_summary = preflight_result
+            after_state = before_state
         elif action == RecommendedAction.UNMUTE and before_state["local_block_end_time"] <= int(
             timezone.now().timestamp()
         ):
@@ -1285,9 +1311,14 @@ def execute_confirmed_operation(
             write_error: Exception | None = None
             result = None
             try:
-                result = source.perform_confirmed_operation(
-                    topic_id=task.post.topic_id, action=action, payload=payload
-                )
+                operation_kwargs = {
+                    "topic_id": task.post.topic_id,
+                    "action": action,
+                    "payload": payload,
+                }
+                if getattr(source, "requires_operation_id", False):
+                    operation_kwargs["operation_id"] = audit.operation_id
+                result = source.perform_confirmed_operation(**operation_kwargs)
             except Exception as exc:
                 write_error = exc
                 if action not in {RecommendedAction.MUTE, RecommendedAction.UNMUTE}:
@@ -1326,7 +1357,6 @@ def execute_confirmed_operation(
                     source_requested_at=after_requested_at,
                 )
                 after_state = _operation_state(after_payload)
-            expected_status = EXPECTED_OPERATION_STATUS.get(action)
             if action in {RecommendedAction.MUTE, RecommendedAction.UNMUTE}:
                 pass
             elif expected_status is None or after_state["status"] != expected_status:
@@ -1336,6 +1366,17 @@ def execute_confirmed_operation(
             else:
                 result_code = "OK"
                 error_summary = ""
+    except GameCircleIpcError as exc:
+        if exc.category == "SESSION_RECOVERING":
+            result_code = "SESSION_RECOVERING"
+            error_summary = "游戏圈会话正在恢复，请稍后重新确认"
+        elif exc.category == "SOURCE_CONTRACT":
+            error_summary = f"上游调用或状态验证失败：{exc}"[:500]
+        else:
+            error_summary = f"上游调用或状态验证失败：{type(exc).__name__}"[:500]
+    except WriteResultUnknownError:
+        result_code = "PENDING_READBACK"
+        error_summary = "上游写入结果待回读确认；系统不会自动重放"
     except Exception as exc:
         error_summary = f"上游调用或状态验证失败：{type(exc).__name__}"[:500]
 
@@ -1355,7 +1396,7 @@ def execute_confirmed_operation(
                 "executed_at",
             ]
         )
-        if result_code == "OK" and action in EXPECTED_OPERATION_STATUS:
+        if operation_result_has_readback_state(result_code) and action in EXPECTED_OPERATION_STATUS:
             OriginalPost.objects.filter(pk=task.post.pk).update(
                 status=after_state["status"], updated_at=timezone.now()
             )

@@ -171,8 +171,8 @@ def upsert_metric_snapshot(
     *, appid: str, source: MetricSource, record: MetricRecord, job: Any
 ) -> GameCircleMetricSnapshot:
     """Persist a source-whitelisted DTO through the immutable business key."""
-    if appid != "wx6d2454a8afcd9706":
-        raise SourceContractError("指标快照仅支持城主别慌张")
+    if not appid:
+        raise SourceContractError("指标快照缺少游戏 appid")
     try:
         whitelist = METRIC_WHITELISTS[source]
     except KeyError as exc:

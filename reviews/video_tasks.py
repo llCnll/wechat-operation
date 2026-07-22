@@ -10,6 +10,7 @@ from pathlib import Path
 
 from config.settings import runtime
 from jobs.models import BackgroundJob
+from jobs.task_types import VIDEO_EXTRACT_TASK
 from posts.models import MediaType
 
 from .adapters import OpenAiCompatibleOcrClient, SpeechTranscriptionClient
@@ -29,7 +30,6 @@ from .video import (
     video_workdir,
 )
 
-VIDEO_EXTRACT_TASK = "VIDEO_EXTRACT"
 VIDEO_EXTRACTOR_VERSION = "v3"
 QR_CONTIGUOUS_GAP_MS = 1_000
 OCR_TEXT_SIMILARITY_THRESHOLD = 0.92

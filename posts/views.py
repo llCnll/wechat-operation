@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager, nullcontext
 from datetime import UTC, datetime, timedelta
 
 from django.contrib import messages
@@ -15,7 +16,7 @@ from django.utils.dateparse import parse_datetime
 from django.utils.http import url_has_allowed_host_and_scheme
 from django.views.decorators.http import require_POST
 
-from config.cdp import CdpUnavailableError, open_controlled_login_page
+from config.game_circle_ipc import GameCircleIpcClient, GameCircleIpcError, GameCirclePostClient
 from jobs.models import BackgroundJob, JobStatus
 from reviews.models import (
     RISK_LABEL_DISPLAY,
@@ -41,11 +42,12 @@ from reviews.services import (
     execute_confirmed_operation,
     is_operation_enabled,
     mark_ai_review_restored,
+    operation_result_reaches_target,
     save_reply_draft,
     video_evidence_summaries,
 )
 
-from .game_catalog import active_game_appid, managed_game_options
+from .game_catalog import active_game_appid, current_execution_scope, managed_game_options
 from .models import (
     POST_STATUS_BLOCKED,
     POST_STATUS_DELETED,
@@ -53,8 +55,10 @@ from .models import (
     POST_STATUS_SELF_VISIBLE,
     POST_STATUS_SUNK,
     AuthorMuteStatus,
+    ActiveGameScope,
     CandidatePost,
     InteractionSnapshot,
+    ManagedGame,
     OriginalPost,
     OriginType,
     is_post_blocked,
@@ -64,7 +68,6 @@ from .models import (
     is_post_sunk,
 )
 from .services import refresh_post_status_and_metrics
-from .source_client import CdpGameCircleClient
 
 DASHBOARD_SORT_OPTIONS = (
     ("priority_desc", "优先级：高到低"),
@@ -139,10 +142,10 @@ def _escalated_review_dashboard_url(request, review: AiOperationReview) -> str:
 @login_required
 @require_POST
 def open_controlled_login(request):
-    """Open the fixed login page in the remote-debugging Chrome, never in the user browser."""
+    """Request the session service to open its fixed unauthenticated login page."""
     try:
-        open_controlled_login_page()
-    except CdpUnavailableError as exc:
+        GameCircleIpcClient().call("OPEN_CONTROLLED_LOGIN")
+    except GameCircleIpcError as exc:
         messages.error(request, str(exc))
     else:
         messages.info(request, "已在受控 Chrome 打开登录页，请使用微信扫码确认。")
@@ -235,11 +238,50 @@ def _batch_ai_candidates(posts: list[OriginalPost]) -> list[OriginalPost]:
 
 
 def _dashboard_game_filter(appid: str) -> Q:
-    game_filter = Q(source_appid=appid)
-    if appid == "wx6d2454a8afcd9706":
-        # Historical records predating source_appid attribution belong to the default game.
-        game_filter |= Q(source_appid="")
-    return game_filter
+    # Before the first catalog synchronization there is no legal execution
+    # scope.  The dashboard remains read-only and shows historical records;
+    # every source-touching action still goes through _require_active_post_scope.
+    return Q() if not appid else Q(source_appid=appid)
+
+
+def _dashboard_active_game(requested_appid: str) -> str:
+    """Keep historical dashboard reads available before initial scope configuration."""
+    try:
+        return active_game_appid(requested_appid)
+    except ValueError:
+        if ActiveGameScope.objects.filter(pk=1).exists():
+            return "__invalid_scope__"
+        # Read views may still be used to inspect historical records before an
+        # operator selects the first scope.  A requested game remains a read
+        # filter only; source actions separately require current_execution_scope.
+        if requested_appid:
+            return requested_appid
+        return ""
+
+
+def _require_active_post_scope(post: OriginalPost) -> None:
+    """Reject direct post URLs that would otherwise bypass the selected operation scope."""
+    if not post.source_appid:
+        raise ValueError("帖子缺少游戏范围，不能调用上游")
+    active_game_appid(post.source_appid, persist_default=False)
+
+
+@contextmanager
+def _source_for_active_game(appid: str):
+    """Create a fixed IPC facade; this Django process never owns CDP state."""
+    scope = current_execution_scope(appid, persist_default=False)
+    source = GameCirclePostClient(scope=scope)
+    try:
+        yield source
+    finally:
+        source.close()
+
+
+@contextmanager
+def _source_for_post(post: OriginalPost):
+    _require_active_post_scope(post)
+    with _source_for_active_game(post.source_appid) as source:
+        yield source
 
 
 def _author_mute_presentation(state: AuthorMuteStatus | None, *, now=None) -> dict[str, object]:
@@ -292,7 +334,10 @@ def _remaining_time_label(until, now) -> str:
 def _author_mute_status_for_post(post: OriginalPost, appid: str) -> AuthorMuteStatus | None:
     if not post.author_openid:
         return None
-    return AuthorMuteStatus.objects.filter(openid=post.author_openid, source_appid=appid).first()
+    return AuthorMuteStatus.objects.filter(
+        openid=post.author_openid,
+        source_appid=appid or post.source_appid,
+    ).first()
 
 
 @login_required
@@ -303,7 +348,7 @@ def operations_dashboard(request):
         target = reverse("operations-dashboard")
         return redirect(f"{target}?{query_string}" if query_string else target)
     search = request.GET.get("q", "").strip()
-    appid = active_game_appid(request.GET.get("appid", "").strip())
+    appid = _dashboard_active_game(request.GET.get("appid", "").strip())
     game_filter = _dashboard_game_filter(appid)
     filters = {
         "category": [value for value in request.GET.getlist("category") if value],
@@ -576,7 +621,7 @@ def operations_dashboard(request):
 @login_required
 def mute_management(request):
     """Read-only current mute observations for one managed-game context."""
-    appid = active_game_appid(request.GET.get("appid", "").strip())
+    appid = _dashboard_active_game(request.GET.get("appid", "").strip())
     search = request.GET.get("q", "").strip()
     scope = request.GET.get("scope", "").strip().upper()
     expires = request.GET.get("expires", "").strip().upper()
@@ -586,7 +631,9 @@ def mute_management(request):
         expires = ""
     now = timezone.now()
     active_mutes = Q(local_muted_until__gt=now) | Q(global_muted_until__gt=now)
-    statuses = AuthorMuteStatus.objects.filter(source_appid=appid).filter(active_mutes)
+    statuses = AuthorMuteStatus.objects.filter(active_mutes)
+    if appid:
+        statuses = statuses.filter(source_appid=appid)
     if search:
         statuses = statuses.filter(nick_name__icontains=search)
     if scope == "LOCAL":
@@ -605,7 +652,7 @@ def mute_management(request):
         status.system_muted_at = (
             OperationAudit.objects.filter(
                 task__post__author_openid=status.openid,
-                task__post__source_appid=appid,
+                **({"task__post__source_appid": appid} if appid else {}),
                 action=RecommendedAction.MUTE,
                 result_code="OK",
             )
@@ -640,8 +687,11 @@ def mute_management(request):
 @login_required
 def author_mute_history(request, status_id: int):
     """Show saved original posts for one status row without exposing OpenID in the URL."""
-    appid = active_game_appid(request.GET.get("appid", "").strip())
-    status = get_object_or_404(AuthorMuteStatus, pk=status_id, source_appid=appid)
+    appid = _dashboard_active_game(request.GET.get("appid", "").strip())
+    status_query = {"pk": status_id}
+    if appid:
+        status_query["source_appid"] = appid
+    status = get_object_or_404(AuthorMuteStatus, **status_query)
     posts = _with_latest_metrics(
         OriginalPost.objects.filter(_dashboard_game_filter(appid), author_openid=status.openid)
     ).order_by("-publish_time", "-topic_id")
@@ -704,6 +754,10 @@ def _dashboard_return_url_from_query(return_query: str, selected_topic_id: str) 
     return f"{reverse('operations-dashboard')}?{params.urlencode()}"
 
 
+def _has_session_recovering_result(audits: list[OperationAudit]) -> bool:
+    return any(audit.result_code == "SESSION_RECOVERING" for audit in audits)
+
+
 @login_required
 def post_detail(request, topic_id: int):
     post = get_object_or_404(_with_latest_metrics(OriginalPost.objects.all()), topic_id=topic_id)
@@ -723,10 +777,9 @@ def refresh_dashboard_post(request, topic_id: int):
     if not post.source_appid:
         messages.error(request, "帖子缺少游戏 appid，无法刷新。")
         return redirect(redirect_url)
-    client = None
     try:
-        client = CdpGameCircleClient(appid=post.source_appid)
-        refreshed = refresh_post_status_and_metrics(client, post)
+        with _source_for_post(post) as client:
+            refreshed = refresh_post_status_and_metrics(client, post)
     except Exception:
         messages.error(request, "刷新失败，请检查浏览器登录状态或稍后重试。")
     else:
@@ -734,9 +787,6 @@ def refresh_dashboard_post(request, topic_id: int):
             messages.warning(request, "该帖子已从原平台管理队列删除，已标记为不可处置状态。")
         else:
             messages.success(request, "帖子状态和互动指标已同步。")
-    finally:
-        if client is not None:
-            client.close()
     return redirect(redirect_url)
 
 
@@ -785,34 +835,33 @@ def _resolve_escalated_ai_operation(
         messages.error(request, f"请先在系统配置中启用上游写操作：{labels}。")
         return redirect(redirect_url)
 
-    source = None
     try:
-        if post.source_appid:
-            source = CdpGameCircleClient(appid=post.source_appid)
-        confirmation_key = request.POST.get("confirmation_key")
-        audits = [
-            execute_confirmed_operation(
-                task,
-                user=request.user,
-                action=operation,
-                reason=reason,
-                source=source,
-                upstream_payload=payload,
-                confirmation_key=f"{confirmation_key}:ai-correction:{index}:{operation.lower()}",
-            )
-            for index, (operation, payload) in enumerate(operation_plan, start=1)
-        ]
+        source_context = _source_for_post(post) if post.source_appid else nullcontext(None)
+        with source_context as source:
+            confirmation_key = request.POST.get("confirmation_key")
+            audits = [
+                execute_confirmed_operation(
+                    task,
+                    user=request.user,
+                    action=operation,
+                    reason=reason,
+                    source=source,
+                    upstream_payload=payload,
+                    confirmation_key=f"{confirmation_key}:ai-correction:{index}:{operation.lower()}",
+                )
+                for index, (operation, payload) in enumerate(operation_plan, start=1)
+            ]
     except OperationExecutionConflict as exc:
         messages.warning(request, str(exc))
         return redirect(redirect_url)
     except Exception:
         messages.error(request, "无法建立上游操作会话，未执行纠正处置。")
         return redirect(redirect_url)
-    finally:
-        if source is not None:
-            source.close()
 
     result_summary = "，".join(f"{audit.action}={audit.result_code}" for audit in audits)
+    if _has_session_recovering_result(audits):
+        messages.warning(request, "游戏圈会话正在恢复，请稍后重新确认。")
+        return redirect(redirect_url)
     if not all(audit.result_code == "OK" for audit in audits):
         messages.warning(request, f"纠正处置未全部成功，AI 异常仍待跟进：{result_summary}")
         return redirect(redirect_url)
@@ -869,36 +918,35 @@ def confirm_dashboard_operation(request, topic_id: int, action: str):
         payload = _dashboard_operation_payload(request, RecommendedAction.MUTE)
         if payload is None:
             return redirect(redirect_url)
-        source = None
         try:
-            if post.source_appid:
-                source = CdpGameCircleClient(appid=post.source_appid)
-            token = request.POST.get("confirmation_key")
-            audits = [
-                execute_confirmed_operation(
-                    task,
-                    user=request.user,
-                    action=operation,
-                    reason=reason,
-                    source=source,
-                    upstream_payload=payload
-                    if operation == RecommendedAction.MUTE
-                    else {"block_reason_code": payload["block_reason_code"]},
-                    confirmation_key=f"{token}:{operation.lower()}",
-                )
-                for operation in (RecommendedAction.BLOCK, RecommendedAction.MUTE)
-            ]
+            source_context = _source_for_post(post) if post.source_appid else nullcontext(None)
+            with source_context as source:
+                token = request.POST.get("confirmation_key")
+                audits = [
+                    execute_confirmed_operation(
+                        task,
+                        user=request.user,
+                        action=operation,
+                        reason=reason,
+                        source=source,
+                        upstream_payload=payload
+                        if operation == RecommendedAction.MUTE
+                        else {"block_reason_code": payload["block_reason_code"]},
+                        confirmation_key=f"{token}:{operation.lower()}",
+                    )
+                    for operation in (RecommendedAction.BLOCK, RecommendedAction.MUTE)
+                ]
         except OperationExecutionConflict as exc:
             messages.warning(request, str(exc))
             return redirect(redirect_url)
         except Exception:
             messages.error(request, "无法建立上游操作会话，未执行处置。")
             return redirect(redirect_url)
-        finally:
-            if source is not None:
-                source.close()
         result_summary = "，".join(f"{item.action}={item.result_code}" for item in audits)
-        if all(item.result_code == "OK" for item in audits):
+        if _has_session_recovering_result(audits):
+            messages.warning(request, "游戏圈会话正在恢复，请稍后重新确认。")
+            return redirect(redirect_url)
+        if all(operation_result_reaches_target(item.result_code) for item in audits):
             complete_review(
                 task, user=request.user, action=RecommendedAction.BLOCK_AND_MUTE, reason=reason
             )
@@ -919,33 +967,35 @@ def confirm_dashboard_operation(request, topic_id: int, action: str):
     payload = _dashboard_operation_payload(request, action)
     if payload is None:
         return redirect(redirect_url)
-    source = None
     try:
-        if is_operation_enabled(action) and post.source_appid:
-            source = CdpGameCircleClient(appid=post.source_appid)
-        audit = execute_confirmed_operation(
-            task,
-            user=request.user,
-            action=action,
-            reason=reason,
-            source=source,
-            upstream_payload=payload,
-            confirmation_key=request.POST.get("confirmation_key"),
+        source_context = (
+            _source_for_post(post)
+            if is_operation_enabled(action) and post.source_appid
+            else nullcontext(None)
         )
+        with source_context as source:
+            audit = execute_confirmed_operation(
+                task,
+                user=request.user,
+                action=action,
+                reason=reason,
+                source=source,
+                upstream_payload=payload,
+                confirmation_key=request.POST.get("confirmation_key"),
+            )
     except OperationExecutionConflict as exc:
         messages.warning(request, str(exc))
         return redirect(redirect_url)
     except Exception:
         messages.error(request, "无法建立上游操作会话，未执行处置。")
         return redirect(redirect_url)
-    finally:
-        if source is not None:
-            source.close()
-    if audit.result_code == "OK":
+    if operation_result_reaches_target(audit.result_code):
         complete_review(task, user=request.user, action=action, reason=reason)
         if action == RecommendedAction.RESTORE:
             mark_ai_review_restored(task, audit=audit)
         messages.success(request, f"处置成功，审核已完成：{audit.result_code}。")
+    elif audit.result_code == "SESSION_RECOVERING":
+        messages.warning(request, "游戏圈会话正在恢复，请稍后重新确认。")
     else:
         messages.warning(request, f"处置未成功，审核保持待处理：{audit.result_code}。")
     return redirect(redirect_url)
@@ -953,7 +1003,7 @@ def confirm_dashboard_operation(request, topic_id: int, action: str):
 
 @login_required
 def ai_operation_reviews(request):
-    appid = active_game_appid(request.GET.get("appid", "").strip())
+    appid = _dashboard_active_game(request.GET.get("appid", "").strip())
     reviews = AiOperationReview.objects.select_related(
         "audit__task__post", "audit__task__assessment", "audit__policy_version", "reviewer"
     ).prefetch_related("audit__task__assessment__risk_evidence")
@@ -1071,7 +1121,7 @@ def update_ai_operation_review(request, review_id: int, decision: str):
 @require_POST
 def execute_batch_ai_recommendations(request):
     """Apply only explicit, high-signal AI sink/block recommendations after a human click."""
-    appid = active_game_appid(request.POST.get("appid", "").strip())
+    appid = _dashboard_active_game(request.POST.get("appid", "").strip())
     requested_ids = []
     for value in request.POST.getlist("topic_id"):
         try:
@@ -1113,49 +1163,53 @@ def execute_batch_ai_recommendations(request):
         messages.warning(request, "所选帖子已不满足批量执行条件，请刷新列表后重试。")
         return redirect(redirect_url)
 
-    source = None
-    succeeded = failed = 0
+    succeeded = failed = recovering = 0
     try:
-        if any(is_operation_enabled(post.review_task.suggested_action) for post in posts):
-            source = CdpGameCircleClient(appid=appid)
-        for post in posts:
-            action = post.review_task.suggested_action
-            reason = (
-                f"{_operation_reason_suggestion(post)}；"
-                f"执行{'沉底' if action == RecommendedAction.SINK else '屏蔽'}。"
-            )
-            payload = {} if action == RecommendedAction.SINK else {"block_reason_code": 1}
-            try:
-                audit = execute_confirmed_operation(
-                    post.review_task,
-                    user=request.user,
-                    action=action,
-                    reason=reason,
-                    source=source,
-                    upstream_payload=payload,
-                    confirmation_key=f"{batch_key}:{post.topic_id}",
+        source_context = (
+            _source_for_active_game(appid)
+            if any(is_operation_enabled(post.review_task.suggested_action) for post in posts)
+            else nullcontext(None)
+        )
+        with source_context as source:
+            for post in posts:
+                action = post.review_task.suggested_action
+                reason = (
+                    f"{_operation_reason_suggestion(post)}；"
+                    f"执行{'沉底' if action == RecommendedAction.SINK else '屏蔽'}。"
                 )
-                if audit.result_code == "OK":
-                    complete_review(
+                payload = {} if action == RecommendedAction.SINK else {"block_reason_code": 1}
+                try:
+                    audit = execute_confirmed_operation(
                         post.review_task,
                         user=request.user,
                         action=action,
                         reason=reason,
+                        source=source,
+                        upstream_payload=payload,
+                        confirmation_key=f"{batch_key}:{post.topic_id}",
                     )
-                    succeeded += 1
-                else:
+                    if operation_result_reaches_target(audit.result_code):
+                        complete_review(
+                            post.review_task,
+                            user=request.user,
+                            action=action,
+                            reason=reason,
+                        )
+                        succeeded += 1
+                    elif audit.result_code == "SESSION_RECOVERING":
+                        recovering += 1
+                    else:
+                        failed += 1
+                except Exception:
                     failed += 1
-            except Exception:
-                failed += 1
-                continue
+                    continue
     except Exception:
         messages.error(request, "无法建立上游操作会话，未执行批量处置。")
         return redirect(redirect_url)
-    finally:
-        if source is not None:
-            source.close()
     if succeeded:
         messages.success(request, f"已按 AI 建议完成 {succeeded} 条处置。")
+    if recovering:
+        messages.warning(request, f"{recovering} 条游戏圈会话正在恢复，请稍后重新确认。")
     if failed:
         messages.warning(request, f"{failed} 条未执行成功，仍保持待审核状态。")
     return redirect(redirect_url)

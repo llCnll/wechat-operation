@@ -108,6 +108,8 @@ uv run python manage.py upgrade_plan --json
 
 当发布包含 Django 数据迁移时，发布清单必须声明 `database=migrate` 与 `restart.mode=supervisor`。若发布不新增一次性 Job 或长期 Worker，应明确将 `once_jobs` 置为空并沿用既有 Supervisor 服务；执行 `migrate` 后重启既有 Supervisor 即可加载 Web 与 Worker 的同一套代码。
 
+当发布新增或调整游戏圈会话 IPC、`GameCircleLoginRuntimeState` 或 `game_circle_session` 的常驻职责时，必须声明 `database=migrate`（如有迁移）和 `restart.mode=supervisor`。会话服务重启会主动丢弃内存中的短期 lease/Access 并重新探测；升级过程不得复制 `runtime/supervisor/game-circle-session.json`、Cookie、token 或未完成的人工写请求。人工写审计为“待回读确认”时，先回读确认状态，绝不自动重放。
+
 完成后，以计划的 `to_version` 运行确认命令，并且只传入计划实际要求的 `--confirm-*` 参数：
 
 ```bash

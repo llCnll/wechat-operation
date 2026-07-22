@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import json
 from time import monotonic, sleep
+from collections.abc import Callable
 from typing import Any
 
-from config.cdp import CdpGameFrame, bind_game_identity
-from jobs.adapters import SourceContractError, SourceTransportError
+from config.cdp import CdpGameFrame, CdpTargetUnavailableError, CdpUnavailableError
+from jobs.adapters import PluginSessionExpiredError, SourceContractError, SourceTransportError
 
 
 class CdpGameCircleMetricClient:
@@ -17,14 +18,19 @@ class CdpGameCircleMetricClient:
         self,
         *,
         appid: str,
-        cdp_url: str = "http://127.0.0.1:9222",
         min_interval_seconds: float = 0.12,
+        frame: CdpGameFrame,
+        identity_token: str,
+        rebind_identity: Callable[[], str] | None = None,
     ):
-        if appid != "wx6d2454a8afcd9706":
-            raise SourceContractError("指标读取仅支持城主别慌张")
+        if not appid:
+            raise SourceContractError("指标读取缺少游戏 appid")
         self.appid = appid
-        self.frame = CdpGameFrame(cdp_url)
-        self.token = bind_game_identity(appid, cdp_url)
+        if not identity_token:
+            raise SourceContractError("缺少受控来源身份会话")
+        self.frame = frame
+        self.token = identity_token
+        self._rebind_identity = rebind_identity
         self.min_interval_seconds = min_interval_seconds
         self._last_request_at = 0.0
 
@@ -46,7 +52,7 @@ class CdpGameCircleMetricClient:
             for (const [key, value] of Object.entries({query_json})) {{
                 url.searchParams.set(key, String(value));
             }}
-            url.searchParams.set('token', {json.dumps(self.token)});
+            url.searchParams.set('token', "__SOURCE_TOKEN__");
             url.searchParams.set('auth_type', '4');
             const response = await fetch(url.toString(), {{
                 method: {json.dumps(method)}, credentials: 'include',
@@ -60,14 +66,28 @@ class CdpGameCircleMetricClient:
             try {{ return {{status: response.status, payload: JSON.parse(text)}}; }}
             catch (_) {{ return {{status: response.status, payload: null}}; }}
         }})()"""
-        result = self.frame.evaluate(expression)
-        self._last_request_at = monotonic()
-        if not isinstance(result, dict) or result.get("status") != 200:
-            raise SourceTransportError("指标接口传输失败")
-        payload = result.get("payload")
-        if not isinstance(payload, dict):
-            raise SourceContractError("指标接口响应非 JSON")
-        return payload
+        for attempt in range(2):
+            try:
+                result = self.frame.evaluate(
+                    expression.replace('"__SOURCE_TOKEN__"', json.dumps(self.token))
+                )
+            except CdpTargetUnavailableError as exc:
+                raise PluginSessionExpiredError("已登记游戏圈 target 不可用") from exc
+            except CdpUnavailableError as exc:
+                raise SourceTransportError("指标接口 CDP 请求失败") from exc
+            self._last_request_at = monotonic()
+            if not isinstance(result, dict) or result.get("status") != 200:
+                raise SourceTransportError("指标接口传输失败")
+            payload = result.get("payload")
+            if not isinstance(payload, dict):
+                raise SourceContractError("指标接口响应非 JSON")
+            if payload.get("errcode") != -2:
+                return payload
+            if attempt == 0 and self._rebind_identity is not None:
+                self.token = self._rebind_identity()
+                continue
+            raise PluginSessionExpiredError("来源身份会话已失效")
+        raise AssertionError("来源身份重绑循环不应到达此处")
 
     def circle_fans(
         self, *, start_ds: int, end_ds: int, cur_page: int = 0, per_page: int = 366

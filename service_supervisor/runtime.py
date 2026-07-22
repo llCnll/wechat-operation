@@ -96,6 +96,10 @@ class RuntimeStore:
         return self.root / "control.token"
 
     @property
+    def game_circle_ipc_token_path(self) -> Path:
+        return self.root / "game-circle-ipc.token"
+
+    @property
     def endpoint_path(self) -> Path:
         return self.root / "endpoint.json"
 
@@ -107,6 +111,10 @@ class RuntimeStore:
 
     def log_path(self, service: str) -> Path:
         return self.logs_dir / f"{service}.log"
+
+    @property
+    def game_circle_session_path(self) -> Path:
+        return self.root / "game-circle-session.json"
 
     def read_json(self, path: Path, default=None):
         try:
@@ -123,13 +131,21 @@ class RuntimeStore:
         os.replace(temporary_path, path)
 
     def token(self) -> str:
+        return self._token_at(self.token_path)
+
+    def game_circle_ipc_token(self) -> str:
+        """Return the capability dedicated to game-circle service calls."""
+        return self._token_at(self.game_circle_ipc_token_path)
+
+    @staticmethod
+    def _token_at(path: Path) -> str:
         try:
-            return self.token_path.read_text(encoding="utf-8").strip()
+            return path.read_text(encoding="utf-8").strip()
         except FileNotFoundError:
             token = secrets.token_urlsafe(32)
-            self.token_path.write_text(token, encoding="utf-8")
+            path.write_text(token, encoding="utf-8")
             try:
-                self.token_path.chmod(0o600)
+                path.chmod(0o600)
             except OSError:  # pragma: no cover - permissions vary on Windows.
                 pass
             return token
@@ -146,6 +162,7 @@ def write_worker_heartbeat() -> None:
         service
         not in {
             "scheduler",
+            "game_circle_session",
             "ingestion",
             "backfill_ingestion",
             "metric_sync",

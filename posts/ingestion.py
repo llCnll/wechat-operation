@@ -6,10 +6,12 @@ from typing import Protocol
 
 from django.utils import timezone
 
+from config.game_circle_ipc import is_session_recovering_error
 from jobs.adapters import CandidatePostDTO, SourceContractError, SourceTransportError
 from jobs.models import BackgroundJob
 
 from .models import CandidatePost
+from .game_catalog import checkpoint_with_execution_scope
 from .services import classify_content_card, store_post_metrics
 
 
@@ -59,7 +61,9 @@ def ingest_page(
                     client.get_post_metrics(candidate.topic_id),
                     source_requested_at=requested_at,
                 )
-            except (SourceContractError, SourceTransportError):
+            except (SourceContractError, SourceTransportError) as exc:
+                if is_session_recovering_error(exc):
+                    raise
                 # Metrics are optional; keep the original post even if counters are unavailable.
                 pass
             from reviews.services import enqueue_evaluation_pipeline
@@ -75,6 +79,8 @@ def ingest_window(
     count = ingest_page(
         client, page=page, page_size=page_size, start_time=start_time, end_time=end_time
     )
-    job.checkpoint = {"page": page + 1, "last_processed_count": count}
+    job.checkpoint = checkpoint_with_execution_scope(
+        job, {"page": page + 1, "last_processed_count": count}
+    )
     job.save(update_fields=["checkpoint", "updated_at"])
     return count

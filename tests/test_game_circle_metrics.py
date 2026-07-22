@@ -1,13 +1,16 @@
 from datetime import date, datetime
+from contextlib import contextmanager
 from zoneinfo import ZoneInfo
 
 import pytest
 from django.utils import timezone
 
-from config.cdp import CdpUnavailableError
-from jobs.adapters import SourceContractError
+from jobs.adapters import SourceContractError, SourceTransportError
 from jobs.models import BackgroundJob, JobStatus
-from jobs.services import execute_next_job
+from jobs.services import JobDeferred, execute_next_job
+from config.game_circle_ipc import GameCircleIpcError
+from posts.game_catalog import set_active_game
+from posts.models import ManagedGame
 from reporting.metric_jobs import (
     DAILY_METRIC_SOURCES,
     METRIC_BACKFILL_TASK,
@@ -25,12 +28,24 @@ from reporting.metric_sync import (
     provider_metric_page,
     upsert_metric_snapshot,
 )
-from reporting.metric_tasks import METRIC_WORKER_HANDLERS
+from reporting.metric_tasks import METRIC_WORKER_HANDLERS, metric_sync_handler
 from reporting.models import GameCircleMetricSnapshot, MetricPublicationState, MetricSource
 from reporting.source_client import CdpGameCircleMetricClient
 
 APPID = "wx6d2454a8afcd9706"
 SHANGHAI = ZoneInfo("Asia/Shanghai")
+
+
+@pytest.fixture(autouse=True)
+def active_game_scope(request, monkeypatch):
+    if request.node.get_closest_marker("django_db") is None:
+        return
+    game, _ = ManagedGame.objects.get_or_create(
+        appid=APPID,
+        defaults={"name": "指标测试游戏"},
+    )
+    set_active_game(appid=game.appid)
+
 
 
 def _page(*records, total_count=None):
@@ -129,7 +144,7 @@ def test_page_checkpoint_resumes_next_page_without_creating_missing_days(monkeyp
             )
         page_one_attempts += 1
         if page_one_attempts == 1:
-            raise CdpUnavailableError("offline")
+            raise SourceTransportError("offline")
         return MetricPage(
             records=(
                 MetricRecord(
@@ -141,7 +156,7 @@ def test_page_checkpoint_resumes_next_page_without_creating_missing_days(monkeyp
             has_more=False,
         )
 
-    monkeypatch.setattr("reporting.metric_tasks.CdpGameCircleMetricClient", Source)
+    monkeypatch.setattr("reporting.metric_tasks.GameCircleMetricClient", Source)
     monkeypatch.setattr("reporting.metric_tasks.read_metric_page", read_page)
     job = BackgroundJob.objects.create(
         task_type=METRIC_BACKFILL_TASK,
@@ -158,7 +173,7 @@ def test_page_checkpoint_resumes_next_page_without_creating_missing_days(monkeyp
     execute_next_job(METRIC_WORKER_HANDLERS, task_types=METRIC_WORKER_HANDLERS)
     job.refresh_from_db()
     assert job.status == JobStatus.PENDING
-    assert job.retry_count == 0
+    assert job.retry_count == 1
     assert job.checkpoint["next_page"] == 1
 
     job.next_run_at = timezone.now()
@@ -183,7 +198,7 @@ def test_metric_error_classification_defers_retries_or_fails_terminally(monkeypa
         def close(self):
             return None
 
-    monkeypatch.setattr("reporting.metric_tasks.CdpGameCircleMetricClient", Source)
+    monkeypatch.setattr("reporting.metric_tasks.GameCircleMetricClient", Source)
     job = BackgroundJob.objects.create(
         task_type=METRIC_DAILY_SYNC_TASK,
         idempotency_key="metric-error-classification",
@@ -218,10 +233,10 @@ def test_metric_error_classification_defers_retries_or_fails_terminally(monkeypa
 
 
 @pytest.mark.django_db
-def test_login_loss_defers_without_consuming_retry_budget(monkeypatch):
+def test_regular_metric_transport_failure_uses_the_worker_retry_budget(monkeypatch):
     monkeypatch.setattr(
-        "reporting.metric_tasks.CdpGameCircleMetricClient",
-        lambda **_kwargs: (_ for _ in ()).throw(CdpUnavailableError("offline")),
+        "reporting.metric_tasks.GameCircleMetricClient",
+        lambda **_kwargs: (_ for _ in ()).throw(SourceTransportError("offline")),
     )
     job = BackgroundJob.objects.create(
         task_type=METRIC_DAILY_SYNC_TASK,
@@ -237,6 +252,33 @@ def test_login_loss_defers_without_consuming_retry_budget(monkeypatch):
 
     execute_next_job(METRIC_WORKER_HANDLERS, task_types=METRIC_WORKER_HANDLERS)
     job.refresh_from_db()
+    assert job.status == JobStatus.PENDING
+    assert job.retry_count == 1
+
+
+@pytest.mark.django_db
+def test_session_recovery_defers_metric_work_without_consuming_retry_budget(monkeypatch):
+    monkeypatch.setattr(
+        "reporting.metric_tasks.GameCircleMetricClient",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            GameCircleIpcError("SESSION_RECOVERING", "游戏圈会话正在恢复，请稍后重试")
+        ),
+    )
+    job = BackgroundJob.objects.create(
+        task_type=METRIC_DAILY_SYNC_TASK,
+        idempotency_key="metric-session-recover",
+        max_retries=3,
+        parameter_summary={
+            "appid": APPID,
+            "source": MetricSource.GROUP_SHARE_DAILY,
+            "start_ds": 20260719,
+            "end_ds": 20260719,
+        },
+    )
+
+    execute_next_job(METRIC_WORKER_HANDLERS, task_types=METRIC_WORKER_HANDLERS)
+    job.refresh_from_db()
+
     assert job.status == JobStatus.PENDING
     assert job.retry_count == 0
     assert job.next_run_at > timezone.now()

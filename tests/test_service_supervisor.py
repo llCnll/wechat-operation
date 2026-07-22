@@ -49,8 +49,10 @@ def test_supervisor_control_server_requires_token_and_reports_status(tmp_path):
             response = client.get(url, headers={"X-Operations-Supervisor-Token": token})
         assert response.status_code == 200
         assert set(response.json()["services"]) == {
+            "controlled_chrome",
             "web",
             "scheduler",
+            "game_circle_session",
             "ingestion",
             "backfill_ingestion",
             "metric_sync",
@@ -93,3 +95,33 @@ def test_reconcile_replaces_a_recorded_process_when_its_fixed_command_changes(
 
     assert ("terminate", "ingestion", state) in calls
     assert ("launch", "ingestion", state) in calls
+
+
+def test_controlled_chrome_uses_fixed_loopback_debugging_and_dedicated_profile(tmp_path, monkeypatch):
+    chrome = tmp_path / "chrome"
+    chrome.write_text("", encoding="utf-8")
+    monkeypatch.setattr("service_supervisor.manager.CONTROLLED_CHROME_BIN", str(chrome))
+    monkeypatch.setattr("service_supervisor.manager.CONTROLLED_CHROME_USER_DATA_DIR", tmp_path / "profile")
+
+    command = Supervisor(Path.cwd(), tmp_path).definitions()["controlled_chrome"].command
+
+    assert command[0] == str(chrome)
+    assert "--remote-debugging-address=127.0.0.1" in command
+    assert any(part.startswith("--remote-debugging-port=") for part in command)
+    assert any(part.startswith("--user-data-dir=") for part in command)
+
+
+def test_controlled_chrome_is_started_as_a_default_supervisor_dependency(tmp_path, monkeypatch):
+    supervisor = Supervisor(Path.cwd(), tmp_path)
+    calls = []
+    monkeypatch.setattr(supervisor, "acquire", lambda: None)
+    monkeypatch.setattr(supervisor, "start_controller", lambda: None)
+    monkeypatch.setattr(supervisor, "preflight", lambda: None)
+    monkeypatch.setattr(supervisor, "reconcile", lambda: calls.append("reconcile"))
+    monkeypatch.setattr(supervisor, "_web_healthy", lambda **_kwargs: True)
+    monkeypatch.setattr(supervisor, "_is_process_current", lambda *_args: True)
+
+    supervisor.bootstrap()
+
+    assert supervisor._read_state("controlled_chrome")["desired"] is True
+    assert calls == ["reconcile"]

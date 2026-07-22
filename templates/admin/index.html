@@ -41,7 +41,7 @@
         </div>
         <div class="console-pipeline-node-indicators">
           <i aria-hidden="true"></i>
-          {% if node.key == "ocr" or node.key == "video_extraction" or node.key == "writes" or node.key == "ai_moderation" %}
+          {% if node.key == "controlled_chrome" or node.key == "game_circle_session" or node.key == "controlled_chrome_session" or node.key == "ocr" or node.key == "video_extraction" or node.key == "writes" or node.key == "ai_moderation" %}
           <button class="console-pipeline-info" type="button" aria-describedby="pipeline-info-{{ node.key }}" aria-label="查看{{ node.label }}说明">i<span id="pipeline-info-{{ node.key }}" class="console-pipeline-tooltip" role="tooltip">{{ node.description }}</span></button>
           {% endif %}
         </div>
@@ -71,8 +71,20 @@
       <button type="button" class="is-quiet" data-config-dialog="writes" aria-haspopup="dialog">管理授权</button>
       {% elif node.key == "policy" %}
       <a href="{% url 'admin:reviews_policyversion_changelist' %}">管理策略</a>
-      {% elif node.key == "cdp" %}
+      {% elif node.key == "controlled_chrome_session" %}
+      {% if node.session_service_running %}
       <form method="post" action="{% url 'open-controlled-login' %}">{% csrf_token %}<input type="hidden" name="return_to" value="/admin/"><button type="submit">打开登录页</button></form>
+      {% endif %}
+      {% elif node.key == "active_game_scope" %}
+      <div class="console-active-game-actions">
+        <details class="console-active-game-switch" {% if not admin_console.active_game_scope %}open{% endif %}>
+          <summary>切换游戏</summary>
+          <form method="post" action="{% url 'set-active-game-scope' %}">{% csrf_token %}<input type="hidden" name="return_to" value="/admin/"><label>操作游戏<select name="appid" required>{% for game in admin_console.manual_ingestion_games %}<option value="{{ game.appid }}" {% if game.appid == admin_console.manual_ingestion_default_appid %}selected{% endif %}>{{ game.name }}</option>{% endfor %}</select></label><button type="submit">切换并刷新 Frame</button></form>
+        </details>
+        <form method="post" action="{% url 'enqueue-session-keepalive' %}">{% csrf_token %}<input type="hidden" name="return_to" value="/admin/"><button type="submit">保活 Frame</button></form>
+        <form method="post" action="{% url 'enqueue-login-probe' %}">{% csrf_token %}<input type="hidden" name="return_to" value="/admin/"><button class="is-quiet" type="submit">检查会话</button></form>
+        <a class="is-quiet" href="{% url 'admin:posts_managedgame_changelist' %}">同步目录</a>
+      </div>
       {% elif node.key == "ingestion" %}
       <details class="console-ingestion-details" {% if not node.ready %}open{% endif %}>
         <summary>管理采集</summary>
@@ -232,12 +244,6 @@
         <a href="{% url 'admin:reviews_policyversion_changelist' %}">管理版本</a>
         <a href="{% url 'admin:reviews_policyrule_changelist' %}">编辑规则</a>
       </div>
-    </article>
-    <article class="console-card sync console-game-card">
-      <span>受控同步</span>
-      <strong>可管理游戏</strong>
-      <small>{{ admin_console.managed_game_count }} 个本地目录{% if admin_console.last_game_sync_at %} · 最近同步 {{ admin_console.last_game_sync_at|date:"m-d H:i" }}{% else %} · 尚未同步{% endif %}</small>
-      <a class="console-card-link" href="{% url 'admin:posts_managedgame_changelist' %}">查看并同步目录</a>
     </article>
   </div>
   {% if admin_console.active_policy_rules %}

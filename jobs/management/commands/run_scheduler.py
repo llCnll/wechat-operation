@@ -10,11 +10,13 @@ from posts.ingestion_jobs import (
     scheduled_ingestion_window,
 )
 from reporting.metric_jobs import enqueue_due_metric_jobs
+from jobs.game_circle_refresh import enqueue_login_probe, enqueue_scheduled_session_refresh
 from service_supervisor.runtime import write_worker_heartbeat
+from posts.game_catalog import active_game_appid
 
 
 class Command(BaseCommand):
-    help = "为城主别慌张持续创建自动状态巡检和帖子采集任务。"
+    help = "为当前操作游戏持续创建自动状态巡检和帖子采集任务。"
 
     def add_arguments(self, parser):
         parser.add_argument("--once", action="store_true", help="仅执行一次调度。")
@@ -35,25 +37,35 @@ class Command(BaseCommand):
 
     def _schedule_once(self) -> None:
         now = timezone.now()
+        # Login probing has no game scope and remains useful before catalog setup.
+        if now.astimezone(SHANGHAI).minute % 5 == 0:
+            enqueue_login_probe(source="scheduler", now=now)
         try:
+            # A fresh installation may have a synchronized catalog but no
+            # operator-selected scope yet.  Keep the long-running Scheduler
+            # healthy and simply skip this slot; source jobs must never guess
+            # a game range.
+            active_game_appid(persist_default=False)
             window = scheduled_ingestion_window(now)
             scheduled = enqueue_scheduled_jobs(now)
             metrics = enqueue_due_metric_jobs(now)
+            session_refresh = enqueue_scheduled_session_refresh(now)
         except ValueError as exc:
-            raise CommandError(str(exc)) from exc
+            self.stdout.write(f"本轮调度未创建来源任务：{exc}")
+            return
         start_at = datetime.fromtimestamp(window.start_time, tz=SHANGHAI)
         end_at = datetime.fromtimestamp(window.end_time, tz=SHANGHAI)
         outcome = "已创建" if scheduled.ingestion.created else "已存在"
         self.stdout.write(
             "自动采集任务"
-            f" {outcome}：appid=wx6d2454a8afcd9706，"
+            f" {outcome}：appid={scheduled.ingestion.job.parameter_summary['appid']}，"
             f"窗口={start_at.isoformat()} 至 {end_at.isoformat()}，"
             f"任务={scheduled.ingestion.job.pk}。"
         )
         status_outcome = "已创建" if scheduled.status_sync.created else "已存在"
         self.stdout.write(
             f"待审核帖子状态巡检 {status_outcome}："
-            f"appid=wx6d2454a8afcd9706，批量=20，任务={scheduled.status_sync.job.pk}。"
+            f"appid={scheduled.status_sync.job.parameter_summary['appid']}，批量=20，任务={scheduled.status_sync.job.pk}。"
         )
         if metrics.daily:
             created = sum(result.created for result in metrics.daily)
@@ -66,3 +78,6 @@ class Command(BaseCommand):
                 f"周度运营效果同步：{created} 个已创建，"
                 f"{len(metrics.weekly) - created} 个已存在。"
             )
+        if session_refresh is not None:
+            outcome = "已创建" if session_refresh.created else "已复用"
+            self.stdout.write(f"游戏圈会话保活任务{outcome}：任务={session_refresh.job.pk}。")

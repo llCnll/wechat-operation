@@ -5,7 +5,9 @@ from django.contrib.auth import get_user_model
 from django.test import Client
 
 from jobs.models import BackgroundJob
-from posts.models import CandidatePost, MediaType, OriginalPost, OriginType, PostMedia
+from jobs.services import JobDeferred
+from posts.game_catalog import set_active_game
+from posts.models import CandidatePost, ManagedGame, MediaType, OriginalPost, OriginType, PostMedia
 from reviews.adapters import REVIEW_PROMPT_VERSION, AssessmentOutput, RiskOutput
 from reviews.automation_tasks import automated_moderation_handler
 from reviews.models import (
@@ -34,6 +36,16 @@ from reviews.services import (
 )
 from reviews.video import media_fingerprint
 from reviews.video_tasks import VIDEO_EXTRACTOR_VERSION
+
+
+@pytest.fixture(autouse=True)
+def active_game_scope():
+    game, _ = ManagedGame.objects.get_or_create(
+        appid="wx6d2454a8afcd9706",
+        defaults={"name": "测试游戏"},
+    )
+    ManagedGame.objects.create(appid="wx-test", name="测试游戏二")
+    set_active_game(appid=game.appid)
 
 
 def _enable_automation(monkeypatch, runtime):
@@ -967,7 +979,7 @@ def test_unapproved_automation_worker_never_opens_a_controlled_source(monkeypatc
     def source_must_not_be_created(**_kwargs):
         raise AssertionError("未授权任务不应建立受控上游会话")
 
-    monkeypatch.setattr("reviews.automation_tasks.CdpGameCircleClient", source_must_not_be_created)
+    monkeypatch.setattr("reviews.automation_tasks.GameCirclePostClient", source_must_not_be_created)
     automated_moderation_handler(job)
 
     audit = task.operation_audits.get()
@@ -1021,7 +1033,7 @@ def test_ai_worker_does_not_open_cdp_or_write_while_human_operation_is_executing
     job = BackgroundJob.objects.get(task_type=AI_AUTOMATED_MODERATION_TASK)
 
     monkeypatch.setattr(
-        "reviews.automation_tasks.CdpGameCircleClient",
+        "reviews.automation_tasks.GameCirclePostClient",
         lambda **_kwargs: (_ for _ in ()).throw(AssertionError("不应建立 CDP 会话")),
     )
     automated_moderation_handler(job)
@@ -1031,6 +1043,99 @@ def test_ai_worker_does_not_open_cdp_or_write_while_human_operation_is_executing
         result_code="EXECUTING",
     ).exists()
     assert task.operation_audits.filter(result_code="AUTO_ELIGIBILITY_REJECTED").exists()
+
+
+@pytest.mark.django_db
+def test_ai_worker_defers_session_recovery_without_reserving_an_operation(monkeypatch):
+    from config.settings import runtime
+
+    _enable_automation(monkeypatch, runtime)
+    post = OriginalPost.objects.create(
+        topic_id=9009,
+        content_id="auto-9009",
+        content_text="内容",
+        status=2,
+        source_appid="wx6d2454a8afcd9706",
+    )
+    CandidatePost.objects.create(
+        topic_id=post.topic_id, content_id=post.content_id, origin_type=OriginType.ORIGINAL
+    )
+    policy = PolicyVersion.objects.create(name="session-deferred", version="1", is_active=True)
+    PolicyRule.objects.create(
+        policy_version=policy,
+        risk_label="CHEAT",
+        min_confidence=0.99,
+        recommended_action=RecommendedAction.BLOCK,
+        priority=100,
+        auto_execution_enabled=True,
+    )
+    assessment, task = persist_assessment(
+        post,
+        AssessmentOutput(
+            content_category="OTHER",
+            recommended_action=RecommendedAction.BLOCK,
+            overall_confidence=0.99,
+            risk_labels=[RiskOutput(label="CHEAT", confidence=0.99, evidence=["证据"])],
+        ),
+        policy,
+    )
+    job = BackgroundJob.objects.get(task_type=AI_AUTOMATED_MODERATION_TASK)
+    monkeypatch.setattr(
+        "reviews.automation_tasks.GameCirclePostClient",
+        lambda **_kwargs: (_ for _ in ()).throw(JobDeferred("等待游戏圈会话刷新")),
+    )
+
+    with pytest.raises(JobDeferred):
+        automated_moderation_handler(job)
+
+    assert not OperationAudit.objects.filter(task=task).exists()
+
+
+@pytest.mark.django_db
+def test_ai_worker_records_failure_when_scope_resolution_fails_before_reservation(monkeypatch):
+    from config.settings import runtime
+
+    _enable_automation(monkeypatch, runtime)
+    post = OriginalPost.objects.create(
+        topic_id=9012,
+        content_id="scope-resolution-failure",
+        content_text="内容",
+        status=2,
+        source_appid="wx6d2454a8afcd9706",
+    )
+    CandidatePost.objects.create(
+        topic_id=post.topic_id, content_id=post.content_id, origin_type=OriginType.ORIGINAL
+    )
+    policy = PolicyVersion.objects.create(name="scope-resolution-failure", version="1", is_active=True)
+    PolicyRule.objects.create(
+        policy_version=policy,
+        risk_label="CHEAT",
+        min_confidence=0.99,
+        recommended_action=RecommendedAction.BLOCK,
+        priority=100,
+        auto_execution_enabled=True,
+    )
+    assessment, task = persist_assessment(
+        post,
+        AssessmentOutput(
+            content_category="OTHER",
+            recommended_action=RecommendedAction.BLOCK,
+            overall_confidence=0.99,
+            risk_labels=[RiskOutput(label="CHEAT", confidence=0.99, evidence=["证据"])],
+        ),
+        policy,
+    )
+    job = BackgroundJob.objects.get(task_type=AI_AUTOMATED_MODERATION_TASK)
+    monkeypatch.setattr(
+        "reviews.automation_tasks.resolve_execution_scope",
+        lambda _job: (_ for _ in ()).throw(RuntimeError("scope unavailable")),
+    )
+
+    automated_moderation_handler(job)
+
+    audit = OperationAudit.objects.get(task=task, execution_source=OperationExecutionSource.AI_AUTOMATED)
+    assert audit.result_code == "ACTION_FAILED"
+    assert audit.error_summary == "上游调用或状态验证失败：AttributeError"
 
 
 @pytest.mark.django_db
@@ -1069,7 +1174,13 @@ def test_human_operation_reports_conflict_while_ai_operation_is_executing(monkey
         def close(self):
             pass
 
-    monkeypatch.setattr("posts.views.CdpGameCircleClient", lambda **_kwargs: Source())
+    from contextlib import contextmanager
+
+    @contextmanager
+    def source_session(_post):
+        yield Source()
+
+    monkeypatch.setattr("posts.views._source_for_post", source_session)
     user = get_user_model().objects.create_user("human-conflict-reviewer")
     client = Client()
     client.force_login(user)

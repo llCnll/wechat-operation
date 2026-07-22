@@ -1,7 +1,10 @@
 import pytest
+from unittest.mock import Mock
 
-from jobs.adapters import SourceBusinessDeletedError, SourceContractError
+from config.cdp import CdpTargetUnavailableError
+from jobs.adapters import PluginSessionExpiredError, SourceBusinessDeletedError, SourceContractError
 from posts.source_client import CdpGameCircleClient
+from reporting.source_client import CdpGameCircleMetricClient
 
 
 def _client_with_captured_post(monkeypatch):
@@ -123,6 +126,84 @@ def test_management_detail_deleted_error_is_mapped_to_business_deletion(monkeypa
 
     with pytest.raises(SourceBusinessDeletedError):
         client.get_post_metrics(1434284478)
+
+
+def test_management_detail_non_json_response_has_a_safe_reason():
+    frame = Mock()
+    frame.evaluate.return_value = {"status": 200, "payload": None, "response_kind": "OTHER"}
+    client = CdpGameCircleClient(
+        appid="game-a", frame=frame, identity_token="test-only", min_interval_seconds=0
+    )
+
+    with pytest.raises(SourceContractError) as exc_info:
+        client.get_post_metrics(1434284478)
+
+    assert exc_info.value.safe_reason == "NON_JSON_RESPONSE"
+    assert str(exc_info.value) == "来源详情响应不是 JSON"
+
+
+def test_verified_identity_rejection_rebinds_once_then_uses_the_new_in_memory_token():
+    frame = Mock()
+    frame.evaluate.side_effect = [
+        {"status": 200, "payload": {"errcode": -2}},
+        {"status": 200, "payload": {"errcode": 0, "rsp": {"topic_list": []}}},
+    ]
+    rebind = Mock(return_value="new-token")
+    client = CdpGameCircleClient(
+        appid="game-a",
+        frame=frame,
+        identity_token="old-token",
+        min_interval_seconds=0,
+        rebind_identity=rebind,
+    )
+
+    assert client.list_candidates(page=0, page_size=1, start_time=0, end_time=1) == []
+    assert rebind.call_count == 1
+    expressions = [call.args[0] for call in frame.evaluate.call_args_list]
+    assert "old-token" in expressions[0]
+    assert "new-token" in expressions[1]
+
+
+def test_second_verified_identity_rejection_never_rebinds_or_replays_again():
+    frame = Mock()
+    frame.evaluate.side_effect = [
+        {"status": 200, "payload": {"errcode": -2}},
+        {"status": 200, "payload": {"errcode": -2}},
+    ]
+    rebind = Mock(return_value="new-token")
+    client = CdpGameCircleClient(
+        appid="game-a",
+        frame=frame,
+        identity_token="old-token",
+        min_interval_seconds=0,
+        rebind_identity=rebind,
+    )
+
+    with pytest.raises(PluginSessionExpiredError):
+        client.list_candidates(page=0, page_size=1, start_time=0, end_time=1)
+    assert rebind.call_count == 1
+
+
+def test_post_client_preserves_a_missing_owned_target_as_session_expiry():
+    frame = Mock()
+    frame.evaluate.side_effect = CdpTargetUnavailableError("target missing")
+    client = CdpGameCircleClient(
+        appid="game-a", frame=frame, identity_token="test-only", min_interval_seconds=0
+    )
+
+    with pytest.raises(PluginSessionExpiredError, match="target"):
+        client.list_candidates(page=0, page_size=1, start_time=0, end_time=1)
+
+
+def test_metric_client_preserves_a_missing_owned_target_as_session_expiry():
+    frame = Mock()
+    frame.evaluate.side_effect = CdpTargetUnavailableError("target missing")
+    client = CdpGameCircleMetricClient(
+        appid="game-a", frame=frame, identity_token="test-only", min_interval_seconds=0
+    )
+
+    with pytest.raises(PluginSessionExpiredError, match="target"):
+        client.circle_fans(start_ds=20260701, end_ds=20260702)
 
 
 def test_bounded_management_detail_read_restores_the_default_timeout(monkeypatch):

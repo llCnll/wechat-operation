@@ -58,7 +58,7 @@ def _labelled_rows(rows, labels: dict[str, str], fallback) -> tuple[ReportRow, .
 
 
 def _source_appid_filter(appid: str) -> Q:
-    return Q(source_appid=appid) | Q(source_appid="") if appid == "wx6d2454a8afcd9706" else Q(source_appid=appid)
+    return Q(source_appid=appid)
 
 
 def build_live_operations_analysis(start_day: date, end_day: date, appid: str) -> LiveOperationsAnalysis:

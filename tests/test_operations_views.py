@@ -1,4 +1,5 @@
 from datetime import timedelta
+from contextlib import contextmanager
 from unittest.mock import patch
 
 import pytest
@@ -7,7 +8,9 @@ from django.test import Client
 from django.utils import timezone
 
 from config.settings import runtime
+from config.game_circle_ipc import GameCircleIpcError
 from jobs.models import BackgroundJob
+from posts.game_catalog import set_active_game
 from posts.models import (
     POST_STATUS_BLOCKED,
     POST_STATUS_DELETED,
@@ -15,6 +18,7 @@ from posts.models import (
     POST_STATUS_SUNK,
     AuthorMuteStatus,
     CandidatePost,
+    GameCircleLoginRuntimeState,
     InteractionSnapshot,
     ManagedGame,
     OriginalPost,
@@ -37,6 +41,11 @@ from reviews.reply_faq import CITY_LORD_APPID
 from reviews.services import AI_EVALUATE_TASK, OCR_EXTRACT_TASK, persist_assessment
 from reviews.video import media_fingerprint
 from reviews.video_tasks import VIDEO_EXTRACTOR_VERSION
+
+
+def _activate_game(appid: str) -> None:
+    game, _ = ManagedGame.objects.get_or_create(appid=appid, defaults={"name": f"测试-{appid}"})
+    set_active_game(appid=game.appid)
 
 
 @pytest.mark.django_db
@@ -77,13 +86,67 @@ def test_operations_dashboard_renders_original_post_metrics():
     assert "运营测试帖子正文" in response.content.decode()
     assert "浏览 12" in response.content.decode()
     assert "审核处置" in response.content.decode()
-    assert 'class="cdp-mode">CDP</span>' in response.content.decode()
+    assert 'class="cdp-mode">会话</span>' in response.content.decode()
     assert "data-cdp-login-status" in response.content.decode()
+    assert 'class="cdp-mode">Frame</span>' in response.content.decode()
+    assert "data-cdp-frame-status" in response.content.decode()
+    assert "status.can_open_login" in response.content.decode()
+    assert "status.frame_valid" in response.content.decode()
+    assert "status.frame_can_recover" in response.content.decode()
     assert 'fetch("/auth/status"' in response.content.decode()
     assert 'action="/auth/open-login/"' in response.content.decode()
+    assert 'action="/admin/runtime/session-recover/"' in response.content.decode()
     assert 'data-operation="SKIP"' in response.content.decode()
     assert 'data-operation="UNMUTE"' in response.content.decode()
     assert f"/posts/{post.topic_id}/refresh/" in response.content.decode()
+
+
+@pytest.mark.django_db
+def test_browser_login_status_only_allows_opening_login_page_when_scan_is_required():
+    state = GameCircleLoginRuntimeState.objects.create(
+        login_state=GameCircleLoginRuntimeState.LoginState.SCAN_REQUIRED,
+        error_category=GameCircleLoginRuntimeState.ErrorCategory.SCAN_REQUIRED,
+        checked_at=timezone.now(),
+    )
+
+    scan_required = Client().get("/auth/status").json()
+
+    assert scan_required["valid"] is False
+    assert scan_required["can_open_login"] is True
+    assert scan_required["state"] == GameCircleLoginRuntimeState.LoginState.SCAN_REQUIRED
+    assert scan_required["frame_valid"] is False
+
+    state.login_state = GameCircleLoginRuntimeState.LoginState.UNAVAILABLE
+    state.error_category = GameCircleLoginRuntimeState.ErrorCategory.CHROME_UNAVAILABLE
+    state.save(update_fields=["login_state", "error_category", "updated_at"])
+
+    unavailable = Client().get("/auth/status").json()
+
+    assert unavailable["can_open_login"] is False
+    assert unavailable["state"] == GameCircleLoginRuntimeState.LoginState.UNAVAILABLE
+
+
+@pytest.mark.django_db
+def test_browser_login_status_reports_outer_session_and_current_game_frame_separately():
+    _activate_game("wx-frame")
+    GameCircleLoginRuntimeState.objects.create(
+        login_state=GameCircleLoginRuntimeState.LoginState.READY,
+        error_category=GameCircleLoginRuntimeState.ErrorCategory.NONE,
+        checked_at=timezone.now(),
+    )
+    with patch("config.urls.RuntimeStore") as store_class:
+        store = store_class.return_value
+        store.read_json.side_effect = [
+            {"at": timezone.now().isoformat()},
+            {"leases": [{"appid": "wx-frame", "state": "ACTIVE"}]},
+        ]
+
+        status = Client().get("/auth/status").json()
+
+    assert status["valid"] is True
+    assert status["frame_valid"] is True
+    assert status["frame_state"] == "READY"
+    assert status["frame_can_recover"] is False
 
 
 @pytest.mark.django_db
@@ -203,8 +266,8 @@ def test_mute_management_filters_scope_and_imminent_expiry():
 
 
 @pytest.mark.django_db
-@patch("posts.views.open_controlled_login_page")
-def test_invalid_cdp_login_control_only_opens_controlled_chrome(mock_open_login):
+@patch("posts.views.GameCircleIpcClient.call")
+def test_invalid_cdp_login_control_only_opens_controlled_chrome(mock_call):
     user = get_user_model().objects.create_user(username="cdp-login", password="test-password")
     client = Client()
     client.force_login(user)
@@ -213,7 +276,7 @@ def test_invalid_cdp_login_control_only_opens_controlled_chrome(mock_open_login)
 
     assert response.status_code == 302
     assert response.url == "/reports/"
-    mock_open_login.assert_called_once_with()
+    mock_call.assert_called_once_with("OPEN_CONTROLLED_LOGIN")
 
 
 @pytest.mark.django_db
@@ -571,7 +634,7 @@ def test_dashboard_rejects_upstream_operation_for_self_visible_post(monkeypatch)
         def __init__(self, **kwargs):
             raise AssertionError("仅自己可见帖子不能建立上游处置会话")
 
-    monkeypatch.setattr("posts.views.CdpGameCircleClient", Source)
+    monkeypatch.setattr("posts.views.GameCirclePostClient", Source)
     client = Client()
     client.force_login(user)
 
@@ -645,7 +708,7 @@ def test_dashboard_rejects_operation_for_post_deleted_from_management_queue(monk
         def __init__(self, **kwargs):
             raise AssertionError("业务删除帖子不能建立上游处置会话")
 
-    monkeypatch.setattr("posts.views.CdpGameCircleClient", Source)
+    monkeypatch.setattr("posts.views.GameCirclePostClient", Source)
     client = Client()
     client.force_login(user)
 
@@ -715,6 +778,7 @@ def test_dashboard_successful_single_operation_completes_human_review(monkeypatc
         source_appid="wx-sink-review",
         status=2,
     )
+    _activate_game(post.source_appid)
     CandidatePost.objects.create(
         topic_id=post.topic_id,
         content_id=post.content_id,
@@ -739,7 +803,13 @@ def test_dashboard_successful_single_operation_completes_human_review(monkeypatc
         def close(self):
             pass
 
-    monkeypatch.setattr("posts.views.CdpGameCircleClient", Source)
+    monkeypatch.setattr("posts.views.GameCirclePostClient", Source)
+
+    @contextmanager
+    def source_session(_appid):
+        yield Source()
+
+    monkeypatch.setattr("posts.views._source_for_active_game", source_session)
     client = Client()
     client.force_login(user)
 
@@ -757,6 +827,51 @@ def test_dashboard_successful_single_operation_completes_human_review(monkeypatc
 
 
 @pytest.mark.django_db
+def test_dashboard_operation_reports_session_recovery_without_completing_review(monkeypatch):
+    monkeypatch.setattr(runtime, "enable_upstream_writes", True)
+    monkeypatch.setattr(runtime, "enable_sink_writes", True)
+    user = get_user_model().objects.create_user(username="session-recovery-operator")
+    post = OriginalPost.objects.create(
+        topic_id=1051,
+        content_id="session-recovery-content",
+        source_appid="wx-session-recovery",
+        status=2,
+    )
+    _activate_game(post.source_appid)
+    CandidatePost.objects.create(
+        topic_id=post.topic_id,
+        content_id=post.content_id,
+        source_appid=post.source_appid,
+        origin_type=OriginType.ORIGINAL,
+    )
+
+    class Source:
+        def __init__(self, **_kwargs):
+            pass
+
+        def get_post_metrics(self, _topic_id):
+            raise GameCircleIpcError("SESSION_RECOVERING", "游戏圈会话正在恢复，请稍后重新确认")
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr("posts.views.GameCirclePostClient", Source)
+    client = Client()
+    client.force_login(user)
+
+    response = client.post(
+        f"/posts/{post.topic_id}/operate/SINK/",
+        {"reason": "无价值灌水", "confirmed": "yes", "confirmation_key": "session-recovery"},
+        follow=True,
+    )
+
+    assert "游戏圈会话正在恢复，请稍后重新确认。" in response.content.decode()
+    task = post.review_task
+    assert task.status == ReviewStatus.PENDING
+    assert task.operation_audits.get().result_code == "SESSION_RECOVERING"
+
+
+@pytest.mark.django_db
 def test_escalated_ai_operation_can_restore_and_apply_final_action_in_one_flow(monkeypatch):
     monkeypatch.setattr(runtime, "enable_upstream_writes", True)
     monkeypatch.setattr(runtime, "enable_restore_writes", True)
@@ -768,6 +883,7 @@ def test_escalated_ai_operation_can_restore_and_apply_final_action_in_one_flow(m
         source_appid="wx-escalation-correction",
         status=POST_STATUS_BLOCKED,
     )
+    _activate_game(post.source_appid)
     CandidatePost.objects.create(
         topic_id=post.topic_id,
         content_id=post.content_id,
@@ -817,7 +933,13 @@ def test_escalated_ai_operation_can_restore_and_apply_final_action_in_one_flow(m
             pass
 
     source = Source()
-    monkeypatch.setattr("posts.views.CdpGameCircleClient", lambda **_kwargs: source)
+    monkeypatch.setattr("posts.views.GameCirclePostClient", lambda **_kwargs: source)
+
+    @contextmanager
+    def source_session(_appid):
+        yield source
+
+    monkeypatch.setattr("posts.views._source_for_active_game", source_session)
     client = Client()
     client.force_login(user)
 
@@ -992,11 +1114,12 @@ def test_dashboard_uses_one_selected_game_and_other_filters_remain_multi_value()
             ManagedGame(appid="wx-filter-b", name="筛选游戏 B"),
         ]
     )
+    _activate_game("wx-filter-a")
     default_page = client.get("/").content.decode()
-    assert "多选命中 A" not in default_page
+    assert "多选命中 A" in default_page
     assert "多选命中 B" not in default_page
     assert 'id="active-game"' in default_page
-    assert 'name="appid" value="wx-filter-a"' not in default_page
+    assert 'name="appid" value="wx-filter-a"' in default_page
 
     response = client.get(
         "/",
@@ -1051,6 +1174,7 @@ def test_dashboard_refresh_updates_only_post_status_and_metrics(monkeypatch):
         source_appid="wx-refresh",
         status=8,
     )
+    _activate_game(post.source_appid)
     CandidatePost.objects.create(
         topic_id=104,
         content_id="content-104",
@@ -1082,7 +1206,13 @@ def test_dashboard_refresh_updates_only_post_status_and_metrics(monkeypatch):
         def close(self):
             self.closed = True
 
-    monkeypatch.setattr("posts.views.CdpGameCircleClient", Source)
+    monkeypatch.setattr("posts.views.GameCirclePostClient", Source)
+
+    @contextmanager
+    def source_session(_appid):
+        yield Source()
+
+    monkeypatch.setattr("posts.views._source_for_active_game", source_session)
     client = Client()
     client.force_login(user)
 
@@ -1107,6 +1237,7 @@ def test_dashboard_batch_executes_only_eligible_ai_sink_and_block_recommendation
     monkeypatch.setattr(runtime, "enable_block_writes", True)
     user = get_user_model().objects.create_user(username="batch-operator", password="test-password")
     appid = "wx6d2454a8afcd9706"
+    _activate_game(appid)
 
     def create_post(topic_id, action, *, status=2, with_evidence=True):
         post = OriginalPost.objects.create(
@@ -1152,6 +1283,7 @@ def test_dashboard_batch_executes_only_eligible_ai_sink_and_block_recommendation
     non_normal_post, non_normal_task = create_post(
         1206, RecommendedAction.SINK, status=POST_STATUS_SUNK
     )
+    already_blocked_post, already_blocked_task = create_post(1207, RecommendedAction.BLOCK)
 
     class Source:
         operations = []
@@ -1160,6 +1292,7 @@ def test_dashboard_batch_executes_only_eligible_ai_sink_and_block_recommendation
             self.statuses = {
                 sink_post.topic_id: 2,
                 block_post.topic_id: 2,
+                already_blocked_post.topic_id: 4,
             }
 
         def get_post_metrics(self, topic_id):
@@ -1173,7 +1306,13 @@ def test_dashboard_batch_executes_only_eligible_ai_sink_and_block_recommendation
         def close(self):
             pass
 
-    monkeypatch.setattr("posts.views.CdpGameCircleClient", Source)
+    monkeypatch.setattr("posts.views.GameCirclePostClient", Source)
+
+    @contextmanager
+    def source_session(_appid):
+        yield Source()
+
+    monkeypatch.setattr("posts.views._source_for_active_game", source_session)
     client = Client()
     client.force_login(user)
     preview = client.get("/", {"appid": appid}).content.decode()
@@ -1195,6 +1334,7 @@ def test_dashboard_batch_executes_only_eligible_ai_sink_and_block_recommendation
                 human_post.topic_id,
                 no_evidence_post.topic_id,
                 non_normal_post.topic_id,
+                already_blocked_post.topic_id,
             ],
             "return_query": f"appid={appid}&sort=priority_desc",
             "selected_topic_id": sink_post.topic_id,
@@ -1210,8 +1350,10 @@ def test_dashboard_batch_executes_only_eligible_ai_sink_and_block_recommendation
     ]
     sink_task.refresh_from_db()
     block_task.refresh_from_db()
+    already_blocked_task.refresh_from_db()
     assert sink_task.status == ReviewStatus.REVIEWED
     assert block_task.status == ReviewStatus.REVIEWED
+    assert already_blocked_task.status == ReviewStatus.REVIEWED
     assert "AI 风险依据：引流/外部联系方式：联系方式 1201；执行沉底。" == sink_task.reason
     assert "AI 风险依据：引流/外部联系方式：联系方式 1202；执行屏蔽。" == block_task.reason
     for task in (mute_task, human_task, no_evidence_task, non_normal_task):

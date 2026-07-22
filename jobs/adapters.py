@@ -8,15 +8,27 @@ class AdapterError(Exception):
 
 
 class SourceContractError(AdapterError):
-    pass
+    """A validated source contract failure with an optional safe reason code."""
+
+    def __init__(self, message: str, *, safe_reason: str = "SOURCE_CONTRACT") -> None:
+        super().__init__(message)
+        self.safe_reason = safe_reason
 
 
 class SourceTransportError(AdapterError):
     pass
 
 
+class PluginSessionExpiredError(SourceTransportError):
+    """A verified source-identity rejection requires a fresh plugin session."""
+
+
 class SourceBusinessDeletedError(SourceTransportError):
     """The management API confirms that a post is no longer operable."""
+
+
+class WriteResultUnknownError(SourceTransportError):
+    """The process lost the confirmed-write response; the upstream state needs a readback."""
 
 
 @dataclass(frozen=True)
@@ -36,7 +48,9 @@ class SourcePlatformClient(Protocol):
 
     def get_post_metrics(self, topic_id: int) -> dict: ...
 
-    def perform_confirmed_operation(self, *, topic_id: int, action: str, payload: dict) -> dict: ...
+    def perform_confirmed_operation(
+        self, *, topic_id: int, action: str, payload: dict, operation_id: str = ""
+    ) -> dict: ...
 
 
 class OcrClient(Protocol):

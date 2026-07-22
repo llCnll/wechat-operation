@@ -1,19 +1,21 @@
 """Small, read-only context used by the system configuration homepage."""
 
+from datetime import timedelta
 from importlib.util import find_spec
 
 from django.db.models import Max
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 
-from config.cdp import CdpUnavailableError, get_browser_login_status
 from config.runtime_config import public_runtime_config
 from config.supervisor import SupervisorClient, SupervisorUnavailableError
 from reviews.video import media_tools_available
 
 MANAGED_SERVICE_NAMES = (
+    "controlled_chrome",
     "web",
     "scheduler",
+    "game_circle_session",
     "ingestion",
     "backfill_ingestion",
     "metric_sync",
@@ -53,8 +55,7 @@ def admin_console_overview(request):
         return {}
 
     from jobs.models import BackgroundJob, JobStatus
-    from posts.game_catalog import DEFAULT_GAME_APPID, DEFAULT_GAME_NAME, GameOption
-    from posts.models import ManagedGame
+    from posts.models import ActiveGameScope, ManagedGame
     from reviews.models import PolicyVersion, risk_label_display
 
     active_policies = list(PolicyVersion.objects.filter(is_active=True).order_by("-created_at"))
@@ -98,8 +99,7 @@ def admin_console_overview(request):
             "tone": "is-healthy",
         }
     managed_games = list(ManagedGame.objects.order_by("name", "appid"))
-    if not any(game.appid == DEFAULT_GAME_APPID for game in managed_games):
-        managed_games.insert(0, GameOption(DEFAULT_GAME_APPID, DEFAULT_GAME_NAME))
+    active_scope = ActiveGameScope.objects.select_related("active_game").filter(pk=1).first()
     game_summary = ManagedGame.objects.aggregate(last_synced_at=Max("last_synced_at"))
     runtime_config = public_runtime_config()
     try:
@@ -110,13 +110,34 @@ def admin_console_overview(request):
         supervisor_error = str(exc)
     for name in MANAGED_SERVICE_NAMES:
         services.setdefault(name, {"running": False, "desired": False})
-    try:
-        cdp_status = get_browser_login_status()
-        cdp_valid = cdp_status.valid
-        cdp_reason = cdp_status.reason
-    except CdpUnavailableError:
-        cdp_valid = False
-        cdp_reason = "受控 Chrome 未启动"
+    from posts.models import GameCircleLoginRuntimeState
+    login_state = GameCircleLoginRuntimeState.objects.filter(pk=1).first()
+    stale_login_state = (
+        login_state is None
+        or login_state.checked_at is None
+        or login_state.checked_at < timezone.now() - timedelta(minutes=10)
+    )
+    chrome_service_running = bool(services["controlled_chrome"]["running"])
+    session_service_running = bool(services["game_circle_session"]["running"])
+    controlled_chrome_ready = bool(
+        chrome_service_running
+        and session_service_running
+        and not stale_login_state
+        and login_state.login_state == GameCircleLoginRuntimeState.LoginState.READY
+    )
+    controlled_chrome_reason = (
+        "受控 Chrome 服务未运行"
+        if not chrome_service_running
+        else (
+            "游戏圈会话服务未运行，暂不能检查"
+            if not session_service_running
+            else (
+                "已检测到有效的受控微信外层会话"
+                if controlled_chrome_ready
+                else "状态待检查" if stale_login_state else "需要人工扫码或检查受控 Chrome"
+            )
+        )
+    )
     ai_ready = bool(
         runtime_config["ai_base_url"]
         and runtime_config["ai_api_key_configured"]
@@ -176,13 +197,63 @@ def admin_console_overview(request):
             description="由本机 Supervisor 托管，提供工作台、系统配置和本地控制代理。",
         ),
         _pipeline_node(
-            "cdp",
-            "CDP 登录态",
-            cdp_valid,
-            cdp_reason or "打开受控 Chrome 登录页",
-            "登录态有效" if cdp_valid else cdp_reason,
+            "active_game_scope",
+            "当前操作游戏",
+            active_scope is not None,
+            "同步目录并选择操作游戏",
+            (
+                f"当前：{active_scope.active_game.name} · 范围版本 {active_scope.scope_version}；后续任务将固定此游戏"
+                if active_scope
+                else "尚未选择操作游戏；不会创建或执行来源任务"
+            ),
             checked_at,
-            description="检查受控 Chrome 的微信插件会话；系统不保存 Cookie、令牌或二维码内容。",
+            description="唯一范围决定采集、指标与人工上游操作；已开始任务会保留其执行快照。",
+        ),
+        _pipeline_node(
+            "controlled_chrome",
+            "受控 Chrome",
+            chrome_service_running,
+            "启动受控 Chrome",
+            _service_reason(services["controlled_chrome"]),
+            checked_at,
+            service="controlled_chrome",
+            running=chrome_service_running,
+            description="由 Supervisor 使用独立 profile 和仅本机 CDP 端口托管；只会停止自身记录的浏览器进程。",
+        ),
+        _pipeline_node(
+            "game_circle_session",
+            "游戏圈会话服务",
+            session_service_running,
+            "启动游戏圈会话服务",
+            _service_reason(services["game_circle_session"]),
+            checked_at,
+            service="game_circle_session",
+            running=session_service_running,
+            description=(
+                "唯一持有受控 Chrome、短期会话和系统自建页面的常驻服务；"
+                "页面与其他 Worker 仅通过本机固定 IPC 请求它。"
+            ),
+        ),
+        _pipeline_node(
+            "controlled_chrome_session",
+            "受控 Chrome 会话",
+            controlled_chrome_ready,
+            (
+                "启动受控 Chrome"
+                if not chrome_service_running
+                else (
+                    "启动游戏圈会话服务"
+                    if not session_service_running
+                    else "打开受控 Chrome 登录页"
+                )
+            ),
+            "会话有效" if controlled_chrome_ready else controlled_chrome_reason,
+            checked_at,
+            description=(
+                "由游戏圈会话服务检查受控 Chrome 的微信外层会话；"
+                "系统不保存 Cookie、令牌或二维码内容。"
+            ),
+            session_service_running=session_service_running,
         ),
         _pipeline_node(
             "scheduler",
@@ -341,7 +412,17 @@ def admin_console_overview(request):
             ),
         )
     )
-    core_keys = {"web", "policy", "ai", "cdp", "scheduler", "ingestion", "metric_sync", "review"}
+    core_keys = {
+        "web",
+        "policy",
+        "ai",
+        "game_circle_session",
+        "controlled_chrome_session",
+        "scheduler",
+        "ingestion",
+        "metric_sync",
+        "review",
+    }
     first_blocked = next(
         (node for node in pipeline if node["key"] in core_keys and not node["ready"]), None
     )
@@ -351,7 +432,8 @@ def admin_console_overview(request):
             "active_policy_rules": active_policy_rules,
             "policy_status": policy_status,
             "managed_game_count": ManagedGame.objects.count(),
-            "manual_ingestion_default_appid": DEFAULT_GAME_APPID,
+            "active_game_scope": active_scope,
+            "manual_ingestion_default_appid": active_scope.active_appid if active_scope else "",
             "manual_ingestion_games": managed_games,
             "last_game_sync_at": game_summary["last_synced_at"],
             "pending_job_count": BackgroundJob.objects.filter(status=JobStatus.PENDING).count(),

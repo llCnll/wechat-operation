@@ -1,7 +1,8 @@
 from django.contrib import admin
 
 from config.admin_support import ReadOnlyAdmin, ReadOnlyTabularInline, operations_dashboard_link
-from config.cdp import CdpUnavailableError, list_managed_games
+from config.cdp import ManagedGameDTO
+from config.game_circle_ipc import GameCircleIpcClient, GameCircleIpcError
 
 from .game_catalog import sync_managed_games
 from .models import (
@@ -12,6 +13,11 @@ from .models import (
     OriginalPost,
     PostMedia,
 )
+
+
+def list_managed_games() -> list[ManagedGameDTO]:
+    """Read the catalog only through the session-service IPC boundary."""
+    return [ManagedGameDTO(**item) for item in GameCircleIpcClient().list_managed_games()]
 
 
 @admin.register(ManagedGame)
@@ -28,7 +34,7 @@ class ManagedGameAdmin(ReadOnlyAdmin):
     def sync_from_authorized_platform(self, request, queryset):
         try:
             count = sync_managed_games(list_managed_games())
-        except (CdpUnavailableError, ValueError):
+        except (GameCircleIpcError, ValueError):
             self.message_user(request, "同步失败，已保留本地游戏目录。", level="ERROR")
         else:
             self.message_user(request, f"已同步 {count} 个可管理游戏。")

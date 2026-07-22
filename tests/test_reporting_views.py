@@ -7,7 +7,13 @@ from django.test import Client
 from django.utils import timezone
 
 from jobs.models import BackgroundJob
+from posts.game_catalog import set_active_game
 from posts.models import CandidatePost, ManagedGame, OriginalPost, OriginType
+
+
+def _set_active_game(appid: str) -> None:
+    game, _ = ManagedGame.objects.get_or_create(appid=appid, defaults={"name": "测试游戏"})
+    set_active_game(appid=game.appid)
 
 
 @pytest.mark.django_db
@@ -20,6 +26,7 @@ def test_live_operations_analysis_requires_login():
 
 @pytest.mark.django_db
 def test_live_operations_analysis_defaults_to_seven_days_and_does_not_create_jobs():
+    _set_active_game("wx6d2454a8afcd9706")
     user = get_user_model().objects.create_user(username="report-user", password="test-password")
     post = OriginalPost.objects.create(
         topic_id=701,
@@ -60,6 +67,7 @@ def test_live_operations_analysis_defaults_to_seven_days_and_does_not_create_job
 def test_live_operations_analysis_scopes_the_selected_range_and_game():
     user = get_user_model().objects.create_user(username="report-filter", password="test-password")
     appid = "wx-report-game"
+    _set_active_game(appid)
     candidate = CandidatePost.objects.create(
         topic_id=702,
         content_id="report-view-702",
@@ -92,6 +100,7 @@ def test_live_operations_analysis_scopes_the_selected_range_and_game():
 
 @pytest.mark.django_db
 def test_analysis_refresh_post_enqueues_one_job_and_preserves_the_range():
+    _set_active_game("wx6d2454a8afcd9706")
     user = get_user_model().objects.create_user(username="refresh-user", password="test-password")
     client = Client()
     client.force_login(user)

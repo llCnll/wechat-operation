@@ -75,6 +75,68 @@ class ManagedGame(models.Model):
         return f"{self.name} ({self.appid})"
 
 
+class ActiveGameScope(models.Model):
+    """The single game currently authorized for upstream operations."""
+
+    id = models.PositiveSmallIntegerField(primary_key=True, default=1, editable=False)
+    active_game = models.ForeignKey(
+        ManagedGame,
+        to_field="appid",
+        db_column="active_appid",
+        on_delete=models.PROTECT,
+        related_name="active_scopes",
+    )
+    scope_version = models.PositiveBigIntegerField(default=1)
+    updated_at = models.DateTimeField(auto_now=True)
+    updated_by = models.ForeignKey(
+        "auth.User",
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="updated_active_game_scopes",
+    )
+
+    class Meta:
+        constraints = [models.CheckConstraint(condition=models.Q(id=1), name="active_game_scope_one")]
+        verbose_name = "当前操作游戏"
+        verbose_name_plural = "当前操作游戏"
+
+    @property
+    def active_appid(self) -> str:
+        return self.active_game_id
+
+
+class GameCircleLoginRuntimeState(models.Model):
+    """Credential-free projection written only by the session service."""
+
+    class LoginState(models.TextChoices):
+        READY = "READY", "已就绪"
+        SCAN_REQUIRED = "SCAN_REQUIRED", "需要扫码"
+        UNAVAILABLE = "UNAVAILABLE", "Chrome 不可用"
+        UNKNOWN = "UNKNOWN", "待检查"
+
+    class ErrorCategory(models.TextChoices):
+        NONE = "NONE", "无"
+        SCAN_REQUIRED = "SCAN_REQUIRED", "需要扫码"
+        CHROME_UNAVAILABLE = "CHROME_UNAVAILABLE", "Chrome 不可用"
+        OUTER_SESSION_UNREADY = "OUTER_SESSION_UNREADY", "外层会话未就绪"
+        PROBE_FAILED = "PROBE_FAILED", "探测失败"
+
+    id = models.PositiveSmallIntegerField(primary_key=True, default=1, editable=False)
+    login_state = models.CharField(max_length=20, choices=LoginState.choices, default=LoginState.UNKNOWN)
+    checked_at = models.DateTimeField(null=True, blank=True)
+    last_ready_at = models.DateTimeField(null=True, blank=True)
+    error_category = models.CharField(
+        max_length=32, choices=ErrorCategory.choices, default=ErrorCategory.NONE
+    )
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [models.CheckConstraint(condition=models.Q(id=1), name="game_circle_login_state_one")]
+        verbose_name = "游戏圈登录运行态"
+        verbose_name_plural = "游戏圈登录运行态"
+
+
 class CandidatePost(models.Model):
     topic_id = models.BigIntegerField(unique=True)
     content_id = models.CharField(max_length=255, blank=True)

@@ -8,6 +8,8 @@ from django.core.management import call_command
 from django.core.management.base import CommandError
 
 from jobs.models import BackgroundJob
+from jobs.game_circle_refresh import GAME_CIRCLE_LOGIN_PROBE_TASK
+from posts.game_catalog import set_active_game
 from posts.ingestion_jobs import (
     SHANGHAI,
     enqueue_ingestion_window,
@@ -16,10 +18,22 @@ from posts.ingestion_jobs import (
     enqueue_scheduled_status_sync,
     scheduled_ingestion_window,
 )
+from posts.models import ManagedGame
 
 
 def _shanghai_time(hour: int, minute: int) -> datetime:
     return datetime(2026, 7, 19, hour, minute, tzinfo=ZoneInfo("Asia/Shanghai"))
+
+
+@pytest.fixture(autouse=True)
+def active_game_scope(request):
+    if request.node.get_closest_marker("django_db") is None:
+        return
+    game, _ = ManagedGame.objects.get_or_create(
+        appid="wx6d2454a8afcd9706",
+        defaults={"name": "测试游戏"},
+    )
+    set_active_game(appid=game.appid)
 
 
 def test_scheduled_window_floors_to_a_15_minute_boundary():
@@ -141,6 +155,19 @@ def test_scheduler_command_requires_exactly_one_run_mode():
         call_command("run_scheduler")
     with pytest.raises(CommandError, match="--once 或 --loop"):
         call_command("run_scheduler", "--once", "--loop")
+
+
+@pytest.mark.django_db
+def test_scheduler_without_an_active_game_keeps_running_without_creating_source_jobs():
+    from posts.models import ActiveGameScope
+
+    ActiveGameScope.objects.all().delete()
+    output = StringIO()
+
+    call_command("run_scheduler", "--once", stdout=output)
+
+    assert "未创建来源任务" in output.getvalue()
+    assert not BackgroundJob.objects.exclude(task_type=GAME_CIRCLE_LOGIN_PROBE_TASK).exists()
 
 
 @pytest.mark.django_db

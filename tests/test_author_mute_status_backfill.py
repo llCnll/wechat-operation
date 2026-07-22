@@ -13,8 +13,10 @@ from jobs.once.author_mute_status_backfill import (
     author_mute_status_backfill_handler,
     enqueue_author_mute_status_backfill,
 )
-from posts.game_catalog import DEFAULT_GAME_APPID
-from posts.models import AuthorMuteStatus, InteractionSnapshot, OriginalPost
+from contextlib import contextmanager
+
+from posts.game_catalog import set_active_game
+from posts.models import AuthorMuteStatus, InteractionSnapshot, ManagedGame, OriginalPost
 from posts.tasks import BACKFILL_INGESTION_WORKER_HANDLERS, REALTIME_INGESTION_WORKER_HANDLERS
 
 
@@ -69,9 +71,11 @@ def test_one_time_backfill_manually_requeues_only_a_failed_job_from_its_checkpoi
 
 
 @pytest.mark.django_db
-def test_one_time_backfill_uses_post_game_or_default_and_has_no_post_side_effects():
-    historic = OriginalPost.objects.create(
-        topic_id=801, content_id="historic-default", source_appid="", status=4, content_text="原文"
+def test_one_time_backfill_uses_only_current_game_and_has_no_post_side_effects(monkeypatch):
+    game = ManagedGame.objects.create(appid="game-active", name="当前游戏")
+    set_active_game(appid=game.appid)
+    active = OriginalPost.objects.create(
+        topic_id=801, content_id="active", source_appid=game.appid, status=4, content_text="原文"
     )
     other_game = OriginalPost.objects.create(
         topic_id=802, content_id="historic-other", source_appid="game-other", status=8
@@ -80,50 +84,52 @@ def test_one_time_backfill_uses_post_game_or_default_and_has_no_post_side_effect
     future = int((timezone.now() + timedelta(days=1)).timestamp())
     created_appids: list[str] = []
 
+
     class Source:
-        def __init__(self, appid):
-            self.appid = appid
-            created_appids.append(appid)
+        def __init__(self, scope, **_kwargs):
+            self.appid = scope.target_appid
+            created_appids.append(self.appid)
 
         def get_post_metrics(self, topic_id):
-            if topic_id == historic.topic_id:
-                assert self.appid == DEFAULT_GAME_APPID
+            if topic_id == active.topic_id:
+                assert self.appid == game.appid
                 return _detail(
-                    appid=DEFAULT_GAME_APPID,
-                    openid="default-author",
-                    nick_name="默认游戏作者",
+                    appid=game.appid,
+                    openid="active-author",
+                    nick_name="当前游戏作者",
                     local_end=future,
                 )
-            assert self.appid == "game-other"
-            return _detail(
-                appid="game-other",
-                openid="other-author",
-                nick_name="其他游戏作者",
-                global_end=future,
-            )
+            raise AssertionError("其他游戏不应调用来源")
 
         def close(self):
             pass
 
-    with patch("jobs.once.author_mute_status_backfill.CdpGameCircleClient", Source):
+    with patch("jobs.once.author_mute_status_backfill.GameCirclePostClient", Source):
         author_mute_status_backfill_handler(job)
 
-    historic.refresh_from_db()
+    active.refresh_from_db()
     other_game.refresh_from_db()
     job.refresh_from_db()
-    assert created_appids == [DEFAULT_GAME_APPID, "game-other"]
-    assert historic.author_openid == "default-author"
-    assert other_game.author_openid == "other-author"
-    assert historic.status == 4
-    assert historic.content_text == "原文"
+    assert created_appids == [game.appid]
+    assert active.author_openid == "active-author"
+    assert other_game.author_openid == ""
+    assert active.status == 4
+    assert active.content_text == "原文"
     assert InteractionSnapshot.objects.count() == 0
-    assert AuthorMuteStatus.objects.get(openid="default-author").source_appid == DEFAULT_GAME_APPID
-    assert AuthorMuteStatus.objects.get(openid="other-author").global_muted_until is not None
-    assert job.checkpoint == {"last_topic_id": 802, "processed": 2, "skipped": 0, "complete": True}
+    assert AuthorMuteStatus.objects.get(openid="active-author").source_appid == game.appid
+    assert job.checkpoint == {
+        "last_topic_id": 801,
+        "processed": 1,
+        "skipped": 0,
+        "complete": True,
+        "execution_scope": {"target_appid": game.appid, "scope_version": 1},
+    }
 
 
 @pytest.mark.django_db
-def test_one_time_backfill_skips_failures_and_advances_checkpoint_without_changing_post_state():
+def test_one_time_backfill_skips_failures_and_advances_checkpoint_without_changing_post_state(monkeypatch):
+    game = ManagedGame.objects.create(appid="game-a", name="当前游戏")
+    set_active_game(appid=game.appid)
     deleted = OriginalPost.objects.create(
         topic_id=811, content_id="backfill-deleted", source_appid="game-a", status=4
     )
@@ -136,8 +142,8 @@ def test_one_time_backfill_skips_failures_and_advances_checkpoint_without_changi
     job = enqueue_author_mute_status_backfill()
 
     class Source:
-        def __init__(self, appid):
-            assert appid == "game-a"
+        def __init__(self, scope, **_kwargs):
+            assert scope.target_appid == "game-a"
 
         def get_post_metrics(self, topic_id):
             if topic_id == deleted.topic_id:
@@ -149,7 +155,7 @@ def test_one_time_backfill_skips_failures_and_advances_checkpoint_without_changi
         def close(self):
             pass
 
-    with patch("jobs.once.author_mute_status_backfill.CdpGameCircleClient", Source):
+    with patch("jobs.once.author_mute_status_backfill.GameCirclePostClient", Source):
         author_mute_status_backfill_handler(job)
 
     deleted.refresh_from_db()
@@ -165,6 +171,7 @@ def test_one_time_backfill_skips_failures_and_advances_checkpoint_without_changi
         "complete": True,
         "failed": 1,
         "failure_samples": [{"topic_id": 812, "error": "连接失败"}],
+        "execution_scope": {"target_appid": "game-a", "scope_version": 1},
     }
 
 

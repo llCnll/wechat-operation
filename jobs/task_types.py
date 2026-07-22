@@ -1,0 +1,52 @@
+"""Stable background-job type values and their operator-facing labels.
+
+Task types are persisted protocol values.  Their Chinese labels are deliberately
+derived at display time instead of being copied into a job snapshot, so a wording
+update is immediately reflected for historical jobs as well.
+"""
+
+from __future__ import annotations
+
+
+LEGACY_INGEST_WINDOW_TASK = "INGEST_WINDOW"
+SCHEDULED_INGEST_WINDOW_TASK = "SCHEDULED_INGEST_WINDOW"
+MANUAL_INGEST_WINDOW_TASK = "MANUAL_INGEST_WINDOW"
+STATUS_SYNC_TASK = "STATUS_SYNC"
+METRICS_REFRESH_WINDOW_TASK = "METRICS_REFRESH_WINDOW"
+AUTHOR_MUTE_STATUS_BACKFILL_TASK = "AUTHOR_MUTE_STATUS_BACKFILL"
+
+GAME_CIRCLE_SESSION_REFRESH_TASK = "GAME_CIRCLE_SESSION_REFRESH"
+GAME_CIRCLE_LOGIN_PROBE_TASK = "GAME_CIRCLE_LOGIN_PROBE"
+
+METRIC_DAILY_SYNC_TASK = "METRIC_DAILY_SYNC"
+METRIC_WEEKLY_SYNC_TASK = "METRIC_WEEKLY_SYNC"
+METRIC_BACKFILL_TASK = "METRIC_BACKFILL"
+
+OCR_EXTRACT_TASK = "OCR_EXTRACT"
+VIDEO_EXTRACT_TASK = "VIDEO_EXTRACT"
+AI_EVALUATE_TASK = "AI_EVALUATE"
+AI_AUTOMATED_MODERATION_TASK = "AI_AUTOMATED_MODERATION"
+
+
+TASK_TYPE_LABELS = {
+    LEGACY_INGEST_WINDOW_TASK: "历史帖子采集",
+    SCHEDULED_INGEST_WINDOW_TASK: "定时帖子采集",
+    MANUAL_INGEST_WINDOW_TASK: "手动帖子采集",
+    STATUS_SYNC_TASK: "帖子状态同步",
+    METRICS_REFRESH_WINDOW_TASK: "帖子指标补采",
+    AUTHOR_MUTE_STATUS_BACKFILL_TASK: "作者禁言状态回填（一次性）",
+    GAME_CIRCLE_SESSION_REFRESH_TASK: "游戏圈会话刷新",
+    GAME_CIRCLE_LOGIN_PROBE_TASK: "游戏圈登录态检查",
+    METRIC_DAILY_SYNC_TASK: "每日指标同步",
+    METRIC_WEEKLY_SYNC_TASK: "每周指标同步",
+    METRIC_BACKFILL_TASK: "指标历史回填",
+    OCR_EXTRACT_TASK: "图片 OCR 提取",
+    VIDEO_EXTRACT_TASK: "视频证据提取",
+    AI_EVALUATE_TASK: "AI 内容评估",
+    AI_AUTOMATED_MODERATION_TASK: "AI 自动处置",
+}
+
+
+def task_type_label(task_type: str) -> str:
+    """Return the maintained Chinese label, preserving unknown stored values."""
+    return TASK_TYPE_LABELS.get(task_type, task_type)

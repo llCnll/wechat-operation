@@ -649,7 +649,7 @@ def test_confirmed_block_fails_when_readback_status_differs(monkeypatch):
 
 
 @pytest.mark.django_db
-def test_sink_skips_upstream_write_when_preflight_status_is_not_normal(monkeypatch):
+def test_sink_marks_the_exact_preflight_target_state_as_already_applied(monkeypatch):
     monkeypatch.setattr(runtime, "enable_upstream_writes", True)
     monkeypatch.setattr(runtime, "enable_sink_writes", True)
     post = OriginalPost.objects.create(topic_id=212, content_id="sink-non-normal", status=8)
@@ -682,9 +682,50 @@ def test_sink_skips_upstream_write_when_preflight_status_is_not_normal(monkeypat
         source=source,
     )
 
-    assert audit.result_code == "SKIPPED_UPSTREAM_NOT_NORMAL"
+    assert audit.result_code == "ALREADY_APPLIED"
     assert audit.before_state["status"] == 8
+    assert audit.after_state["status"] == 8
     assert source.writes == 0
+
+
+@pytest.mark.django_db
+def test_sink_keeps_a_different_non_normal_state_pending_without_a_write(monkeypatch):
+    monkeypatch.setattr(runtime, "enable_upstream_writes", True)
+    monkeypatch.setattr(runtime, "enable_sink_writes", True)
+    post = OriginalPost.objects.create(topic_id=213, content_id="sink-blocked")
+    CandidatePost.objects.create(
+        topic_id=post.topic_id, content_id=post.content_id, origin_type=OriginType.ORIGINAL
+    )
+    _, task = persist_assessment(
+        post,
+        AssessmentOutput(
+            content_category="OTHER", recommended_action="SINK", overall_confidence=0.9
+        ),
+    )
+
+    class Source:
+        writes = 0
+
+        def get_post_metrics(self, topic_id):
+            return {"data": {"topic": {"topic_id": topic_id, "status": 4}}}
+
+        def perform_confirmed_operation(self, **kwargs):
+            self.writes += 1
+            raise AssertionError("非正常帖子不得重复发送沉底请求")
+
+    source = Source()
+    audit = execute_confirmed_operation(
+        task,
+        user=None,
+        action=RecommendedAction.SINK,
+        reason="人工确认",
+        source=source,
+    )
+
+    assert audit.result_code == "SKIPPED_UPSTREAM_NOT_NORMAL"
+    assert source.writes == 0
+    post.refresh_from_db()
+    assert post.status == 4
 
 
 @pytest.mark.django_db

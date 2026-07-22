@@ -18,6 +18,7 @@ from .tasks import (
     SCHEDULED_INGEST_WINDOW_TASK,
     STATUS_SYNC_TASK,
 )
+from .game_catalog import active_game_appid
 
 SHANGHAI = ZoneInfo("Asia/Shanghai")
 
@@ -154,10 +155,8 @@ def scheduled_ingestion_window(now: datetime) -> IngestionWindow:
 
 
 def enqueue_scheduled_ingestion(now: datetime) -> IngestionEnqueueResult:
-    """Enqueue the single fixed-game scheduled window without invoking any adapter."""
-    appid = str(settings.SCHEDULED_INGESTION_APPID).strip()
-    if appid != "wx6d2454a8afcd9706":
-        raise ValueError("自动采集目标必须为城主别慌张")
+    """Enqueue the current operation scope without invoking any browser adapter."""
+    appid = active_game_appid(persist_default=False)
     page_size = _positive_int(settings.SCHEDULED_INGESTION_PAGE_SIZE, name="默认页面大小")
     if page_size != 20:
         raise ValueError("自动采集默认页面大小必须为20")
@@ -174,9 +173,7 @@ def enqueue_scheduled_ingestion(now: datetime) -> IngestionEnqueueResult:
 
 def enqueue_scheduled_status_sync(now: datetime) -> IngestionEnqueueResult:
     """Queue one small pending-post status scan in the same scheduler time bucket."""
-    appid = str(settings.SCHEDULED_INGESTION_APPID).strip()
-    if appid != "wx6d2454a8afcd9706":
-        raise ValueError("自动状态巡检目标必须为城主别慌张")
+    appid = active_game_appid(persist_default=False)
     window = scheduled_ingestion_window(now)
     result = enqueue_job_with_result(
         task_type=STATUS_SYNC_TASK,

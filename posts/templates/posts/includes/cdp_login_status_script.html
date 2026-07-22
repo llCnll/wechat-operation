@@ -3,24 +3,45 @@
     const indicator = document.querySelector("[data-cdp-login-status]");
     const label = document.querySelector("[data-cdp-login-label]");
     const button = indicator?.querySelector("button");
-    if (!indicator || !label || !button) return;
+    const frameIndicator = document.querySelector("[data-cdp-frame-status]");
+    const frameLabel = document.querySelector("[data-cdp-frame-label]");
+    const frameButton = frameIndicator?.querySelector("button");
+    if (!indicator || !label || !button || !frameIndicator || !frameLabel || !frameButton) return;
     const update = async () => {
       try {
         const response = await fetch("{% url 'browser-login-status' %}", {cache: "no-store"});
         const status = await response.json();
         const valid = response.ok && status.valid === true;
+        const canOpenLogin = response.ok && status.can_open_login === true;
         indicator.classList.toggle("is-valid", valid);
         indicator.classList.toggle("is-invalid", !valid);
+        indicator.classList.toggle("is-actionable", canOpenLogin);
         indicator.classList.remove("is-checking");
-        button.disabled = valid;
-        label.textContent = valid ? "已登录" : "未登录，去登录";
-        indicator.title = status.reason || (valid ? "受控 Chrome 登录态有效" : "受控 Chrome 登录态无效");
+        button.disabled = !canOpenLogin;
+        label.textContent = valid ? "会话有效" : canOpenLogin ? "需扫码登录" : status.state === "UNAVAILABLE" ? "Chrome 未启动" : "状态待检查";
+        indicator.title = status.reason || (valid ? "受控 Chrome 会话有效" : "受控 Chrome 会话不可用");
+        const frameValid = response.ok && status.frame_valid === true;
+        const canRecoverFrame = response.ok && status.frame_can_recover === true;
+        frameIndicator.classList.toggle("is-valid", frameValid);
+        frameIndicator.classList.toggle("is-invalid", !frameValid);
+        frameIndicator.classList.toggle("is-actionable", canRecoverFrame);
+        frameIndicator.classList.remove("is-checking");
+        frameButton.disabled = !canRecoverFrame;
+        frameLabel.textContent = frameValid ? "Frame 有效" : "Frame 未就绪";
+        frameIndicator.title = canRecoverFrame ? "当前操作游戏尚无可用来源 Frame；点击打开当前游戏 Frame" : status.frame_reason || (frameValid ? "当前操作游戏的来源 Frame 已就绪" : "当前操作游戏尚无可用来源 Frame");
       } catch (_) {
         indicator.classList.remove("is-checking", "is-valid");
+        indicator.classList.remove("is-actionable");
         indicator.classList.add("is-invalid");
-        button.disabled = false;
-        label.textContent = "不可用，去登录";
-        indicator.title = "点击后仅会尝试在受控 Chrome 打开固定登录页";
+        button.disabled = true;
+        label.textContent = "状态不可用";
+        indicator.title = "游戏圈会话状态暂不可用";
+        frameIndicator.classList.remove("is-checking", "is-valid");
+        frameIndicator.classList.remove("is-actionable");
+        frameIndicator.classList.add("is-invalid");
+        frameButton.disabled = true;
+        frameLabel.textContent = "Frame 状态未知";
+        frameIndicator.title = "当前操作游戏的来源 Frame 状态暂不可用";
       }
     };
     update();

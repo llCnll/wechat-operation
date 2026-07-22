@@ -66,41 +66,24 @@ uv run python -m service_supervisor
 
 最小验证：访问 `http://127.0.0.1:8000/healthz`，应返回 `{"status": "ok"}`。后台入口为 `http://127.0.0.1:8000/admin/`。启动失败先检查 `runtime/supervisor/logs/preflight.log`。
 
-## 4. 启动受控 Chrome 并扫码
+## 4. 受控 Chrome 与扫码
 
-受控 Chrome 必须使用独立用户目录，避免影响日常浏览器会话。
+受控 Chrome 是 Supervisor 的固定服务，使用 `runtime/controlled-chrome-profile` 独立资料目录、仅本机 `127.0.0.1` CDP 端口；不要手工以命令启动、停止或复用该资料目录。默认会自动查找 Chrome；找不到时，在 `runtime/.env` 设置 `CONTROLLED_CHROME_BIN` 的完整路径，必要时再调整 `CONTROLLED_CHROME_USER_DATA_DIR` 或 `CONTROLLED_CHROME_DEBUG_PORT`。
 
-```bash
-# macOS
-open -na "Google Chrome" --args --remote-debugging-port=9222 --user-data-dir="$HOME/Library/Application Support/WechatOperationChrome"
-```
-
-```bash
-# Linux
-CHROME_BIN="$(command -v google-chrome || command -v chromium || command -v chromium-browser)"
-test -n "$CHROME_BIN" || { echo '未找到 Chrome 或 Chromium' >&2; exit 1; }
-"$CHROME_BIN" --remote-debugging-port=9222 --user-data-dir="$HOME/.local/share/WechatOperationChrome" >/dev/null 2>&1 &
-```
-
-```powershell
-# Windows PowerShell；chrome.exe 不在 PATH 时替换为其绝对路径
-$profilePath = Join-Path $env:LOCALAPPDATA 'WechatOperationChrome'
-Start-Process chrome.exe -ArgumentList '--remote-debugging-port=9222', "--user-data-dir=$profilePath"
-```
-
-最小验证：macOS/Linux 执行 `curl -fsS http://127.0.0.1:9222/json/version`；Windows 执行 `(Invoke-WebRequest http://127.0.0.1:9222/json/version).Content`。随后在 `/admin/` 的“CDP 登录态”打开固定登录页，由运营人员手动扫码。不得读取、记录或伪造 Cookie、令牌、二维码或作者身份标识。
+最小验证：启动 Supervisor 后，在 `/admin/` 确认“受控 Chrome”与“游戏圈会话服务”均运行；再在“受控 Chrome 会话”打开固定登录页并由运营人员手动扫码。不得读取、记录或伪造 Cookie、令牌、二维码或作者身份标识。
 
 ## 5. 配置能力并启用 Worker
 
 在 `/admin/` 首页“初始化与运行状态”中：
 
 1. 配置 AI 审核与 OCR；需要语音转写时，再配置视频审核的 ASR。
-2. 确认 CDP 登录态为“已就绪”。
-3. 依次启动 Scheduler、帖子采集 Worker 与 AI Worker。帖子采集节点会同时启动实时采集和人工补采。
-4. 只有完成[视频审核手册](video-review-runbook.md)的预检后，才启用视频审核 Worker。
+2. 确认“游戏圈会话服务”正在运行、“受控 Chrome 会话”为有效，随后同步可管理游戏并选择唯一“当前操作游戏”。
+3. 保持 `game_circle_session` 服务运行；它是唯一可访问受控 Chrome、创建/回收其自有 target、读取短期会话并调用来源接口的进程。其他 Worker 和 Web 仅经带 Supervisor 注入 capability 的本机固定 IPC 调用它；不得复制 capability 或单独暴露该端口。
+4. 依次启动 Scheduler、帖子采集 Worker 与 AI Worker。帖子采集节点会同时启动实时采集和人工补采。
+5. 只有完成[视频审核手册](video-review-runbook.md)的预检后，才启用视频审核 Worker。
 
-SQLite 部署中，每类 Worker 只能运行一个实例。页面只控制固定服务，不能执行任意命令。`run_scheduler`、`run_realtime_ingestion_worker`、`run_backfill_ingestion_worker`、`run_review_worker` 仅用于开发或故障诊断。
+SQLite 部署中，每类 Worker 只能运行一个实例。页面只控制固定服务，不能执行任意命令。会话续接失败时，只有受控 HOME 明确显示扫码或缺少 token 才需要运营人员重新扫码；关闭并以同一用户目录重开 Chrome 时，系统会先从新 HOME 自动恢复，不会复用旧 target 或 token。`run_game_circle_session_worker` 必须由 Supervisor 启动以取得 IPC capability；其余管理命令仅用于开发或故障诊断。
 
 ## 人工与自动上游处置
 
-上游写操作默认关闭。人工处置必须由运营人员在内容管理工作台二次确认；AI 自动处置只有在单独完成高风险授权、规则许可与配置后才可运行。写前会读取详情核验，写后回读状态；失败时不得通过 Worker 重复发送写请求。运行恢复和最小验证见[运行与恢复手册](operations-runbook.md)。
+上游写操作默认关闭。人工处置必须由运营人员在内容管理工作台二次确认；单条有界操作，以及当前游戏内最多 20 条的沉底/屏蔽批量操作，都会经会话服务同步完成写前核验、写入和回读。Web 不会创建、切换或关闭 Chrome target，也不执行身份绑定。会话不可用时页面只触发/复用恢复任务，并要求运营人员稍后重新确认；写请求绝不自动重放。若服务在写请求发出后、返回前中断，审计会标记“待回读确认”，不得再次提交该写操作。人工扫码仍可显式打开固定、无认证登录页，但该入口不读取认证信息或接管会话。AI 自动处置只有在单独完成高风险授权、规则许可与配置后才可运行。运行恢复和最小验证见[运行与恢复手册](operations-runbook.md)。

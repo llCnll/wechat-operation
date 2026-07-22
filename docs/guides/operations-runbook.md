@@ -2,7 +2,7 @@
 
 ## 部署边界
 
-- 日常只启动一个 `uv run python -m service_supervisor`。Supervisor 是 Web、Scheduler、实时采集 Worker、人工补采 Worker、指标快照 Worker 与 AI Worker 的唯一进程所有者；它使用独占文件锁防止第二个实例接管同一运行态。
+- 日常只启动一个 `uv run python -m service_supervisor`。Supervisor 是受控 Chrome、Web、Scheduler、游戏圈会话续接 Worker、实时采集 Worker、人工补采 Worker、指标快照 Worker 与 AI Worker 的唯一进程所有者；它使用独占文件锁防止第二个实例接管同一运行态。
 - 所有可变运行态均位于 `runtime/`：`runtime/.env`、`runtime/operations.sqlite3`、收集后的 `runtime/static/`、`runtime/worker-locks/`、`runtime/supervisor/` 与日志。`runtime/supervisor/` 包含控制令牌、服务状态、心跳和日志，代码包和版本控制均应排除整个目录。
 - 数据库位于 `runtime/operations.sqlite3`。离线文件备份前必须停止 Web、Scheduler、实时采集 Worker、人工补采 Worker、AI Worker 和 AI 自动处置 Worker，再复制数据库文件及可能存在的 `-wal`、`-shm` 文件；只停止 Worker 不能保证没有 Web 写入。
 - 首次部署在启动 Supervisor 前，执行 Agent 必须手工运行 `uv run python manage.py migrate` 和 `uv run python manage.py createsuperuser`；不得记录管理员密码。后续迁移、静态资源收集和默认策略检查由 Supervisor 幂等执行。
@@ -40,10 +40,13 @@ Compress-Archive -Path $items.FullName -DestinationPath ../wechat-operation.zip 
 
 ## 会话与密钥
 
-- Chrome CDP 仅使用本地已登录浏览器；不保存 Cookie、令牌或运营者身份标识。管理详情中的发帖作者用户 ID仅可按产品定义保存到原创帖和作者禁言状态，用于禁言管理与历史关联，不得写入日志或导出。
+- Chrome CDP 仅由 Supervisor 启动的受控 Chrome 使用；它采用独立 profile 且只监听 loopback，不保存 Cookie、令牌或运营者身份标识。管理详情中的发帖作者用户 ID仅可按产品定义保存到原创帖和作者禁言状态，用于禁言管理与历史关联，不得写入日志或导出。
+- `game_circle_session` 是唯一持有 CDP、outer token、来源身份 token 与系统自建 target 的常驻服务。Web、采集、指标、AI、回填与一次性任务只通过固定、仅监听 `127.0.0.1`、且由 Supervisor 注入独立 capability 的 IPC 提交 scope 和已批准的业务参数；IPC 不接受 CDP 命令、JavaScript、URL、target ID、路径或认证材料。无 capability 的连接在业务解析前拒绝；不得复制或记录 capability。它阻止没有运行时进程权限的本机调用方，但不能替代操作系统账户隔离。
+- 会话服务按 AppID 维护一个 ACTIVE 及零到多个 RETIRING lease。新 lease 完整验证后才发布；旧 lease 仅在退役等待结束且请求访问归零后关闭它自己的 HOME/PLUGIN tab。因为 Chrome 已由 Supervisor 管理，受控 target 可以回收至零 tab；手动打开的未知 tab 永不接管、使用或关闭。
 - 首次部署执行 `mkdir -p runtime && cp .env.example runtime/.env`。日常 AI/OCR 和人工处置授权均从系统配置首页的 Pipeline 保存；`runtime/.env` 仅用于后台不可用时的运维恢复。
 - AI/OCR 凭据只通过 `AI_*`、`OCR_*` 运行时配置注入。系统配置首页保存时已有密钥不会回显；轮换后由 Pipeline 重启 AI Worker。
 - `ENABLE_UPSTREAM_WRITES` 与对应的 `ENABLE_SINK_WRITES`、`ENABLE_BLOCK_WRITES`、`ENABLE_MUTE_WRITES`、`ENABLE_UNMUTE_WRITES` 或 `ENABLE_RESTORE_WRITES` 必须同时为 `true` 才会发送对应的已验证请求；默认均关闭。禁言和解除禁言均在写前读取详情核验；写后固定立即回读及 2、5、10 秒补读（总等待不超过 20 秒），不会自动重复写入。解除禁言只在当前游戏处于禁言状态且经二次确认后发送请求。
+- 经认证、CSRF 二次确认的单条人工刷新或处置，以及当前游戏内最多 20 条的沉底/屏蔽批量操作，均可同步使用协调器已登记的插件会话以立即反馈结果；批量中的每条独立回读、审计与幂等确认。Web 不创建、扫描或关闭受协调器管理的 target，不切换游戏、不重建插件、不直接绑定身份。会话不可用时协调器仅创建/复用恢复 Job，页面提示稍后重新确认；恢复后绝不自动重放写入。人工扫码可显式打开固定、无认证登录页，但不读取认证信息或接管会话。
 
 ### 禁言管理最小验证
 
@@ -65,10 +68,9 @@ uv run python manage.py enqueue_author_mute_status_backfill
 
 ## 任务恢复
 
-- `run_scheduler` 只创建任务，不认领业务任务；`run_realtime_ingestion_worker` 认领 `SCHEDULED_INGEST_WINDOW` 与 `STATUS_SYNC`，`run_backfill_ingestion_worker` 认领 `MANUAL_INGEST_WINDOW`、`METRICS_REFRESH_WINDOW`、`AUTHOR_MUTE_STATUS_BACKFILL` 和历史 `INGEST_WINDOW`，`run_metric_worker` 认领 `METRIC_DAILY_SYNC`、`METRIC_WEEKLY_SYNC` 与 `METRIC_BACKFILL`，`run_review_worker` 只认领 OCR/AI 任务，`run_video_extraction_worker` 只认领 `VIDEO_EXTRACT`；采集任务可从 checkpoint 继续。它们由 Supervisor 统一启停，页面不执行任意系统命令。`run_ingestion_worker` 保留为实时命令的兼容别名。
+- Job 类型、生产者、消费者与调度时间表见[系统总览](system-overview.md)。所有 Worker 均由 Supervisor 启停；不要手工运行会话服务绕过 capability 注入。`run_ingestion_worker` 保留为实时命令的兼容别名。
 - 视频 Worker 默认关闭。工具安装、受控样本预检、ASR 降级和停止/回滚步骤见[视频审核手册](video-review-runbook.md)。失败时保持关闭，视频任务记录脱敏状态；仅空文字输入且媒体证据不足时进入重点人工核验。
 - SQLite 中每个 Worker 职责都只能运行一个实例。实时采集和人工补采分别串行处理所属任务：长时间历史补采或范围互动刷新不会使后续 15 分钟采集、状态巡检积压。AI 审核 Worker 独立消费 OCR/AI 队列，不会被任一采集队列阻塞。
-- 任务生产者为：自动调度器创建 `SCHEDULED_INGEST_WINDOW` 与 `STATUS_SYNC`；系统配置首页“帖子采集 Worker”的“创建历史补采”创建 `MANUAL_INGEST_WINDOW`；运营分析页创建 `METRICS_REFRESH_WINDOW`；`enqueue_author_mute_status_backfill` 仅创建一次性 `AUTHOR_MUTE_STATUS_BACKFILL`；原创帖采集、单帖刷新和人工重新评估创建 `OCR_EXTRACT` 与 `AI_EVALUATE`。`enqueue_ingestion` 仅保留为故障诊断入口。完整生产/消费图见[系统总览](system-overview.md#运行架构与任务流)。
 - 契约变更或会话失效会保留已脱敏错误摘要。修复后重新排队，不应修改数据库中的会话字段。
 - `/admin/` 仅用于系统配置与运行追溯：策略版本与策略规则可编辑，游戏目录只能通过受控 Chrome 同步；帖子、审核、AI/OCR、审计和后台任务不可手工修改。所有上游处置均从内容管理工作台执行，不能以 Admin 或直接修改数据库的方式绕过。
 
@@ -76,8 +78,9 @@ uv run python manage.py enqueue_author_mute_status_backfill
 
 | 现象 | 首先检查 | 恢复方式 |
 | --- | --- | --- |
-| 没有新增帖子 | Pipeline 中 CDP 登录态、Scheduler 与实时采集 Worker 是否运行 | 恢复受控 Chrome 登录后在 Pipeline 重启帖子采集 Worker；停机超过 30 分钟时在“帖子采集 Worker”创建历史补采。 |
-| 顶部 `CDP` 状态胶囊为红色 | Chrome 是否以 `9222` 调试端口启动 | 已登录本系统的运营人员可点击红色胶囊，只在受控 Chrome 打开固定插件登录页后手动扫码；若提示 CDP 不可用，先启动受控 Chrome，绝不在工作台浏览器直接登录。 |
+| 没有新增帖子 | Pipeline 中游戏圈会话服务、受控 Chrome 会话、Scheduler 与实时采集 Worker 是否运行 | 先恢复游戏圈会话服务与受控 Chrome 登录，再在 Pipeline 重启帖子采集 Worker；停机超过 30 分钟时在“帖子采集 Worker”创建历史补采。 |
+| 顶部“会话”状态胶囊为红色 | 先看文案：`需扫码登录`、`Chrome 未启动` 或 `状态待检查` | 只有“需扫码登录”可点击，并只在受控 Chrome 打开固定公众平台登录页 `/cgi-bin/loginpage` 后手动扫码；其余状态不打开登录页。若 Chrome 未启动，在 Supervisor 中重启“受控 Chrome”服务；不要手工启动浏览器或在工作台浏览器直接登录。 |
+| 来源任务提示等待会话刷新 | `game_circle_session` 服务、当前操作游戏和刷新 Job 的脱敏摘要 | 保持该服务运行；它会先从新 HOME 自动重建。仅摘要为“需要人工扫码”时，才在受控 Chrome 中扫码后重新创建/等待刷新任务；不得重放人工写操作。 |
 | 任务长期 `PENDING` | 任务的 `task_type` 与 Pipeline 对应 Worker | 在 Pipeline 启动帖子采集 Worker（会同时启动两个采集服务）或 AI Worker；不要并行启动第二个相同职责实例。 |
 | 任务 `FAILED` | 系统配置与追溯台“后台任务”的脱敏 `error_summary` 与 checkpoint | 修复会话、配置或上游契约后重新入队；不要修改会话字段。 |
 | AI/OCR 任务失败 | Pipeline 中的 AI/OCR 配置和 AI Worker 日志 | 在配置弹窗修正对应配置并重启 AI Worker；已采集帖子数据不受影响。 |
@@ -88,11 +91,7 @@ AI 自动沉底或屏蔽成功后，运营人员必须在内容管理的“AI �
 
 ## 自动采集调度
 
-自动调度只覆盖城主别慌张（`wx6d2454a8afcd9706`）。在系统配置 Pipeline 启动 Scheduler；它由 Supervisor 托管，不应另行执行常驻 Scheduler 命令。
-
-它按北京时间每 15 分钟时间桶先入队一项最多回读 20 条待审核帖的状态巡检，再入队最近 30 分钟的 `SCHEDULED_INGEST_WINDOW`；每日 07:30 后还会创建前一日为主、复核近三日的 `METRIC_DAILY_SYNC`，周一 17:30 后创建已完成周为主、复核近三周的 `METRIC_WEEKLY_SYNC`。Scheduler 不连接 CDP、不读取登录态、不执行 AI 或上游写操作，必须保持实时采集 Worker、指标快照 Worker 和 AI Worker 运行以消费任务。`--once` 仅用于排障或验证当前时间桶；不再配置 cron 或 `launchd`。
-
-同一时间桶的重复检查会复用已有任务，但 SQLite 部署仍只能运行一个 Scheduler Worker。可通过服务日志检查 AppID、窗口和任务编号。
+自动调度仅针对系统配置中已选择的“当前操作游戏”，由 Supervisor 托管；不应另行执行常驻 Scheduler 命令。完整时间表见[系统总览](system-overview.md)。同一时间槽会复用已有任务；SQLite 部署仍只能运行一个 Scheduler Worker。`--once` 仅用于排障或验证当前时间槽。
 
 ### 漏采处理
 

@@ -6,8 +6,9 @@ from django.core.management.base import BaseCommand, CommandError
 from django.utils import timezone
 
 from posts.models import OriginalPost
+from posts.game_catalog import current_execution_scope
 from posts.services import store_post_metrics
-from posts.source_client import CdpGameCircleClient
+from config.game_circle_ipc import GameCirclePostClient
 
 
 class Command(BaseCommand):
@@ -24,9 +25,12 @@ class Command(BaseCommand):
             raise CommandError("appid 不能为空")
         if limit <= 0:
             raise CommandError("limit 必须为正数")
-        posts = list(OriginalPost.objects.filter(source_appid=appid).order_by("topic_id")[:limit])
-        client = CdpGameCircleClient(appid=appid)
         try:
+            scope = current_execution_scope(appid)
+        except ValueError as exc:
+            raise CommandError(str(exc)) from exc
+        posts = list(OriginalPost.objects.filter(source_appid=appid).order_by("topic_id")[:limit])
+        with GameCirclePostClient(scope=scope) as client:
             for post in posts:
                 requested_at = timezone.now()
                 store_post_metrics(
@@ -34,6 +38,4 @@ class Command(BaseCommand):
                     client.get_post_metrics(post.topic_id),
                     source_requested_at=requested_at,
                 )
-        finally:
-            client.close()
         self.stdout.write(f"已刷新 {len(posts)} 条原创帖互动指标。")

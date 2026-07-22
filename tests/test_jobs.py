@@ -7,6 +7,7 @@ from django.utils import timezone
 from jobs import worker
 from jobs.adapters import SourceContractError
 from jobs.models import BackgroundJob, JobStatus
+from jobs.task_types import task_type_label
 from jobs.services import (
     cancel_job,
     claim_next_job,
@@ -44,6 +45,11 @@ def test_specialized_worker_only_claims_its_own_task_types():
     assert claimed.pk == ingestion.pk
     review.refresh_from_db()
     assert review.status == JobStatus.PENDING
+
+
+def test_task_type_labels_are_derived_from_the_shared_mapping():
+    assert task_type_label("AI_EVALUATE") == "AI 内容评估"
+    assert task_type_label("FUTURE_JOB") == "FUTURE_JOB"
 
 
 @pytest.mark.django_db

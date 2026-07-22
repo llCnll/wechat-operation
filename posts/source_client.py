@@ -5,11 +5,13 @@ from __future__ import annotations
 import json
 from datetime import UTC, datetime
 from time import monotonic, sleep
+from collections.abc import Callable
 from typing import Any
 
-from config.cdp import CdpGameFrame, CdpUnavailableError, bind_game_identity
+from config.cdp import CdpGameFrame, CdpTargetUnavailableError, CdpUnavailableError
 from jobs.adapters import (
     CandidatePostDTO,
+    PluginSessionExpiredError,
     SourceBusinessDeletedError,
     SourceContractError,
     SourceTransportError,
@@ -23,14 +25,19 @@ class CdpGameCircleClient:
         self,
         *,
         appid: str,
-        cdp_url: str = "http://127.0.0.1:9222",
         min_interval_seconds: float = 0.12,
+        frame: CdpGameFrame,
+        identity_token: str,
+        rebind_identity: Callable[[], str] | None = None,
     ):
         if not appid:
             raise SourceContractError("缺少游戏 appid")
         self.appid = appid
-        self.frame = CdpGameFrame(cdp_url)
-        self.token = bind_game_identity(appid, cdp_url)
+        if not identity_token:
+            raise SourceContractError("缺少受控来源身份会话")
+        self.frame = frame
+        self.token = identity_token
+        self._rebind_identity = rebind_identity
         self.min_interval_seconds = min_interval_seconds
         self._last_request_at = 0.0
 
@@ -51,7 +58,7 @@ class CdpGameCircleClient:
             for (const [key, value] of Object.entries(params)) {{
                 url.searchParams.set(key, String(value));
             }}
-            url.searchParams.set('token', {json.dumps(self.token)});
+            url.searchParams.set('token', "__SOURCE_TOKEN__");
             url.searchParams.set('auth_type', '4');
             const response = await fetch(url.toString(), {{
                 method: {json.dumps(http_method)}, credentials: 'include',
@@ -62,22 +69,54 @@ class CdpGameCircleClient:
                 body: {encoded_body}
             }});
             const text = await response.text();
-            try {{ return {{status: response.status, payload: JSON.parse(text)}}; }}
-            catch (_) {{ return {{status: response.status, payload: null}}; }}
+            try {{
+                return {{
+                    status: response.status,
+                    payload: JSON.parse(text),
+                    response_kind: response.headers.get('content-type')?.includes('application/json')
+                        ? 'DECLARED_JSON' : 'OTHER',
+                    redirected: Boolean(response.redirected)
+                }};
+            }} catch (_) {{
+                return {{
+                    status: response.status,
+                    payload: null,
+                    response_kind: response.headers.get('content-type')?.includes('application/json')
+                        ? 'DECLARED_JSON' : 'OTHER',
+                    redirected: Boolean(response.redirected)
+                }};
+            }}
         }})()"""
-        try:
-            result = self.frame.evaluate(expression)
-        except CdpUnavailableError as exc:
-            raise SourceTransportError("原平台 CDP 请求失败") from exc
-        self._last_request_at = monotonic()
-        if not isinstance(result, dict) or not isinstance(result.get("payload"), dict):
-            raise SourceContractError("原平台响应非 JSON")
-        payload = result["payload"]
-        if result.get("status") != 200 or payload.get("errcode") != 0:
+        for attempt in range(2):
+            try:
+                result = self.frame.evaluate(
+                    expression.replace('"__SOURCE_TOKEN__"', json.dumps(self.token))
+                )
+            except CdpTargetUnavailableError as exc:
+                raise PluginSessionExpiredError("已登记游戏圈 target 不可用") from exc
+            except CdpUnavailableError as exc:
+                raise SourceTransportError("原平台 CDP 请求失败") from exc
+            self._last_request_at = monotonic()
+            if not isinstance(result, dict):
+                raise SourceContractError(
+                    "来源 CDP 返回结构无效", safe_reason="INVALID_EVALUATION_RESULT"
+                )
+            if not isinstance(result.get("payload"), dict):
+                raise SourceContractError(
+                    "来源详情响应不是 JSON", safe_reason="NON_JSON_RESPONSE"
+                )
+            payload = result["payload"]
+            if result.get("status") == 200 and payload.get("errcode") == 0:
+                return payload
+            if payload.get("errcode") == -2:
+                if attempt == 0 and self._rebind_identity is not None:
+                    self.token = self._rebind_identity()
+                    continue
+                raise PluginSessionExpiredError("来源身份会话已失效")
             if path.endswith("/topicsearchgetdetail") and payload.get("errcode") == -10075007:
                 raise SourceBusinessDeletedError("原平台帖子已从管理队列删除")
             raise SourceTransportError("原平台返回错误")
-        return payload
+        raise AssertionError("来源身份重绑循环不应到达此处")
 
     def _get(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
         return self._request_path("/cgi-bin/gamecircleopenmpweb/" + method, params=params)

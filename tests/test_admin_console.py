@@ -12,6 +12,7 @@ from django.utils import timezone
 from config.context_processors import _service_reason, admin_console_overview
 from config.supervisor import SupervisorUnavailableError
 from jobs.models import BackgroundJob, JobStatus
+from posts.game_catalog import set_active_game
 from posts.models import ManagedGame, OriginalPost
 from reviews.adapters import AssessmentOutput
 from reviews.models import PolicyRule, PolicyVersion, RecommendedAction
@@ -42,6 +43,14 @@ def test_admin_home_is_configuration_and_traceability_console(admin_client):
     assert "仅此区域允许编辑" in page
     assert "未启用策略" in page
     assert "初始化与运行状态" in page
+    assert "受控 Chrome" in page
+    assert "游戏圈会话服务" in page
+    assert "受控 Chrome 会话" in page
+    assert "保活 Frame" in page
+    assert "检查会话" in page
+    assert "切换游戏" in page
+    assert "同步目录" in page
+    assert "受控同步" not in page
     assert "自动调度器" in page
     assert "帖子采集 Worker" in page
     assert "指标快照 Worker" in page
@@ -76,7 +85,10 @@ def test_admin_pipeline_follows_the_content_flow(admin_client):
 
     assert [node["key"] for node in pipeline] == [
         "web",
-        "cdp",
+        "active_game_scope",
+        "controlled_chrome",
+        "game_circle_session",
+        "controlled_chrome_session",
         "scheduler",
         "ingestion",
         "metric_sync",
@@ -88,6 +100,25 @@ def test_admin_pipeline_follows_the_content_flow(admin_client):
         "writes",
         "ai_moderation",
     ]
+
+
+@pytest.mark.django_db
+def test_admin_pipeline_does_not_misreport_chrome_login_when_session_service_is_stopped(
+    admin_client, monkeypatch
+):
+    def stopped_session_service(_self):
+        return {
+            "web": {"running": True, "desired": True},
+            "controlled_chrome": {"running": True, "desired": True},
+            "game_circle_session": {"running": False, "desired": False},
+        }
+
+    monkeypatch.setattr("config.context_processors.SupervisorClient.status", stopped_session_service)
+
+    page = admin_client.get("/admin/").content.decode()
+
+    assert "游戏圈会话服务未运行，暂不能检查" in page
+    assert "打开登录页" not in page
 
 
 @pytest.mark.django_db
@@ -212,6 +243,7 @@ def test_ingestion_control_starts_both_fixed_workers_and_reports_partial_failure
 @pytest.mark.django_db
 def test_admin_can_enqueue_bounded_manual_ingestion_for_a_managed_game(admin_client, monkeypatch):
     game = ManagedGame.objects.create(appid="wx-manual-ingestion", name="人工补采游戏")
+    set_active_game(appid=game.appid)
     captured = {}
 
     def enqueue(**kwargs):
@@ -247,15 +279,16 @@ def test_admin_rejects_manual_ingestion_outside_the_bounded_hour_range(admin_cli
 
 
 @pytest.mark.django_db
-def test_admin_home_offers_manual_ingestion_with_the_default_game_selected(admin_client):
-    ManagedGame.objects.create(appid="wx-other-game", name="其他游戏")
+def test_admin_home_offers_manual_ingestion_with_the_current_game_selected(admin_client):
+    game = ManagedGame.objects.create(appid="wx-other-game", name="其他游戏")
+    set_active_game(appid=game.appid)
 
     page = admin_client.get("/admin/").content.decode()
 
     assert "创建历史补采" in page
     assert 'action="/admin/runtime/ingestion/enqueue/"' in page
     assert 'name="hours" type="number" min="1" max="744" value="12"' in page
-    assert 'value="wx6d2454a8afcd9706" selected' in page
+    assert 'value="wx-other-game" selected' in page
 
 
 @pytest.mark.django_db

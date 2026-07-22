@@ -1,6 +1,7 @@
 from config.settings import runtime
 from jobs.models import BackgroundJob, JobStatus
 from jobs.services import JobDeferred
+from jobs.task_types import AI_EVALUATE_TASK
 from posts.models import OriginalPost
 
 from .adapters import (
@@ -16,9 +17,6 @@ from .services import (
     current_video_extractions,
     persist_assessment,
 )
-
-AI_EVALUATE_TASK = "AI_EVALUATE"
-
 
 def reviewable_post_content(post: OriginalPost) -> str:
     """Include poll copy so hidden messages in option initials are reviewed with the post."""

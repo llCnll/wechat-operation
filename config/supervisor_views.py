@@ -13,7 +13,14 @@ from django.views.decorators.http import require_GET, require_POST
 
 from config.runtime_config import affected_services, update_runtime_config
 from config.supervisor import SupervisorClient, SupervisorUnavailableError
-from posts.game_catalog import ensure_default_game
+from jobs.game_circle_refresh import (
+    REFRESH_KEEPALIVE,
+    REFRESH_RECOVER,
+    enqueue_login_probe,
+    enqueue_session_refresh,
+)
+from posts.game_catalog import active_game_appid
+from posts.game_catalog import set_active_game
 from posts.ingestion_jobs import SHANGHAI, enqueue_manual_ingestion_window
 from posts.models import ManagedGame
 
@@ -63,7 +70,6 @@ def control_ingestion_workers(request, action: str):
 @require_POST
 def enqueue_manual_ingestion(request):
     """Create a bounded historical ingestion task for the backfill Worker."""
-    ensure_default_game()
     appid = request.POST.get("appid", "").strip()
     try:
         hours = int(request.POST.get("hours", ""))
@@ -75,9 +81,14 @@ def enqueue_manual_ingestion(request):
         messages.error(request, f"补采时长须在 1 至 {MAX_MANUAL_INGESTION_HOURS} 小时之间。")
         return redirect(_return_to(request))
 
+    try:
+        active_game_appid(appid, persist_default=False)
+    except ValueError as exc:
+        messages.error(request, str(exc))
+        return redirect(_return_to(request))
     game = ManagedGame.objects.filter(appid=appid).only("appid", "name").first()
     if game is None:
-        messages.error(request, "请选择可管理游戏。")
+        messages.error(request, "当前操作游戏不在本地目录中。")
         return redirect(_return_to(request))
 
     end_at = timezone.now().astimezone(SHANGHAI).replace(second=0, microsecond=0)
@@ -97,6 +108,60 @@ def enqueue_manual_ingestion(request):
             request,
             f"{game.name}最近 {hours} 小时的历史补采任务{outcome}（任务 #{result.job.pk}）。",
         )
+    return redirect(_return_to(request))
+
+
+@staff_member_required
+@require_POST
+def set_active_game_scope(request):
+    appid = request.POST.get("appid", "").strip()
+    try:
+        scope = set_active_game(appid=appid, updated_by=request.user)
+        refresh = enqueue_session_refresh(refresh_mode=REFRESH_RECOVER)
+    except ValueError as exc:
+        messages.error(request, str(exc))
+    else:
+        outcome = "已创建" if refresh.created else "已复用"
+        messages.success(request, f"当前操作游戏已更新（范围版本 {scope.scope_version}）；Frame 恢复任务{outcome}。")
+    return redirect(_return_to(request))
+
+
+@staff_member_required
+@require_POST
+def enqueue_login_probe_request(request):
+    try:
+        refresh = enqueue_login_probe(source="manual")
+    except ValueError as exc:
+        messages.error(request, str(exc))
+    else:
+        outcome = "已创建" if refresh.created else "已复用"
+        messages.success(request, f"外层会话检查任务{outcome}；不会创建当前游戏 Frame。")
+    return redirect(_return_to(request))
+
+
+@staff_member_required
+@require_POST
+def enqueue_session_recover_request(request):
+    try:
+        refresh = enqueue_session_refresh(refresh_mode=REFRESH_RECOVER)
+    except ValueError as exc:
+        messages.error(request, str(exc))
+    else:
+        outcome = "已创建" if refresh.created else "已复用"
+        messages.success(request, f"当前游戏 Frame 恢复任务{outcome}；完成后请刷新状态确认。")
+    return redirect(_return_to(request))
+
+
+@staff_member_required
+@require_POST
+def enqueue_session_keepalive_request(request):
+    try:
+        refresh = enqueue_session_refresh(refresh_mode=REFRESH_KEEPALIVE)
+    except ValueError as exc:
+        messages.error(request, str(exc))
+    else:
+        outcome = "已创建" if refresh.created else "已复用"
+        messages.success(request, f"当前游戏 Frame 保活任务{outcome}；不会修改当前操作游戏。")
     return redirect(_return_to(request))
 
 

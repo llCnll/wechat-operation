@@ -2,11 +2,11 @@ import pytest
 from django.contrib.admin.sites import AdminSite
 from django.test import RequestFactory
 
-from config.cdp import CdpUnavailableError, ManagedGameDTO, list_managed_games
+from config.cdp import ManagedGameDTO
+from config.game_circle_ipc import GameCircleIpcError
 from posts.admin import ManagedGameAdmin
 from posts.game_catalog import (
     DEFAULT_GAME_APPID,
-    DEFAULT_GAME_NAME,
     managed_game_options,
     sync_managed_games,
 )
@@ -14,28 +14,29 @@ from posts.models import ManagedGame, OriginalPost
 
 
 @pytest.mark.django_db
-def test_catalog_has_default_game_and_keeps_unknown_historical_appid():
+def test_catalog_does_not_fabricate_default_game_and_keeps_unknown_historical_appid():
+    existing_appids = set(ManagedGame.objects.values_list("appid", flat=True))
     OriginalPost.objects.create(topic_id=9001, content_id="unknown-game", source_appid="wx-history")
 
     options = managed_game_options()
 
-    assert options[0].appid == DEFAULT_GAME_APPID
-    assert options[0].name == DEFAULT_GAME_NAME
     assert any(option.appid == "wx-history" and "未知游戏" in option.name for option in options)
+    assert {option.appid for option in options if "未知游戏" not in option.name} == existing_appids
 
 
 @pytest.mark.django_db
-def test_read_only_catalog_options_include_default_without_persisting_it():
+def test_read_only_catalog_options_do_not_manufacture_default_records():
     games_before = list(ManagedGame.objects.values_list("appid", "name"))
 
     options = managed_game_options(persist_default=False)
 
-    assert options[0].appid == DEFAULT_GAME_APPID
+    assert [(option.appid, option.name) for option in options] == games_before
     assert list(ManagedGame.objects.values_list("appid", "name")) == games_before
 
 
 @pytest.mark.django_db
 def test_successful_sync_upserts_catalog_without_deleting_previous_records():
+    existing_appids = set(ManagedGame.objects.values_list("appid", flat=True))
     ManagedGame.objects.create(appid="wx-legacy", name="旧游戏")
 
     count = sync_managed_games(
@@ -45,31 +46,14 @@ def test_successful_sync_upserts_catalog_without_deleting_previous_records():
     assert count == 2
     assert ManagedGame.objects.get(appid="wx-new").name == "新游戏"
     assert ManagedGame.objects.get(appid="wx-legacy").name == "新名称"
-    assert ManagedGame.objects.get(appid=DEFAULT_GAME_APPID).name == DEFAULT_GAME_NAME
-
-
-def test_outer_page_game_reader_returns_only_normalized_fields(monkeypatch):
-    class Page:
-        def __init__(self, *args, **kwargs):
-            pass
-
-        def evaluate(self, expression):
-            assert "getWxaList" in expression
-            return {"ok": True, "games": [{"appid": "wx-a", "name": "游戏 A"}]}
-
-        def close(self):
-            pass
-
-    monkeypatch.setattr("config.cdp.CdpMpPage", Page)
-
-    assert list_managed_games() == [ManagedGameDTO("wx-a", "游戏 A")]
+    assert existing_appids <= set(ManagedGame.objects.values_list("appid", flat=True))
 
 
 @pytest.mark.django_db
 def test_admin_sync_failure_keeps_cached_catalog(monkeypatch):
     game = ManagedGame.objects.create(appid="wx-cached", name="缓存游戏")
     monkeypatch.setattr(
-        "posts.admin.list_managed_games", lambda: (_ for _ in ()).throw(CdpUnavailableError())
+        "posts.admin.list_managed_games", lambda: (_ for _ in ()).throw(GameCircleIpcError("SERVICE_UNAVAILABLE", "不可用"))
     )
     admin = ManagedGameAdmin(ManagedGame, AdminSite())
     request = RequestFactory().post("/admin/posts/managedgame/")

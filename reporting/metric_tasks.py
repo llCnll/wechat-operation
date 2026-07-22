@@ -3,23 +3,37 @@
 from __future__ import annotations
 
 from datetime import date, datetime, timedelta
+from contextlib import contextmanager
 
-from config.cdp import CdpUnavailableError
-from jobs.adapters import SourceContractError
+from jobs.adapters import SourceContractError, SourceTransportError
 from jobs.models import BackgroundJob
 from jobs.services import JobDeferred, JobTerminalError
+from posts.game_catalog import checkpoint_with_execution_scope, resolve_execution_scope
+from config.game_circle_ipc import (
+    GameCircleIpcError,
+    GameCircleMetricClient,
+    is_session_recovering_error,
+)
 
 from .metric_jobs import METRIC_BACKFILL_TASK, METRIC_DAILY_SYNC_TASK, METRIC_WEEKLY_SYNC_TASK
 from .metric_sources import read_metric_page
-from .metric_sync import MetricPermissionError, MetricRecord, upsert_metric_snapshot
+from .metric_sync import MetricBusinessRetryableError, MetricPermissionError, MetricRecord, upsert_metric_snapshot
 from .models import MetricSource
-from .source_client import CdpGameCircleMetricClient
 
 METRIC_DATE_CHUNK_DAYS = 90
 
 
 def _date_code(value: date) -> int:
     return int(value.strftime("%Y%m%d"))
+
+
+@contextmanager
+def _metric_client(scope):
+    client = GameCircleMetricClient(scope=scope)
+    try:
+        yield client
+    finally:
+        client.close()
 
 
 def _parse_date_code(value: object, *, field: str) -> date:
@@ -58,7 +72,7 @@ def _save_checkpoint(
     }
     if last_period is not None:
         checkpoint["last_period"] = last_period.isoformat()
-    job.checkpoint = checkpoint
+    job.checkpoint = checkpoint_with_execution_scope(job, checkpoint)
     job.save(update_fields=["checkpoint", "updated_at"])
 
 
@@ -108,7 +122,7 @@ def _persist_records(
 def _run_sync(
     job: BackgroundJob,
     *,
-    client: CdpGameCircleMetricClient,
+    client: GameCircleMetricClient,
     source: MetricSource,
 ) -> None:
     parameters = job.parameter_summary
@@ -160,26 +174,32 @@ def _run_sync(
             last_period=metric_page.records[-1].period_start if metric_page.records else None,
         )
         chunk_start, page = next_chunk, 0
-    job.checkpoint = {"source": source, "saved": saved, "complete": True}
+    job.checkpoint = checkpoint_with_execution_scope(
+        job, {"source": source, "saved": saved, "complete": True}
+    )
     job.save(update_fields=["checkpoint", "updated_at"])
 
 
 def metric_sync_handler(job: BackgroundJob) -> None:
-    if str(job.parameter_summary.get("appid", "")) != "wx6d2454a8afcd9706":
-        raise JobTerminalError("指标任务仅支持城主别慌张")
+    try:
+        scope = resolve_execution_scope(job)
+        appid = scope.target_appid
+    except ValueError as exc:
+        raise JobTerminalError(str(exc)) from exc
     source = _task_source(job)
     try:
-        client = CdpGameCircleMetricClient(appid="wx6d2454a8afcd9706")
-    except CdpUnavailableError as exc:
-        raise JobDeferred("等待受控 Chrome 微信扫码登录", delay_seconds=300) from exc
-    try:
-        _run_sync(job, client=client, source=source)
-    except CdpUnavailableError as exc:
-        raise JobDeferred("等待受控 Chrome 微信扫码登录", delay_seconds=300) from exc
+        with _metric_client(scope) as client:
+            _run_sync(job, client=client, source=source)
+    except MetricBusinessRetryableError:
+        raise
+    except GameCircleIpcError as exc:
+        if is_session_recovering_error(exc):
+            raise JobDeferred("等待游戏圈会话恢复", delay_seconds=5) from exc
+        raise
+    except SourceTransportError:
+        raise
     except (MetricPermissionError, SourceContractError) as exc:
         raise JobTerminalError(str(exc)) from exc
-    finally:
-        client.close()
 
 
 METRIC_WORKER_HANDLERS = {

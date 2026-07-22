@@ -6,7 +6,6 @@ import json
 import logging
 import os
 from pathlib import Path
-from typing import Literal
 
 from pydantic import Field, ValidationError
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -61,10 +60,21 @@ class RuntimeSettings(BaseSettings):
     enable_ai_automated_moderation: bool = False
     enable_ai_sink_writes: bool = False
     enable_ai_block_writes: bool = False
-    scheduled_ingestion_appid: Literal["wx6d2454a8afcd9706"] = "wx6d2454a8afcd9706"
-    scheduled_ingestion_interval_minutes: Literal[15] = 15
-    scheduled_ingestion_lookback_minutes: Literal[30] = 30
-    scheduled_ingestion_page_size: Literal[20] = 20
+    default_game_appid: str = ""
+    controlled_chrome_bin: str = ""
+    controlled_chrome_user_data_dir: Path = RUNTIME_DIR / "controlled-chrome-profile"
+    controlled_chrome_debug_port: int = Field(default=9222, ge=1024, le=65535)
+    game_circle_ipc_port: int = Field(default=9364, ge=1024, le=65535)
+    game_circle_ipc_timeout_seconds: float = Field(default=30, ge=1, le=120)
+    game_circle_session_retire_seconds: int = Field(default=10, ge=1, le=60)
+    # Zero means "unlimited" for the current verified read-only rollout.  The
+    # fields are retained so a future upstream rate-limit finding can be applied
+    # per service deployment without redesigning the lease contract.
+    game_circle_max_concurrent_accesses: int = Field(default=0, ge=0, le=1000)
+    game_circle_max_requests_per_second: float = Field(default=0, ge=0, le=1000)
+    scheduled_ingestion_interval_minutes: int = Field(default=15, ge=1, le=1440)
+    scheduled_ingestion_lookback_minutes: int = Field(default=30, ge=1, le=24 * 60)
+    scheduled_ingestion_page_size: int = Field(default=20, ge=1, le=100)
 
 
 try:
@@ -74,6 +84,8 @@ except ValidationError as exc:
 
 if not runtime.database_path.is_absolute():
     runtime.database_path = BASE_DIR / runtime.database_path
+if not runtime.controlled_chrome_user_data_dir.is_absolute():
+    runtime.controlled_chrome_user_data_dir = BASE_DIR / runtime.controlled_chrome_user_data_dir
 
 RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -144,10 +156,19 @@ STORAGES = {
 WHITENOISE_MANIFEST_STRICT = False
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 LOGIN_URL = "/admin/login/"
-SCHEDULED_INGESTION_APPID = runtime.scheduled_ingestion_appid
 SCHEDULED_INGESTION_INTERVAL_MINUTES = runtime.scheduled_ingestion_interval_minutes
 SCHEDULED_INGESTION_LOOKBACK_MINUTES = runtime.scheduled_ingestion_lookback_minutes
 SCHEDULED_INGESTION_PAGE_SIZE = runtime.scheduled_ingestion_page_size
+DEFAULT_GAME_APPID = runtime.default_game_appid
+CONTROLLED_CHROME_BIN = runtime.controlled_chrome_bin
+CONTROLLED_CHROME_USER_DATA_DIR = runtime.controlled_chrome_user_data_dir
+CONTROLLED_CHROME_DEBUG_PORT = runtime.controlled_chrome_debug_port
+CONTROLLED_CHROME_CDP_URL = f"http://127.0.0.1:{CONTROLLED_CHROME_DEBUG_PORT}"
+GAME_CIRCLE_IPC_PORT = runtime.game_circle_ipc_port
+GAME_CIRCLE_IPC_TIMEOUT_SECONDS = runtime.game_circle_ipc_timeout_seconds
+GAME_CIRCLE_SESSION_RETIRE_SECONDS = runtime.game_circle_session_retire_seconds
+GAME_CIRCLE_MAX_CONCURRENT_ACCESSES = runtime.game_circle_max_concurrent_accesses
+GAME_CIRCLE_MAX_REQUESTS_PER_SECOND = runtime.game_circle_max_requests_per_second
 
 
 class SensitiveDataFilter(logging.Filter):

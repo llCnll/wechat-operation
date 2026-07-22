@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from datetime import datetime
 from typing import Any
 
@@ -10,23 +11,49 @@ from django.utils import timezone
 
 from jobs.adapters import SourceBusinessDeletedError, SourceContractError, SourceTransportError
 from jobs.models import BackgroundJob
-from jobs.once.author_mute_status_backfill import (
+from jobs.services import JobDeferred
+from jobs.task_types import (
     AUTHOR_MUTE_STATUS_BACKFILL_TASK,
+    LEGACY_INGEST_WINDOW_TASK,
+    MANUAL_INGEST_WINDOW_TASK,
+    METRICS_REFRESH_WINDOW_TASK,
+    SCHEDULED_INGEST_WINDOW_TASK,
+    STATUS_SYNC_TASK,
+)
+from jobs.once.author_mute_status_backfill import (
     author_mute_status_backfill_handler,
 )
 from reviews.models import ReviewStatus
 
 from .ingestion import ingest_page
+from .game_catalog import checkpoint_with_execution_scope, resolve_execution_scope
 from .models import OriginalPost, mark_post_deleted
 from .services import store_post_interaction_metrics, store_post_metrics
-from .source_client import CdpGameCircleClient
+from config.game_circle_ipc import (
+    GameCircleIpcError,
+    GameCirclePostClient,
+    is_session_recovering_error,
+)
 
-LEGACY_INGEST_WINDOW_TASK = "INGEST_WINDOW"
-SCHEDULED_INGEST_WINDOW_TASK = "SCHEDULED_INGEST_WINDOW"
-MANUAL_INGEST_WINDOW_TASK = "MANUAL_INGEST_WINDOW"
-STATUS_SYNC_TASK = "STATUS_SYNC"
-METRICS_REFRESH_WINDOW_TASK = "METRICS_REFRESH_WINDOW"
 MAX_METRICS_REFRESH_FAILURE_SAMPLES = 20
+
+
+def _raise_if_session_recovering(error: Exception) -> None:
+    """Keep source checkpoints intact while the sole session service rebuilds a Frame."""
+    if is_session_recovering_error(error):
+        raise JobDeferred("等待游戏圈会话恢复", delay_seconds=5) from error
+
+
+@contextmanager
+def _source_client(scope):
+    client = GameCirclePostClient(scope=scope)
+    try:
+        yield client
+    except GameCircleIpcError as exc:
+        _raise_if_session_recovering(exc)
+        raise
+    finally:
+        client.close()
 
 
 def _required_int(parameters: dict[str, Any], key: str) -> int:
@@ -42,9 +69,11 @@ def _required_int(parameters: dict[str, Any], key: str) -> int:
 def ingest_window_handler(job: BackgroundJob) -> None:
     """Run a whole window while persisting a checkpoint after every completed page."""
     parameters = job.parameter_summary
-    appid = str(parameters.get("appid", ""))
-    if not appid:
-        raise SourceContractError("采集任务缺少 appid")
+    try:
+        scope = resolve_execution_scope(job)
+        appid = scope.target_appid
+    except ValueError as exc:
+        raise SourceContractError(str(exc)) from exc
     start_time = _required_int(parameters, "start_time")
     end_time = _required_int(parameters, "end_time")
     page_size = _required_int(parameters, "page_size")
@@ -56,8 +85,7 @@ def ingest_window_handler(job: BackgroundJob) -> None:
         return
     page = int(checkpoint.get("page", 0))
     total_processed = int(checkpoint.get("total_processed", 0))
-    client = CdpGameCircleClient(appid=appid)
-    try:
+    with _source_client(scope) as client:
         while True:
             count = ingest_page(
                 client,
@@ -68,23 +96,28 @@ def ingest_window_handler(job: BackgroundJob) -> None:
             )
             total_processed += count
             is_complete = count < page_size
-            job.checkpoint = {
-                "page": page + 1,
-                "last_processed_count": count,
-                "total_processed": total_processed,
-                "complete": is_complete,
-            }
+            job.checkpoint = checkpoint_with_execution_scope(
+                job,
+                {
+                    "page": page + 1,
+                    "last_processed_count": count,
+                    "total_processed": total_processed,
+                    "complete": is_complete,
+                },
+            )
             job.save(update_fields=["checkpoint", "updated_at"])
             if is_complete:
                 return
             page += 1
-    finally:
-        client.close()
 
 
 def sync_pending_status_handler(job: BackgroundJob) -> None:
     """Refresh a bounded, rotating batch of pending posts without changing review decisions."""
-    appid = str(job.parameter_summary.get("appid", "")).strip()
+    try:
+        scope = resolve_execution_scope(job)
+        appid = scope.target_appid
+    except ValueError as exc:
+        raise SourceContractError(str(exc)) from exc
     limit = _required_int(job.parameter_summary, "limit")
     if not appid:
         raise SourceContractError("状态巡检任务缺少 appid")
@@ -92,41 +125,57 @@ def sync_pending_status_handler(job: BackgroundJob) -> None:
         raise SourceContractError("状态巡检任务 limit 必须在1至50之间")
 
     app_filter = Q(source_appid=appid)
-    if appid == "wx6d2454a8afcd9706":
-        app_filter |= Q(source_appid="")
     posts = list(
         OriginalPost.objects.filter(app_filter, review_task__status=ReviewStatus.PENDING)
         .order_by("updated_at", "topic_id")[:limit]
     )
+    attempted = 0
     refreshed = 0
-    client = CdpGameCircleClient(appid=appid)
-    try:
+    failed = 0
+    with _source_client(scope) as client:
         for post in posts:
+            attempted += 1
             try:
                 requested_at = timezone.now()
                 payload = client.get_post_metrics(post.topic_id)
             except SourceBusinessDeletedError:
                 post.status = mark_post_deleted(post.status)
                 post.save(update_fields=["status", "updated_at"])
-            except (SourceContractError, SourceTransportError):
+            except (SourceContractError, SourceTransportError) as exc:
+                _raise_if_session_recovering(exc)
+                failed += 1
                 continue
             else:
                 try:
                     store_post_metrics(post, payload, source_requested_at=requested_at)
-                except (SourceContractError, SourceTransportError):
+                except (SourceContractError, SourceTransportError) as exc:
+                    _raise_if_session_recovering(exc)
+                    failed += 1
                     continue
                 # Rotate the next scan toward older pending posts when the status is unchanged.
                 post.save(update_fields=["updated_at"])
             refreshed += 1
-            job.checkpoint = {"refreshed": refreshed, "limit": limit}
-            job.save(update_fields=["checkpoint", "updated_at"])
-    finally:
-        client.close()
+    job.checkpoint = checkpoint_with_execution_scope(
+        job,
+        {
+            "attempted": attempted,
+            "refreshed": refreshed,
+            "failed": failed,
+            "limit": limit,
+        },
+    )
+    job.save(update_fields=["checkpoint", "updated_at"])
+    if failed:
+        raise SourceTransportError("状态巡检存在未完成的来源读取")
 
 
 def refresh_metrics_window_handler(job: BackgroundJob) -> None:
     """Refresh interaction snapshots for one range without changing post state or content."""
-    appid = str(job.parameter_summary.get("appid", "")).strip()
+    try:
+        scope = resolve_execution_scope(job)
+        appid = scope.target_appid
+    except ValueError as exc:
+        raise SourceContractError(str(exc)) from exc
     start_time = _required_int(job.parameter_summary, "start_time")
     end_time = _required_int(job.parameter_summary, "end_time")
     if not appid:
@@ -154,16 +203,13 @@ def refresh_metrics_window_handler(job: BackgroundJob) -> None:
         if failed:
             saved_checkpoint["failed"] = failed
             saved_checkpoint["failure_samples"] = failure_samples
-        job.checkpoint = saved_checkpoint
+        job.checkpoint = checkpoint_with_execution_scope(job, saved_checkpoint)
         job.save(update_fields=["checkpoint", "updated_at"])
 
     start_at = datetime.fromtimestamp(start_time, tz=timezone.get_current_timezone())
     end_at = datetime.fromtimestamp(end_time, tz=timezone.get_current_timezone())
     app_filter = Q(source_appid=appid)
-    if appid == "wx6d2454a8afcd9706":
-        app_filter |= Q(source_appid="")
-    client = CdpGameCircleClient(appid=appid)
-    try:
+    with _source_client(scope) as client:
         while True:
             post = (
                 OriginalPost.objects.filter(
@@ -183,6 +229,7 @@ def refresh_metrics_window_handler(job: BackgroundJob) -> None:
             except SourceBusinessDeletedError:
                 skipped += 1
             except (SourceContractError, SourceTransportError) as exc:
+                _raise_if_session_recovering(exc)
                 failed += 1
                 if len(failure_samples) < MAX_METRICS_REFRESH_FAILURE_SAMPLES:
                     failure_samples.append(
@@ -192,8 +239,6 @@ def refresh_metrics_window_handler(job: BackgroundJob) -> None:
                 processed += 1
             cursor = post.topic_id
             save_checkpoint(complete=False)
-    finally:
-        client.close()
 
 
 REALTIME_INGESTION_WORKER_HANDLERS = {

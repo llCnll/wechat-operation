@@ -15,7 +15,14 @@ from .metric_sync import (
     provider_metric_page,
 )
 from .models import MetricSource
-from .source_client import CdpGameCircleMetricClient
+from typing import Protocol
+
+
+class MetricClient(Protocol):
+    def circle_fans(self, **params: Any) -> dict[str, Any]: ...
+    def content_fans(self, **params: Any) -> dict[str, Any]: ...
+    def operation_effect(self, **params: Any) -> dict[str, Any]: ...
+    def group_content_analysis(self, **params: Any) -> dict[str, Any]: ...
 
 METRIC_PAGE_SIZE = 366
 ENABLED_DAILY_SOURCES = (
@@ -35,11 +42,11 @@ class MetricPage:
 
 @dataclass(frozen=True)
 class MetricSourceDefinition:
-    read: Callable[[CdpGameCircleMetricClient, int, int, int, int], dict[str, Any]]
+    read: Callable[[MetricClient, int, int, int, int], dict[str, Any]]
 
 
 def _circle_fans(
-    client: CdpGameCircleMetricClient,
+    client: MetricClient,
     start_ds: int,
     end_ds: int,
     page: int,
@@ -55,9 +62,9 @@ def _circle_fans(
 
 def _group_reader(
     data_flag: str,
-) -> Callable[[CdpGameCircleMetricClient, int, int, int, int], dict[str, Any]]:
+) -> Callable[[MetricClient, int, int, int, int], dict[str, Any]]:
     def read(
-        client: CdpGameCircleMetricClient,
+        client: MetricClient,
         start_ds: int,
         end_ds: int,
         page: int,
@@ -75,7 +82,7 @@ def _group_reader(
 
 
 def _operation_effect(
-    client: CdpGameCircleMetricClient,
+    client: MetricClient,
     start_ds: int,
     end_ds: int,
     page: int,
@@ -108,7 +115,7 @@ METRIC_SOURCE_REGISTRY: dict[MetricSource, MetricSourceDefinition] = {
 
 
 def read_metric_page(
-    client: CdpGameCircleMetricClient,
+    client: MetricClient,
     *,
     source: MetricSource,
     start_ds: int,

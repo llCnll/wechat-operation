@@ -68,7 +68,9 @@ uv run python manage.py upgrade_plan --json
 
 ## 安全边界
 
-- Chrome 必须使用独立、带 CDP 调试端口的受控浏览器；不得读取、记录或伪造 Cookie、令牌或二维码内容。
+- 受控 Chrome 由 Supervisor 以独立 profile 与仅本机 CDP 调试端口启动；不得手工接管其进程，也不得读取、记录或伪造 Cookie、令牌或二维码内容。
+- 在 `/admin/` 同步可管理游戏并选择“当前操作游戏”后，`game_circle_session` Worker 会在来源会话失效、当前操作游戏切换或六个每日保活时间槽重建一组新的受控 HOME 与插件会话。切换当前操作游戏与来源失效使用 `RECOVER`，它只会将外层当前游戏直接对齐到目标；定时或人工保活使用 `KEEPALIVE`，在已处于目标时，从当前账号目录中、平台允许切换的非目标游戏里随机选择一个中转并完成 `A → B → A`，每次切换后均重载、回读当前游戏和运行时 token。候选为空、未获许可或任一步回读失败会安全失败，绝不静默退化为 `RECOVER`。二者都只在最终插件完成绑定和最小只读验证后发布 lease；不保存 Cookie、外层 token 或来源身份 token。新 HOME 明确提示扫码或没有运行时 token 时，任务会以“需要人工扫码”结束；由运营人员在受控 Chrome 中扫码后重新触发即可。
+- 游戏圈 Worker 与 Web 的本机 IPC 由 Supervisor 注入独立进程 capability；必须通过 Supervisor 启动整套服务，不得手工暴露、复制或复用 `runtime/supervisor/` 中的控制或会话能力文件。
 - 项目不内置 AI、OCR 或 ASR 服务。部署方负责提供地址、密钥和模型，并确认数据处理边界；密钥只可写入、不回显。
 - 视频审核默认关闭，必须先完成无 Cookie 的授权样本预检。详见[视频审核手册](docs/guides/video-review-runbook.md)。
 - 上游写操作默认关闭。人工处置需在工作台二次确认；AI 自动处置需要单独的高风险授权。

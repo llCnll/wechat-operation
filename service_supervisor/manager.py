@@ -5,6 +5,7 @@ from __future__ import annotations
 import hmac
 import json
 import os
+import shutil
 import subprocess
 import sys
 import threading
@@ -19,11 +20,19 @@ from urllib.parse import parse_qs, urlparse
 import httpx
 import psutil
 
+from config.settings import (
+    CONTROLLED_CHROME_BIN,
+    CONTROLLED_CHROME_DEBUG_PORT,
+    CONTROLLED_CHROME_USER_DATA_DIR,
+)
+
 from .runtime import RuntimeStore, SupervisorLockedError, utc_now
 
 SERVICE_NAMES = (
+    "controlled_chrome",
     "web",
     "scheduler",
+    "game_circle_session",
     "ingestion",
     "backfill_ingestion",
     "metric_sync",
@@ -33,6 +42,7 @@ SERVICE_NAMES = (
 )
 WORKER_NAMES = (
     "scheduler",
+    "game_circle_session",
     "ingestion",
     "backfill_ingestion",
     "metric_sync",
@@ -40,6 +50,7 @@ WORKER_NAMES = (
     "video_extraction",
     "ai_moderation",
 )
+CONTROLLABLE_SERVICE_NAMES = ("controlled_chrome", *WORKER_NAMES)
 CONTROL_VERSION = "v1"
 WEB_PORT = 8000
 MAX_LOG_BYTES = 1_000_000
@@ -82,6 +93,11 @@ class Supervisor:
         python = sys.executable
         manage = str(self.project_root / "manage.py")
         return {
+            "controlled_chrome": ServiceDefinition(
+                "controlled_chrome",
+                self._controlled_chrome_command(),
+                frozenset(("start", "stop", "restart", "status", "logs")),
+            ),
             "web": ServiceDefinition(
                 "web",
                 (python, manage, "runserver", f"127.0.0.1:{self.web_port}", "--noreload"),
@@ -90,6 +106,11 @@ class Supervisor:
             "scheduler": ServiceDefinition(
                 "scheduler",
                 (python, manage, "run_scheduler", "--loop"),
+                frozenset(("start", "stop", "restart", "status", "logs")),
+            ),
+            "game_circle_session": ServiceDefinition(
+                "game_circle_session",
+                (python, manage, "run_game_circle_session_worker", "--loop"),
                 frozenset(("start", "stop", "restart", "status", "logs")),
             ),
             "ingestion": ServiceDefinition(
@@ -123,6 +144,49 @@ class Supervisor:
                 frozenset(("start", "stop", "restart", "status", "logs")),
             ),
         }
+
+    def _controlled_chrome_command(self) -> tuple[str, ...]:
+        """Build the fixed cross-platform command for the Supervisor-owned browser."""
+        executable = self._find_controlled_chrome()
+        profile = CONTROLLED_CHROME_USER_DATA_DIR
+        profile.mkdir(parents=True, exist_ok=True)
+        return (
+            executable,
+            "--remote-debugging-address=127.0.0.1",
+            f"--remote-debugging-port={CONTROLLED_CHROME_DEBUG_PORT}",
+            f"--user-data-dir={profile}",
+            "--no-first-run",
+            "--no-default-browser-check",
+            "about:blank",
+        )
+
+    @staticmethod
+    def _find_controlled_chrome() -> str:
+        """Resolve an explicit executable first, then a small platform-specific safe list."""
+        configured = CONTROLLED_CHROME_BIN.strip()
+        if configured:
+            candidate = Path(configured)
+            if candidate.is_file():
+                return str(candidate)
+            resolved = shutil.which(configured)
+            if resolved:
+                return resolved
+            raise SupervisorError("受控 Chrome 可执行文件不存在；请检查 CONTROLLED_CHROME_BIN")
+
+        candidates = [
+            Path(os.environ.get("PROGRAMFILES", "")) / "Google/Chrome/Application/chrome.exe",
+            Path(os.environ.get("PROGRAMFILES(X86)", "")) / "Google/Chrome/Application/chrome.exe",
+            Path(os.environ.get("LOCALAPPDATA", "")) / "Google/Chrome/Application/chrome.exe",
+            Path("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"),
+        ]
+        for candidate in candidates:
+            if candidate.is_file():
+                return str(candidate)
+        for name in ("google-chrome", "chromium", "chromium-browser"):
+            resolved = shutil.which(name)
+            if resolved:
+                return resolved
+        raise SupervisorError("未找到受控 Chrome；请在 runtime/.env 配置 CONTROLLED_CHROME_BIN")
 
     def acquire(self) -> None:
         from .runtime import ExclusiveFileLock
@@ -169,6 +233,7 @@ class Supervisor:
         supervisor = self
         # Generate the file before Django attempts its first authenticated status request.
         self.store.token()
+        self.store.game_circle_ipc_token()
 
         class Handler(BaseHTTPRequestHandler):
             def log_message(self, _format, *_args):  # pragma: no cover - deliberately quiet.
@@ -233,6 +298,9 @@ class Supervisor:
         try:
             self.start_controller()
             self.preflight()
+            chrome_state = self._read_state("controlled_chrome")
+            chrome_state["desired"] = True
+            self._write_state("controlled_chrome", chrome_state)
             web_state = self._read_state("web")
             web_state["desired"] = True
             self._write_state("web", web_state)
@@ -307,7 +375,7 @@ class Supervisor:
         return {"service": service, "status": self.status()[service]}
 
     def start(self, service: str) -> None:
-        if service not in WORKER_NAMES:
+        if service not in CONTROLLABLE_SERVICE_NAMES:
             raise SupervisorError("Web 只能通过重启操作恢复")
         with self._state_lock:
             state = self._read_state(service)
@@ -317,7 +385,7 @@ class Supervisor:
                 self._launch(service, state)
 
     def stop(self, service: str) -> None:
-        if service not in WORKER_NAMES:
+        if service not in CONTROLLABLE_SERVICE_NAMES:
             raise SupervisorError("Web 不能通过页面停止")
         with self._state_lock:
             state = self._read_state(service)
@@ -367,6 +435,7 @@ class Supervisor:
             **os.environ,
             "OPERATION_SUPERVISOR_SERVICE": service,
             "OPERATION_RUNTIME_DIR": str(self.runtime_dir),
+            "OPERATION_GAME_CIRCLE_IPC_CAPABILITY": self.store.game_circle_ipc_token(),
         }
         process = subprocess.Popen(
             definition.command,
