@@ -15,6 +15,7 @@ from config.runtime_config import affected_services, display_service_names, upda
 from config.supervisor import SupervisorClient, SupervisorUnavailableError
 from config.game_circle_ipc import GameCircleIpcClient, GameCircleIpcError
 from jobs.game_circle_keepalive import enqueue_keepalive
+from jobs.permanent_mute import enqueue_permanent_mute_renewal
 from posts.game_catalog import active_game_appid, set_active_game, sync_authorized_managed_games
 from posts.ingestion_jobs import SHANGHAI, enqueue_manual_ingestion_window
 from posts.models import ManagedGame
@@ -154,6 +155,23 @@ def enqueue_session_keepalive_request(request):
     else:
         outcome = "已创建" if result.created else "已复用"
         messages.success(request, f"当前游戏 Frame 保活任务{outcome}。")
+    return redirect(_return_to(request))
+
+
+@staff_member_required
+@require_POST
+def enqueue_permanent_mute_renewal_request(request):
+    """Queue maintenance; source reads and writes remain in its Worker."""
+    try:
+        result = enqueue_permanent_mute_renewal(source="manual")
+    except ValueError as exc:
+        messages.error(request, str(exc))
+    else:
+        outcome = "已创建" if result.created else "已复用"
+        messages.success(
+            request,
+            f"永久禁言续期任务{outcome}（任务 #{result.job.pk}）；Worker 未运行时任务会等待启动。",
+        )
     return redirect(_return_to(request))
 
 

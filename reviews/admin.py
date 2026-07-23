@@ -165,11 +165,12 @@ class OperationAuditAdmin(ReadOnlyAdmin):
         "task",
         "action",
         "execution_source",
+        "mute_trigger",
         "result_code",
         "executor",
         "executed_at",
     )
-    list_filter = ("action", "execution_source", "result_code")
+    list_filter = ("action", "execution_source", "mute_trigger", "result_code")
     search_fields = ("operation_id", "task__post__topic_id", "reason", "error_summary")
     date_hierarchy = "created_at"
 

@@ -22,6 +22,7 @@ MANAGED_SERVICE_NAMES = (
     "review",
     "video_extraction",
     "ai_moderation",
+    "mute_maintenance",
 )
 
 
@@ -409,6 +410,21 @@ def admin_console_overview(request):
                 running=bool(services["ai_moderation"]["running"]),
                 description="独立受 Supervisor 托管；未授权结论直接保留人工审核。",
             ),
+            _pipeline_node(
+                "mute_maintenance",
+                "禁言维护 Worker",
+                bool(services["mute_maintenance"]["running"]),
+                "启动禁言维护 Worker",
+                _service_reason(services["mute_maintenance"]),
+                checked_at,
+                service="mute_maintenance",
+                running=bool(services["mute_maintenance"]["running"]),
+                description=(
+                    "每 12 小时仅为当前游戏维护已明确标记的永久禁言；"
+                    "通过游戏圈会话 IPC 回读并续期，不持有浏览器或认证信息。"
+                ),
+                allow_enqueue_once=True,
+            ),
         )
     )
     core_keys = {
@@ -421,6 +437,7 @@ def admin_console_overview(request):
         "ingestion",
         "metric_sync",
         "review",
+        "mute_maintenance",
     }
     first_blocked = next(
         (node for node in pipeline if node["key"] in core_keys and not node["ready"]), None

@@ -99,6 +99,7 @@ def fail_job(job: BackgroundJob, error_summary: str) -> None:
     if job.retry_count > job.max_retries:
         job.status = JobStatus.FAILED
         job.finished_at = timezone.now()
+        job.active_coalescing_key = None
     else:
         job.status = JobStatus.PENDING
         job.next_run_at = timezone.now() + timedelta(seconds=min(2**job.retry_count, 300))
@@ -110,7 +111,16 @@ def fail_job_terminal(job: BackgroundJob, error_summary: str) -> None:
     job.status = JobStatus.FAILED
     job.error_summary = error_summary[:500]
     job.finished_at = timezone.now()
-    job.save(update_fields=["status", "error_summary", "finished_at", "updated_at"])
+    job.active_coalescing_key = None
+    job.save(
+        update_fields=[
+            "status",
+            "error_summary",
+            "finished_at",
+            "active_coalescing_key",
+            "updated_at",
+        ]
+    )
 
 
 def defer_job(job: BackgroundJob, reason: str, *, delay_seconds: int = 5) -> None:
@@ -126,7 +136,16 @@ def complete_job(job: BackgroundJob) -> None:
     job.status = JobStatus.SUCCEEDED
     job.error_summary = ""
     job.finished_at = timezone.now()
-    job.save(update_fields=["status", "error_summary", "finished_at", "updated_at"])
+    job.active_coalescing_key = None
+    job.save(
+        update_fields=[
+            "status",
+            "error_summary",
+            "finished_at",
+            "active_coalescing_key",
+            "updated_at",
+        ]
+    )
 
 
 def cancel_job(job: BackgroundJob, reason: str) -> None:
@@ -134,7 +153,16 @@ def cancel_job(job: BackgroundJob, reason: str) -> None:
     job.status = JobStatus.CANCELED
     job.error_summary = reason[:500]
     job.finished_at = timezone.now()
-    job.save(update_fields=["status", "error_summary", "finished_at", "updated_at"])
+    job.active_coalescing_key = None
+    job.save(
+        update_fields=[
+            "status",
+            "error_summary",
+            "finished_at",
+            "active_coalescing_key",
+            "updated_at",
+        ]
+    )
 
 
 def execute_next_job(

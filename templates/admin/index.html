@@ -41,7 +41,7 @@
         </div>
         <div class="console-pipeline-node-indicators">
           <i aria-hidden="true"></i>
-          {% if node.key == "controlled_chrome" or node.key == "game_circle_session" or node.key == "controlled_chrome_session" or node.key == "ocr" or node.key == "video_extraction" or node.key == "writes" or node.key == "ai_moderation" %}
+          {% if node.key == "controlled_chrome" or node.key == "game_circle_session" or node.key == "controlled_chrome_session" or node.key == "ocr" or node.key == "video_extraction" or node.key == "writes" or node.key == "ai_moderation" or node.key == "mute_maintenance" %}
           <button class="console-pipeline-info" type="button" aria-describedby="pipeline-info-{{ node.key }}" aria-label="查看{{ node.label }}说明">i<span id="pipeline-info-{{ node.key }}" class="console-pipeline-tooltip" role="tooltip">{{ node.description }}</span></button>
           {% endif %}
         </div>
@@ -106,6 +106,17 @@
           </div>
         </div>
       </details>
+      {% elif node.key == "mute_maintenance" %}
+      <div class="console-service-actions">
+        {% if node.running %}
+        <form method="post" action="{% url 'supervisor-control-service' service=node.service action='restart' %}">{% csrf_token %}<input type="hidden" name="return_to" value="/admin/"><button type="submit">重启</button></form>
+        <form method="post" action="{% url 'supervisor-control-service' service=node.service action='stop' %}">{% csrf_token %}<input type="hidden" name="return_to" value="/admin/"><button class="is-quiet" type="submit">停止</button></form>
+        {% else %}
+        <form method="post" action="{% url 'supervisor-control-service' service=node.service action='start' %}">{% csrf_token %}<input type="hidden" name="return_to" value="/admin/"><button type="submit">启动</button></form>
+        {% endif %}
+        <form method="post" action="{% url 'enqueue-permanent-mute-renewal' %}">{% csrf_token %}<input type="hidden" name="return_to" value="/admin/"><button class="is-quiet" type="submit">执行一次</button></form>
+        <button class="is-quiet" type="button" data-supervisor-logs="{% url 'supervisor-service-logs' service=node.service %}" data-supervisor-log-label="{{ node.label }}">日志</button>
+      </div>
       {% elif node.service %}
       <div class="console-service-actions">
         {% if node.service == "web" %}

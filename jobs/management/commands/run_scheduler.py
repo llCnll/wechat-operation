@@ -12,6 +12,7 @@ from posts.ingestion_jobs import (
 from reporting.metric_jobs import enqueue_due_metric_jobs
 from config.runtime_config import public_runtime_config
 from jobs.game_circle_keepalive import enqueue_keepalive
+from jobs.permanent_mute import enqueue_scheduled_permanent_mute_renewal
 from service_supervisor.runtime import write_worker_heartbeat
 from posts.game_catalog import active_game_appid
 
@@ -52,6 +53,7 @@ class Command(BaseCommand):
                 if public_runtime_config().get("session_keepalive_enabled") == "true"
                 else None
             )
+            mute_renewal = enqueue_scheduled_permanent_mute_renewal(now)
         except ValueError as exc:
             self.stdout.write(f"本轮调度未创建来源任务：{exc}")
             return
@@ -83,3 +85,6 @@ class Command(BaseCommand):
         if keepalive is not None:
             outcome = "已创建" if keepalive.created else "已存在"
             self.stdout.write(f"游戏圈会话保活任务{outcome}：任务={keepalive.job.pk}。")
+        if mute_renewal is not None:
+            outcome = "已创建" if mute_renewal.created else "已复用"
+            self.stdout.write(f"永久禁言续期任务{outcome}：任务={mute_renewal.job.pk}。")

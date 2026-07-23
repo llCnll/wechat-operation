@@ -900,6 +900,8 @@ class GameCircleSessionService:
                             return {"payload": client.get_content_card(str(request.params["content_id"]))}
                         if request.method == "POSTS_GET_METRICS":
                             return {"payload": client.get_post_metrics(int(request.params["topic_id"]))}
+                        if request.method == "POSTS_GET_AUTHOR_DETAIL":
+                            return {"payload": client.get_author_detail(str(request.params["openid"]))}
                         if request.method == "POSTS_OPERATION":
                             payload = request.params.get("payload")
                             if not request.operation_id or not isinstance(payload, dict):

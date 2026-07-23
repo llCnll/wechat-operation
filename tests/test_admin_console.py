@@ -108,6 +108,7 @@ def test_admin_pipeline_follows_the_content_flow(admin_client):
         "review",
         "writes",
         "ai_moderation",
+        "mute_maintenance",
     ]
 
 

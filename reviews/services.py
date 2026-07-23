@@ -1204,6 +1204,7 @@ def _reserve_operation_audit(
     confirmation_key: str | None,
     execution_source: str,
     automation_snapshot: dict | None,
+    mute_trigger: str = "",
 ) -> tuple[OperationAudit, bool]:
     """Reserve the only in-flight upstream write for a task before contacting CDP."""
     idempotency_key = _operation_idempotency_key(task, action, confirmation_key)
@@ -1217,6 +1218,7 @@ def _reserve_operation_audit(
                 "reason": reason,
                 "executor": user,
                 "execution_source": execution_source,
+                "mute_trigger": mute_trigger,
                 "automation_snapshot": automation_snapshot or {},
                 "policy_version": task.assessment.policy_version if task.assessment_id else None,
                 "result_code": "EXECUTING",
@@ -1242,6 +1244,7 @@ def execute_confirmed_operation(
     execution_source: str = OperationExecutionSource.HUMAN,
     automation_snapshot: dict | None = None,
     reserved_audit: OperationAudit | None = None,
+    mute_trigger: str = "",
 ) -> OperationAudit:
     """Execute one verified upstream operation with an explicit actor source."""
     payload = _prepare_upstream_payload(action, reason, upstream_payload)
@@ -1266,6 +1269,7 @@ def execute_confirmed_operation(
                 confirmation_key=confirmation_key,
                 execution_source=execution_source,
                 automation_snapshot=automation_snapshot,
+                mute_trigger=mute_trigger,
             )
         else:
             audit = OperationAudit.objects.select_for_update().get(pk=reserved_audit.pk)

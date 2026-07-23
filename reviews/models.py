@@ -64,6 +64,16 @@ class ReviewStatus(models.TextChoices):
 class OperationExecutionSource(models.TextChoices):
     HUMAN = "HUMAN", "人工"
     AI_AUTOMATED = "AI_AUTOMATED", "AI 自动"
+    SYSTEM_MAINTENANCE = "SYSTEM_MAINTENANCE", "系统维护"
+
+
+class MuteOperationTrigger(models.TextChoices):
+    """Explain why a mute-related audit exists without retaining source payloads."""
+
+    HUMAN_INITIAL = "HUMAN_INITIAL", "人工首次禁言"
+    HUMAN_PERMANENT = "HUMAN_PERMANENT", "人工永久管理"
+    SYSTEM_RENEWAL = "SYSTEM_RENEWAL", "系统续期"
+    SYSTEM_REPAIR = "SYSTEM_REPAIR", "系统续期修复"
 
 
 class AiOperationReviewStatus(models.TextChoices):
@@ -309,9 +319,16 @@ class OperationAudit(models.Model):
     error_summary = models.CharField(max_length=500, blank=True)
     executor = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, on_delete=models.SET_NULL)
     execution_source = models.CharField(
-        max_length=16,
+        max_length=24,
         choices=OperationExecutionSource.choices,
         default=OperationExecutionSource.HUMAN,
+    )
+    mute_trigger = models.CharField(
+        max_length=24,
+        choices=MuteOperationTrigger.choices,
+        blank=True,
+        default="",
+        help_text="仅用于禁言相关操作的来源投影，不保存认证材料或上游响应。",
     )
     automation_snapshot = models.JSONField(default=dict, blank=True)
     executed_at = models.DateTimeField(null=True, blank=True)

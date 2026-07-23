@@ -104,6 +104,11 @@ urlpatterns = [
         name="enqueue-session-keepalive",
     ),
     path(
+        "admin/runtime/permanent-mute-renewal/",
+        supervisor_views.enqueue_permanent_mute_renewal_request,
+        name="enqueue-permanent-mute-renewal",
+    ),
+    path(
         "admin/runtime/game-catalog/sync/",
         supervisor_views.sync_managed_game_catalog,
         name="sync-managed-game-catalog",
@@ -115,6 +120,21 @@ urlpatterns = [
     ),
     path("", post_views.operations_dashboard, name="operations-dashboard"),
     path("mute-management/", post_views.mute_management, name="mute-management"),
+    path(
+        "mute-management/refresh-statuses/",
+        post_views.enqueue_author_mute_status_refresh_request,
+        name="enqueue-author-mute-status-refresh",
+    ),
+    path(
+        "mute-management/scan-post-authors/",
+        post_views.enqueue_post_author_mute_status_sync_request,
+        name="enqueue-post-author-mute-status-sync",
+    ),
+    path(
+        "mute-management/permanent/",
+        post_views.apply_permanent_mute_intent,
+        name="apply-permanent-mute-intent",
+    ),
     path(
         "mute-management/<int:status_id>/posts/",
         post_views.author_mute_history,

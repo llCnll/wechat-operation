@@ -184,6 +184,26 @@ class CdpGameCircleClient:
             {"data": json.dumps({"topic_id": topic_id, "need_topic": True, "limit": 0})},
         )
 
+    def get_author_detail(self, openid: str) -> dict[str, Any]:
+        """Read one author's current mute state without depending on a topic ID."""
+        if not isinstance(openid, str) or not openid:
+            raise SourceContractError("作者用户 ID 无效")
+        return self._get(
+            "getuserdetail",
+            {
+                "data": json.dumps(
+                    {
+                        "query": 1,
+                        "topic_req": {"order_by": 1, "is_desc": True},
+                        "openid": openid,
+                        "page": 0,
+                        "page_size": 10,
+                        "need_user_info": True,
+                    }
+                )
+            },
+        )
+
     def get_post_metrics_with_timeout(
         self, topic_id: int, *, timeout_seconds: float
     ) -> dict[str, Any]:

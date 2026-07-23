@@ -1,3 +1,4 @@
+from django.conf import settings
 from django.db import models
 
 POST_STATUS_NORMAL = 2
@@ -209,6 +210,15 @@ class AuthorMuteStatus(models.Model):
     nick_name = models.CharField(max_length=255, blank=True)
     local_muted_until = models.DateTimeField(null=True, blank=True)
     global_muted_until = models.DateTimeField(null=True, blank=True)
+    permanent_mute_enabled = models.BooleanField(default=False)
+    permanent_mute_set_at = models.DateTimeField(null=True, blank=True)
+    permanent_mute_set_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="permanent_mute_statuses",
+    )
     first_detected_at = models.DateTimeField(null=True, blank=True)
     last_synced_at = models.DateTimeField()
     source_requested_at = models.DateTimeField()
@@ -226,7 +236,13 @@ class AuthorMuteStatus(models.Model):
         constraints = [
             models.UniqueConstraint(fields=("openid", "source_appid"), name="author_mute_scope")
         ]
-        indexes = [models.Index(fields=("source_appid", "local_muted_until"))]
+        indexes = [
+            models.Index(fields=("source_appid", "local_muted_until")),
+            models.Index(
+                fields=("source_appid", "permanent_mute_enabled"),
+                name="posts_autho_source__3f490d_idx",
+            ),
+        ]
         verbose_name = "作者禁言状态"
         verbose_name_plural = "作者禁言状态"
 

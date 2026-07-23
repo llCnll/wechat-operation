@@ -1,5 +1,6 @@
 from datetime import timedelta
 from contextlib import contextmanager
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -11,6 +12,7 @@ from config.settings import runtime
 from config.game_circle_ipc import GameCircleIpcError
 from jobs.models import BackgroundJob
 from posts.game_catalog import set_active_game
+from posts.views import _author_mute_presentation
 from posts.models import (
     POST_STATUS_BLOCKED,
     POST_STATUS_DELETED,
@@ -262,6 +264,59 @@ def test_mute_management_filters_scope_and_imminent_expiry():
 
 
 @pytest.mark.django_db
+def test_mute_management_imminent_expiry_uses_the_presented_effective_deadline():
+    appid = "mute-expiry-game"
+    _activate_game(appid)
+    user = get_user_model().objects.create_user(username="mute-expiry", password="test-password")
+    now = timezone.now()
+    AuthorMuteStatus.objects.create(
+        openid="both-but-global-later",
+        source_appid=appid,
+        nick_name="全局仍有效",
+        local_muted_until=now + timedelta(days=2),
+        global_muted_until=now + timedelta(days=10),
+        last_synced_at=now,
+        source_requested_at=now,
+    )
+    AuthorMuteStatus.objects.create(
+        openid="both-imminent",
+        source_appid=appid,
+        nick_name="都将到期",
+        local_muted_until=now + timedelta(days=2),
+        global_muted_until=now + timedelta(days=3),
+        last_synced_at=now,
+        source_requested_at=now,
+    )
+    client = Client()
+    client.force_login(user)
+
+    response = client.get(f"/mute-management/?appid={appid}&expires=SOON")
+
+    assert [status.nick_name for status in response.context["statuses"]] == ["都将到期"]
+
+
+@pytest.mark.parametrize(
+    ("local_offset", "global_offset", "expected_offset"),
+    [(30, 1, 30), (1, 30, 30)],
+)
+def test_author_mute_presentation_uses_the_later_deadline_when_both_scopes_are_active(
+    local_offset, global_offset, expected_offset
+):
+    now = timezone.now()
+
+    presentation = _author_mute_presentation(
+        SimpleNamespace(
+            local_muted_until=now + timedelta(days=local_offset),
+            global_muted_until=now + timedelta(days=global_offset),
+        ),
+        now=now,
+    )
+
+    assert presentation["scope"] == "当前游戏及全局"
+    assert presentation["until"] == now + timedelta(days=expected_offset)
+
+
+@pytest.mark.django_db
 @patch("posts.views.GameCircleIpcClient.call")
 def test_invalid_cdp_login_control_only_opens_controlled_chrome(mock_call):
     user = get_user_model().objects.create_user(username="cdp-login", password="test-password")
@@ -385,7 +440,7 @@ def test_dashboard_requires_one_block_reason_without_requiring_every_reason():
     assert 'input.required=(!operationReasons.hidden&&input.name==="block_reason")' not in page
     assert 'name="confirmed"' not in page
     assert "data-reason-suggestion" in page
-    assert 'input.name==="block_reason"&&action==="BLOCK"&&input.value==="1"' in page
+    assert "['BLOCK','MUTE','BLOCK_AND_MUTE'].includes(action)&&input.value===\"1\"" in page
 
 
 @pytest.mark.django_db

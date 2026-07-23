@@ -40,6 +40,7 @@ SERVICE_NAMES = (
     "review",
     "video_extraction",
     "ai_moderation",
+    "mute_maintenance",
 )
 WORKER_NAMES = (
     "scheduler",
@@ -50,6 +51,7 @@ WORKER_NAMES = (
     "review",
     "video_extraction",
     "ai_moderation",
+    "mute_maintenance",
 )
 CONTROLLABLE_SERVICE_NAMES = ("controlled_chrome", *WORKER_NAMES)
 CONTROL_VERSION = "v1"
@@ -144,6 +146,11 @@ class Supervisor:
             "ai_moderation": ServiceDefinition(
                 "ai_moderation",
                 (python, manage, "run_ai_moderation_worker", "--loop"),
+                frozenset(("start", "stop", "restart", "status", "logs")),
+            ),
+            "mute_maintenance": ServiceDefinition(
+                "mute_maintenance",
+                (python, manage, "run_mute_maintenance_worker", "--loop"),
                 frozenset(("start", "stop", "restart", "status", "logs")),
             ),
         }
@@ -301,12 +308,10 @@ class Supervisor:
         try:
             self.start_controller()
             self.preflight()
-            chrome_state = self._read_state("controlled_chrome")
-            chrome_state["desired"] = True
-            self._write_state("controlled_chrome", chrome_state)
-            web_state = self._read_state("web")
-            web_state["desired"] = True
-            self._write_state("web", web_state)
+            for service in ("controlled_chrome", "web", "mute_maintenance"):
+                state = self._read_state(service)
+                state["desired"] = True
+                self._write_state(service, state)
             self.reconcile()
             if not self._web_healthy(timeout_seconds=20) or not self._is_process_current(
                 "web", self._read_state("web")

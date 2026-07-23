@@ -113,6 +113,24 @@ def test_verified_unmute_reuses_preflight_author_identity_and_module(monkeypatch
     ]
 
 
+def test_author_detail_uses_the_fixed_user_query_contract(monkeypatch):
+    client = object.__new__(CdpGameCircleClient)
+    calls = []
+    monkeypatch.setattr(
+        client, "_get", lambda path, query: calls.append((path, query)) or {"errcode": 0}
+    )
+
+    assert client.get_author_detail("author-openid") == {"errcode": 0}
+    assert calls == [
+        (
+            "getuserdetail",
+            {
+                "data": '{"query": 1, "topic_req": {"order_by": 1, "is_desc": true}, "openid": "author-openid", "page": 0, "page_size": 10, "need_user_info": true}'
+            },
+        )
+    ]
+
+
 def test_management_detail_deleted_error_is_mapped_to_business_deletion(monkeypatch):
     client = object.__new__(CdpGameCircleClient)
     client._last_request_at = 0.0

@@ -7,6 +7,7 @@ from datetime import UTC, datetime, timedelta
 
 from django.contrib import messages
 from django.contrib.auth.decorators import login_required
+from django.db import transaction
 from django.db.models import F, OuterRef, Q, Subquery, Value
 from django.http import QueryDict
 from django.shortcuts import get_object_or_404, redirect, render
@@ -18,12 +19,23 @@ from django.views.decorators.http import require_POST
 
 from config.game_circle_ipc import GameCircleIpcClient, GameCircleIpcError, GameCirclePostClient
 from jobs.models import BackgroundJob, JobStatus
+from jobs.permanent_mute import (
+    enqueue_author_mute_status_refresh,
+    enqueue_post_author_mute_status_sync,
+    persist_permanent_mute_intent,
+)
+from jobs.task_types import (
+    AUTHOR_MUTE_STATUS_REFRESH_TASK,
+    PERMANENT_MUTE_RENEWAL_TASK,
+    POST_AUTHOR_MUTE_STATUS_SYNC_TASK,
+)
 from reviews.models import (
     RISK_LABEL_DISPLAY,
     AiOperationReview,
     AiOperationReviewStatus,
     ContentCategory,
     OperationAudit,
+    MuteOperationTrigger,
     RecommendedAction,
     ReplyDraft,
     ReviewStatus,
@@ -58,7 +70,6 @@ from .models import (
     ActiveGameScope,
     CandidatePost,
     InteractionSnapshot,
-    ManagedGame,
     OriginalPost,
     OriginType,
     is_post_blocked,
@@ -67,7 +78,11 @@ from .models import (
     is_post_self_visible,
     is_post_sunk,
 )
-from .services import refresh_post_status_and_metrics
+from .services import (
+    mute_management_status_queryset,
+    refresh_post_status_and_metrics,
+    set_permanent_mute_intent,
+)
 
 DASHBOARD_SORT_OPTIONS = (
     ("priority_desc", "优先级：高到低"),
@@ -292,13 +307,12 @@ def _author_mute_presentation(state: AuthorMuteStatus | None, *, now=None) -> di
     local_active = state.local_muted_until and state.local_muted_until > now
     global_active = state.global_muted_until and state.global_muted_until > now
     if local_active and global_active:
+        effective_until = max(state.local_muted_until, state.global_muted_until)
         return {
             "label": "当前游戏及全局禁言",
             "scope": "当前游戏及全局",
-            "until": min(state.local_muted_until, state.global_muted_until),
-            "remaining": _remaining_time_label(
-                min(state.local_muted_until, state.global_muted_until), now
-            ),
+            "until": effective_until,
+            "remaining": _remaining_time_label(effective_until, now),
             "active": True,
         }
     if local_active:
@@ -620,33 +634,51 @@ def operations_dashboard(request):
 
 @login_required
 def mute_management(request):
-    """Read-only current mute observations for one managed-game context."""
+    """Manage local permanent intent while keeping upstream observation distinct."""
     appid = _dashboard_active_game(request.GET.get("appid", "").strip())
     search = request.GET.get("q", "").strip()
     scope = request.GET.get("scope", "").strip().upper()
     expires = request.GET.get("expires", "").strip().upper()
+    kind = request.GET.get("kind", "").strip().upper()
     if scope not in {"", "LOCAL", "GLOBAL"}:
         scope = ""
     if expires not in {"", "SOON"}:
         expires = ""
+    if kind not in {"", "PERMANENT", "TEMP"}:
+        kind = ""
     now = timezone.now()
     active_mutes = Q(local_muted_until__gt=now) | Q(global_muted_until__gt=now)
-    statuses = AuthorMuteStatus.objects.filter(active_mutes)
-    if appid:
-        statuses = statuses.filter(source_appid=appid)
+    statuses = (
+        mute_management_status_queryset(source_appid=appid, now=now)
+        if appid
+        else AuthorMuteStatus.objects.filter(Q(permanent_mute_enabled=True) | active_mutes)
+    )
     if search:
         statuses = statuses.filter(nick_name__icontains=search)
+    if kind == "PERMANENT":
+        statuses = statuses.filter(permanent_mute_enabled=True)
+    elif kind == "TEMP":
+        statuses = statuses.filter(permanent_mute_enabled=False,).filter(active_mutes)
     if scope == "LOCAL":
         statuses = statuses.filter(local_muted_until__gt=now)
     elif scope == "GLOBAL":
         statuses = statuses.filter(global_muted_until__gt=now)
     if expires == "SOON":
         soon = now + timedelta(days=7)
+        local_active = Q(local_muted_until__gt=now)
+        global_active = Q(global_muted_until__gt=now)
+        local_soon = Q(local_muted_until__gt=now, local_muted_until__lte=soon)
+        global_soon = Q(global_muted_until__gt=now, global_muted_until__lte=soon)
         statuses = statuses.filter(
-            Q(local_muted_until__gt=now, local_muted_until__lte=soon)
-            | Q(global_muted_until__gt=now, global_muted_until__lte=soon)
+            # When both scopes are active, the presented effective deadline is
+            # their later value.  A row is therefore imminent only when both
+            # active deadlines are imminent.
+            (local_soon & (global_soon | ~global_active))
+            | (global_soon & ~local_active)
         )
-    statuses = list(statuses.select_related("last_source_post").order_by("-last_synced_at"))
+    statuses = list(
+        statuses.select_related("last_source_post", "permanent_mute_set_by").order_by("-last_synced_at")
+    )
     for status in statuses:
         status.presentation = _author_mute_presentation(status, now=now)
         status.system_muted_at = (
@@ -667,6 +699,17 @@ def mute_management(request):
             -status.last_synced_at.timestamp(),
         )
     )
+    job = None
+    requested_job_id = request.GET.get("job", "")
+    if requested_job_id.isdigit():
+        job = BackgroundJob.objects.filter(
+            pk=int(requested_job_id),
+            task_type__in=(
+                PERMANENT_MUTE_RENEWAL_TASK,
+                AUTHOR_MUTE_STATUS_REFRESH_TASK,
+                POST_AUTHOR_MUTE_STATUS_SYNC_TASK,
+            ),
+        ).first()
     return render(
         request,
         "posts/mute_management.html",
@@ -680,8 +723,143 @@ def mute_management(request):
             "search": search,
             "scope": scope,
             "expires": expires,
+            "kind": kind,
+            "last_job_feedback": _permanent_mute_job_feedback(job),
+            "return_query": request.GET.urlencode(),
         },
     )
+
+
+def _permanent_mute_job_feedback(job: BackgroundJob | None) -> dict | None:
+    """Present durable job state without exposing opaque worker error codes."""
+    if job is None:
+        return None
+    checkpoint = job.checkpoint if isinstance(job.checkpoint, dict) else {}
+    processed = int(checkpoint.get("processed", 0))
+    succeeded = int(checkpoint.get("succeeded", 0))
+    failed = int(checkpoint.get("failed", 0))
+    skipped_missing_openid = int(checkpoint.get("skipped_missing_openid", 0))
+    labels = {
+        PERMANENT_MUTE_RENEWAL_TASK: "永久禁言任务",
+        AUTHOR_MUTE_STATUS_REFRESH_TASK: "禁言列表状态刷新任务",
+        POST_AUTHOR_MUTE_STATUS_SYNC_TASK: "全量帖子作者禁言扫描任务",
+    }
+    label = labels.get(job.task_type, "禁言管理任务")
+    detail = f"已处理 {processed} 位，成功 {succeeded} 位，失败 {failed} 位。"
+    if skipped_missing_openid:
+        detail += f"已跳过 {skipped_missing_openid} 条缺少作者 ID 的帖子。"
+    if job.status == JobStatus.SUCCEEDED:
+        return {"job": job, "state": "success", "title": f"{label}已完成", "detail": detail}
+    if job.status == JobStatus.RUNNING:
+        return {"job": job, "state": "pending", "title": f"{label}处理中", "detail": detail}
+    if job.status == JobStatus.PENDING:
+        return {
+            "job": job,
+            "state": "pending",
+            "title": f"{label}等待处理",
+            "detail": "禁言维护 Worker 启动后会自动处理。" if not job.started_at else detail,
+        }
+    if job.task_type == PERMANENT_MUTE_RENEWAL_TASK and "SOURCE_DELETED" in str(
+        checkpoint.get("last_error", "")
+    ):
+        return {
+            "job": job,
+            "state": "error",
+            "title": "任务未完成：来源帖子已从管理队列删除",
+            "detail": "该作者没有可回读的来源帖子，无法执行需要上游写入的禁言；已有充足有效期时可直接保存永久意图。",
+        }
+    return {
+        "job": job,
+        "state": "error",
+        "title": f"{label}未完成",
+        "detail": detail,
+    }
+
+
+def _mute_management_return_url(request, *, job_id: int | None = None) -> str:
+    """Keep permanent-management redirects in the local mute workspace."""
+    params = QueryDict(request.POST.get("return_query", ""), mutable=True)
+    params.pop("job", None)
+    if job_id is not None:
+        params["job"] = str(job_id)
+    query = params.urlencode()
+    target = reverse("mute-management")
+    return f"{target}?{query}" if query else target
+
+
+@login_required
+@require_POST
+def enqueue_author_mute_status_refresh_request(request):
+    """Queue a bounded read-only refresh; the Web request never contacts the provider."""
+    try:
+        result = enqueue_author_mute_status_refresh()
+    except ValueError as exc:
+        messages.error(request, str(exc))
+        return redirect(_mute_management_return_url(request))
+    outcome = "已创建" if result.created else "已复用正在处理的"
+    messages.success(
+        request,
+        f"{outcome}禁言列表状态刷新任务；仅刷新自动续期或仍有效禁言的列表作者，不执行禁言或解除。",
+    )
+    return redirect(_mute_management_return_url(request, job_id=result.job.pk))
+
+
+@login_required
+@require_POST
+def enqueue_post_author_mute_status_sync_request(request):
+    """Queue a read-only distinct-author scan that only supplements muted users."""
+    try:
+        result = enqueue_post_author_mute_status_sync()
+    except ValueError as exc:
+        messages.error(request, str(exc))
+        return redirect(_mute_management_return_url(request))
+    outcome = "已创建" if result.created else "已复用正在处理的"
+    messages.success(
+        request,
+        f"{outcome}全量帖子作者禁言扫描任务；仅将当前游戏或全局被禁言作者补充到禁言列表，不设置自动续期。",
+    )
+    return redirect(_mute_management_return_url(request, job_id=result.job.pk))
+
+
+@login_required
+@require_POST
+@transaction.atomic
+def apply_permanent_mute_intent(request):
+    """Apply one or many local permanent-intent choices without an upstream operation."""
+    action = request.POST.get("action", "")
+    if action not in {"enable", "disable"}:
+        messages.error(request, "永久禁言标记操作无效。")
+        return redirect(_mute_management_return_url(request))
+    requested_ids: list[int] = []
+    for value in request.POST.getlist("status_id"):
+        try:
+            requested_ids.append(int(value))
+        except (TypeError, ValueError):
+            continue
+    requested_ids = list(dict.fromkeys(requested_ids))[:100]
+    if not requested_ids:
+        messages.warning(request, "请先选择至少一位作者。")
+        return redirect(_mute_management_return_url(request))
+    try:
+        scope = current_execution_scope(persist_default=False)
+        statuses = list(
+            AuthorMuteStatus.objects.filter(
+                pk__in=requested_ids, source_appid=scope.target_appid
+            ).order_by("pk")
+        )
+        if not statuses:
+            raise ValueError("没有可在当前游戏管理的作者")
+        enabled = action == "enable"
+        for status in statuses:
+            persist_permanent_mute_intent(status=status, enabled=enabled, user=request.user)
+    except ValueError as exc:
+        messages.error(request, str(exc))
+        return redirect(_mute_management_return_url(request))
+    if enabled:
+        messages.success(request, f"已标记 {len(statuses)} 位作者为永久禁言；续期由禁言维护 Worker 按计划处理。")
+    else:
+        messages.success(request, f"已解除 {len(statuses)} 位作者的永久禁言标记；当前上游禁言保持不变。")
+    return redirect(_mute_management_return_url(request))
 
 
 @login_required
@@ -756,6 +934,24 @@ def _dashboard_return_url_from_query(return_query: str, selected_topic_id: str) 
 
 def _has_session_recovering_result(audits: list[OperationAudit]) -> bool:
     return any(audit.result_code == "SESSION_RECOVERING" for audit in audits)
+
+
+def _persist_human_mute_intent(
+    *, post: OriginalPost, payload: dict, audit: OperationAudit, user
+) -> None:
+    """Persist the local long-term choice only after a verified upstream mute."""
+    if not operation_result_reaches_target(audit.result_code):
+        return
+    state = AuthorMuteStatus.objects.filter(
+        openid=post.author_openid, source_appid=post.source_appid
+    ).first()
+    if state is None:
+        # A successful MUTE always performs a bounded readback.  Refuse to infer a
+        # local permanent state when that observation was not persisted.
+        raise ValueError("禁言回读未形成作者状态，未保存永久禁言意图")
+    set_permanent_mute_intent(
+        state, enabled=bool(payload.get("permanent_mute")), user=user
+    )
 
 
 @login_required
@@ -848,6 +1044,11 @@ def _resolve_escalated_ai_operation(
                     source=source,
                     upstream_payload=payload,
                     confirmation_key=f"{confirmation_key}:ai-correction:{index}:{operation.lower()}",
+                    mute_trigger=(
+                        MuteOperationTrigger.HUMAN_INITIAL
+                        if operation == RecommendedAction.MUTE
+                        else ""
+                    ),
                 )
                 for index, (operation, payload) in enumerate(operation_plan, start=1)
             ]
@@ -864,6 +1065,16 @@ def _resolve_escalated_ai_operation(
         return redirect(redirect_url)
     if not all(audit.result_code == "OK" for audit in audits):
         messages.warning(request, f"纠正处置未全部成功，AI 异常仍待跟进：{result_summary}")
+        return redirect(redirect_url)
+
+    try:
+        for operation, payload in operation_plan:
+            if operation != RecommendedAction.MUTE:
+                continue
+            audit = next(item for item in audits if item.action == RecommendedAction.MUTE)
+            _persist_human_mute_intent(post=post, payload=payload, audit=audit, user=request.user)
+    except ValueError as exc:
+        messages.warning(request, f"纠正处置已执行，但{exc}。")
         return redirect(redirect_url)
 
     complete_review(task, user=request.user, action=action, reason=reason)
@@ -933,6 +1144,11 @@ def confirm_dashboard_operation(request, topic_id: int, action: str):
                         if operation == RecommendedAction.MUTE
                         else {"block_reason_code": payload["block_reason_code"]},
                         confirmation_key=f"{token}:{operation.lower()}",
+                        mute_trigger=(
+                            MuteOperationTrigger.HUMAN_INITIAL
+                            if operation == RecommendedAction.MUTE
+                            else ""
+                        ),
                     )
                     for operation in (RecommendedAction.BLOCK, RecommendedAction.MUTE)
                 ]
@@ -947,6 +1163,14 @@ def confirm_dashboard_operation(request, topic_id: int, action: str):
             messages.warning(request, "游戏圈会话正在恢复，请稍后重新确认。")
             return redirect(redirect_url)
         if all(operation_result_reaches_target(item.result_code) for item in audits):
+            mute_audit = next(item for item in audits if item.action == RecommendedAction.MUTE)
+            try:
+                _persist_human_mute_intent(
+                    post=post, payload=payload, audit=mute_audit, user=request.user
+                )
+            except ValueError as exc:
+                messages.warning(request, f"组合处置已执行，但{exc}。")
+                return redirect(redirect_url)
             complete_review(
                 task, user=request.user, action=RecommendedAction.BLOCK_AND_MUTE, reason=reason
             )
@@ -982,6 +1206,11 @@ def confirm_dashboard_operation(request, topic_id: int, action: str):
                 source=source,
                 upstream_payload=payload,
                 confirmation_key=request.POST.get("confirmation_key"),
+                mute_trigger=(
+                    MuteOperationTrigger.HUMAN_INITIAL
+                    if action == RecommendedAction.MUTE
+                    else ""
+                ),
             )
     except OperationExecutionConflict as exc:
         messages.warning(request, str(exc))
@@ -990,6 +1219,14 @@ def confirm_dashboard_operation(request, topic_id: int, action: str):
         messages.error(request, "无法建立上游操作会话，未执行处置。")
         return redirect(redirect_url)
     if operation_result_reaches_target(audit.result_code):
+        if action == RecommendedAction.MUTE:
+            try:
+                _persist_human_mute_intent(
+                    post=post, payload=payload, audit=audit, user=request.user
+                )
+            except ValueError as exc:
+                messages.warning(request, f"禁言已执行，但{exc}。")
+                return redirect(redirect_url)
         complete_review(task, user=request.user, action=action, reason=reason)
         if action == RecommendedAction.RESTORE:
             mark_ai_review_restored(task, audit=audit)
@@ -1267,18 +1504,22 @@ def save_dashboard_reply_draft(request, topic_id: int):
 
 
 def _dashboard_operation_payload(request, action: str) -> dict | None:
+    """Validate operator choices and apply the documented mute defaults."""
     if action in {RecommendedAction.SINK, RecommendedAction.RESTORE, RecommendedAction.UNMUTE}:
         return {}
     selected = {int(value) for value in request.POST.getlist("block_reason") if value.isdigit()}
+    if not selected and action == RecommendedAction.MUTE:
+        selected = {1}
     allowed = {code for code, _ in BLOCK_REASON_OPTIONS}
     if not selected or not selected <= allowed:
         messages.error(request, "必须选择至少一个已验证的违规原因。")
         return None
     payload = {"block_reason_code": sum(selected)}
     if action == RecommendedAction.MUTE:
-        mute_days = request.POST.get("mute_days", "")
+        mute_days = request.POST.get("mute_days", "30")
         if mute_days not in {"1", "3", "7", "30"}:
             messages.error(request, "必须选择已验证的禁言期限。")
             return None
         payload["mute_days"] = int(mute_days)
+        payload["permanent_mute"] = request.POST.get("permanent_mute", "1") == "1"
     return payload

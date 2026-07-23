@@ -169,6 +169,7 @@ def write_worker_heartbeat() -> None:
             "review",
             "video_extraction",
             "ai_moderation",
+            "mute_maintenance",
         }
         or not runtime_dir
     ):

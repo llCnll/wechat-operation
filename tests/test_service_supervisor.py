@@ -59,6 +59,7 @@ def test_supervisor_control_server_requires_token_and_reports_status(tmp_path):
             "review",
             "video_extraction",
             "ai_moderation",
+            "mute_maintenance",
         }
     finally:
         supervisor.release()
@@ -105,6 +106,7 @@ def test_reconcile_replaces_session_owner_when_controlled_chrome_is_lost(tmp_pat
         for service in (
             "controlled_chrome", "web", "scheduler", "game_circle_session", "ingestion",
             "backfill_ingestion", "metric_sync", "review", "video_extraction", "ai_moderation",
+            "mute_maintenance",
         )
     }
     states["controlled_chrome"] = {"desired": True, "pid": 101, "created_at": 1}
@@ -180,7 +182,7 @@ def test_controlled_chrome_uses_fixed_loopback_debugging_and_dedicated_profile(t
     assert any(part.startswith("--user-data-dir=") for part in command)
 
 
-def test_controlled_chrome_is_started_as_a_default_supervisor_dependency(tmp_path, monkeypatch):
+def test_default_supervisor_services_are_started_on_bootstrap(tmp_path, monkeypatch):
     supervisor = Supervisor(Path.cwd(), tmp_path)
     calls = []
     monkeypatch.setattr(supervisor, "acquire", lambda: None)
@@ -193,6 +195,8 @@ def test_controlled_chrome_is_started_as_a_default_supervisor_dependency(tmp_pat
     supervisor.bootstrap()
 
     assert supervisor._read_state("controlled_chrome")["desired"] is True
+    assert supervisor._read_state("web")["desired"] is True
+    assert supervisor._read_state("mute_maintenance")["desired"] is True
     assert calls == ["reconcile"]
 
 

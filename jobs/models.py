@@ -12,6 +12,13 @@ class JobStatus(models.TextChoices):
 class BackgroundJob(models.Model):
     task_type = models.CharField(max_length=64)
     idempotency_key = models.CharField(max_length=255, unique=True)
+    active_coalescing_key = models.CharField(
+        max_length=255,
+        unique=True,
+        null=True,
+        blank=True,
+        help_text="仅在待执行或运行中占用；终态自动释放。",
+    )
     parameter_summary = models.JSONField(default=dict)
     checkpoint = models.JSONField(default=dict)
     status = models.CharField(max_length=16, choices=JobStatus.choices, default=JobStatus.PENDING)

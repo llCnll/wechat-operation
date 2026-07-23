@@ -4,6 +4,7 @@ from html import unescape
 from typing import Any
 
 from django.db import transaction
+from django.db.models import Q
 from django.utils import timezone
 
 from jobs.adapters import SourceBusinessDeletedError, SourceContractError
@@ -35,49 +36,43 @@ def _future_timestamp(value: Any, *, observed_at) -> datetime | None:
 
 
 @transaction.atomic
-def sync_author_mute_status(
-    post: OriginalPost,
-    payload: dict[str, Any],
+def _sync_author_mute_observation(
     *,
+    creator: dict[str, Any],
+    source_appid: str,
     source_requested_at=None,
-    source_appid: str | None = None,
+    post: OriginalPost | None = None,
+    create_if_inactive: bool = True,
 ) -> AuthorMuteStatus | None:
-    """Persist the small author projection carried by an already-fetched management detail."""
+    """Persist one normalized author observation from a topic or a user detail."""
     requested_at = source_requested_at or timezone.now()
     observed_at = timezone.now()
-    try:
-        topic = payload["data"]["topic"]
-        creator = topic.get("creater")
-        openid = creator.get("openid") if isinstance(creator, dict) else None
-    except (KeyError, TypeError, AttributeError):
-        return None
+    openid = creator.get("openid")
     if not isinstance(openid, str) or not openid:
         return None
-
-    resolved_appid = source_appid or post.source_appid or str(topic.get("appid") or "")
-    if not resolved_appid:
-        return None
     nick_name = creator.get("nick_name") if isinstance(creator.get("nick_name"), str) else ""
-    block_info = creator.get("block_info") if isinstance(creator, dict) else None
+    block_info = creator.get("block_info")
     local_until = None
-    if isinstance(block_info, dict) and str(block_info.get("appid", "")) == resolved_appid:
+    if isinstance(block_info, dict) and str(block_info.get("appid", "")) == source_appid:
         local_until = _future_timestamp(block_info.get("block_end_time"), observed_at=observed_at)
     global_until = _future_timestamp(creator.get("global_block_end_time"), observed_at=observed_at)
 
-    if post.author_openid != openid:
+    if post is not None and post.author_openid != openid:
         post.author_openid = openid
         post.save(update_fields=["author_openid", "updated_at"])
 
     state = AuthorMuteStatus.objects.select_for_update().filter(
-        openid=openid, source_appid=resolved_appid
+        openid=openid, source_appid=source_appid
     ).first()
     if state is not None and state.source_requested_at > requested_at:
         return state
     active = local_until is not None or global_until is not None
     if state is None:
+        if not active and not create_if_inactive:
+            return None
         return AuthorMuteStatus.objects.create(
             openid=openid,
-            source_appid=resolved_appid,
+            source_appid=source_appid,
             nick_name=nick_name,
             local_muted_until=local_until,
             global_muted_until=global_until,
@@ -93,16 +88,95 @@ def sync_author_mute_status(
         state.first_detected_at = observed_at
     state.last_synced_at = observed_at
     state.source_requested_at = requested_at
-    state.last_source_post = post
+    update_fields = [
+        "nick_name",
+        "local_muted_until",
+        "global_muted_until",
+        "first_detected_at",
+        "last_synced_at",
+        "source_requested_at",
+        "updated_at",
+    ]
+    if post is not None:
+        state.last_source_post = post
+        update_fields.append("last_source_post")
+    state.save(update_fields=update_fields)
+    return state
+
+
+def sync_author_mute_status(
+    post: OriginalPost,
+    payload: dict[str, Any],
+    *,
+    source_requested_at=None,
+    source_appid: str | None = None,
+) -> AuthorMuteStatus | None:
+    """Persist the author projection carried by an already-fetched topic detail."""
+    try:
+        topic = payload["data"]["topic"]
+        creator = topic.get("creater")
+    except (KeyError, TypeError, AttributeError):
+        return None
+    if not isinstance(creator, dict):
+        return None
+    resolved_appid = source_appid or post.source_appid or str(topic.get("appid") or "")
+    if not resolved_appid:
+        return None
+    return _sync_author_mute_observation(
+        creator=creator,
+        source_appid=resolved_appid,
+        source_requested_at=source_requested_at,
+        post=post,
+    )
+
+
+def sync_author_mute_status_from_user_detail(
+    payload: dict[str, Any],
+    *,
+    source_appid: str,
+    source_requested_at=None,
+    post: OriginalPost | None = None,
+    create_if_inactive: bool = True,
+) -> AuthorMuteStatus | None:
+    """Persist the author projection returned by the dedicated user-detail endpoint."""
+    try:
+        user = payload["data"]["user"]
+    except (KeyError, TypeError):
+        return None
+    if not isinstance(user, dict) or not source_appid:
+        return None
+    return _sync_author_mute_observation(
+        creator=user,
+        source_appid=source_appid,
+        source_requested_at=source_requested_at,
+        post=post,
+        create_if_inactive=create_if_inactive,
+    )
+
+
+def mute_management_status_queryset(*, source_appid: str, now=None):
+    """Return the unfiltered current-game author set displayed by mute management."""
+    observed_at = now or timezone.now()
+    active_mutes = Q(local_muted_until__gt=observed_at) | Q(global_muted_until__gt=observed_at)
+    return AuthorMuteStatus.objects.filter(source_appid=source_appid).filter(
+        Q(permanent_mute_enabled=True) | active_mutes
+    )
+
+
+@transaction.atomic
+def set_permanent_mute_intent(
+    state: AuthorMuteStatus, *, enabled: bool, user=None
+) -> AuthorMuteStatus:
+    """Maintain the local long-term intent without changing upstream mute state."""
+    state = AuthorMuteStatus.objects.select_for_update().get(pk=state.pk)
+    state.permanent_mute_enabled = enabled
+    state.permanent_mute_set_at = timezone.now() if enabled else None
+    state.permanent_mute_set_by = user if enabled else None
     state.save(
         update_fields=(
-            "nick_name",
-            "local_muted_until",
-            "global_muted_until",
-            "first_detected_at",
-            "last_synced_at",
-            "source_requested_at",
-            "last_source_post",
+            "permanent_mute_enabled",
+            "permanent_mute_set_at",
+            "permanent_mute_set_by",
             "updated_at",
         )
     )

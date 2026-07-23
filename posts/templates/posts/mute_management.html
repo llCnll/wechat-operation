@@ -3,20 +3,64 @@
 {% block content %}
 <section class="masthead compact-head mute-masthead">
   <div><p class="eyebrow">CONTENT OPERATIONS / MUTE MANAGEMENT</p><h1>禁言管理</h1></div>
-  <div class="head-context"><div class="game-context"><span>当前游戏</span><details class="single-filter game-selector"><summary>{{ active_game.name|default:"当前游戏" }}</summary><div class="single-options">{% for game in managed_games %}<a href="?appid={{ game.appid|urlencode }}{% if search %}&q={{ search|urlencode }}{% endif %}{% if scope %}&scope={{ scope|urlencode }}{% endif %}{% if expires %}&expires={{ expires|urlencode }}{% endif %}" {% if game.appid == appid %}class="is-selected"{% endif %}>{{ game.name }}</a>{% endfor %}</div></details></div></div>
+  <div class="head-context"><div class="game-context"><span>当前游戏</span><details class="single-filter game-selector"><summary>{{ active_game.name|default:"当前游戏" }}</summary><div class="single-options">{% for game in managed_games %}<a href="?appid={{ game.appid|urlencode }}{% if search %}&q={{ search|urlencode }}{% endif %}{% if scope %}&scope={{ scope|urlencode }}{% endif %}{% if expires %}&expires={{ expires|urlencode }}{% endif %}{% if kind %}&kind={{ kind|urlencode }}{% endif %}" {% if game.appid == appid %}class="is-selected"{% endif %}>{{ game.name }}</a>{% endfor %}</div></details></div></div>
 </section>
 <nav class="workspace-tabs" aria-label="内容管理子导航"><a href="{% url 'operations-dashboard' %}?appid={{ appid|urlencode }}">内容队列</a><a class="is-active" href="{% url 'mute-management' %}?appid={{ appid|urlencode }}">禁言管理</a></nav>
-<form class="filters workspace-filter mute-filter" method="get"><input type="hidden" name="appid" value="{{ appid }}"><div class="filter-grid"><div class="filter-search"><input name="q" value="{{ search }}" placeholder="搜索作者昵称" aria-label="搜索作者昵称"></div><label class="mute-filter-select"><span>禁言范围</span><select name="scope"><option value="" {% if not scope %}selected{% endif %}>全部有效禁言</option><option value="LOCAL" {% if scope == 'LOCAL' %}selected{% endif %}>当前游戏禁言</option><option value="GLOBAL" {% if scope == 'GLOBAL' %}selected{% endif %}>全局禁言</option></select></label><label class="mute-filter-select"><span>到期时间</span><select name="expires"><option value="" {% if not expires %}selected{% endif %}>全部</option><option value="SOON" {% if expires == 'SOON' %}selected{% endif %}>7 天内到期</option></select></label><div class="filter-actions"><a href="?appid={{ appid|urlencode }}">清空</a><button type="submit">筛选</button></div></div></form>
-<section class="mute-management-panel" aria-label="当前有效禁言对象">
-  <header class="mute-panel-heading"><div><p class="eyebrow">ACTIVE MUTES</p><h2>当前有效禁言对象</h2><p>按最早到期时间排序，避免遗漏临近恢复的账号。</p></div><strong class="mute-count">{{ statuses|length }}<small>项</small></strong></header>
-  <div class="mute-list">{% for status in statuses %}
+<form class="filters workspace-filter mute-filter" method="get"><input type="hidden" name="appid" value="{{ appid }}"><div class="filter-grid"><div class="filter-search"><input name="q" value="{{ search }}" placeholder="搜索作者昵称" aria-label="搜索作者昵称"></div><label class="mute-filter-select"><span>禁言范围</span><select name="scope"><option value="" {% if not scope %}selected{% endif %}>全部有效禁言</option><option value="LOCAL" {% if scope == 'LOCAL' %}selected{% endif %}>当前游戏禁言</option><option value="GLOBAL" {% if scope == 'GLOBAL' %}selected{% endif %}>全局禁言</option></select></label><label class="mute-filter-select"><span>续期类型</span><select name="kind"><option value="" {% if not kind %}selected{% endif %}>全部</option><option value="PERMANENT" {% if kind == 'PERMANENT' %}selected{% endif %}>自动续期</option><option value="TEMP" {% if kind == 'TEMP' %}selected{% endif %}>临时禁言</option></select></label><label class="mute-filter-select"><span>到期时间</span><select name="expires"><option value="" {% if not expires %}selected{% endif %}>全部</option><option value="SOON" {% if expires == 'SOON' %}selected{% endif %}>7 天内到期</option></select></label><div class="filter-actions"><a href="?appid={{ appid|urlencode }}">重置</a><button type="submit">筛选</button></div></div></form>
+{% if last_job_feedback %}<section class="mute-job-feedback is-{{ last_job_feedback.state }}" aria-live="polite"><div><strong>{{ last_job_feedback.title }}</strong><span>任务 #{{ last_job_feedback.job.pk }} · {{ last_job_feedback.detail }}</span></div></section>{% endif %}
+<section class="mute-management-panel" aria-label="当前游戏禁言对象">
+  <header class="mute-panel-heading"><div><p class="eyebrow">MUTE STATUS</p><div class="mute-title-row"><h2>当前游戏禁言对象</h2><span class="mute-count"><b>{{ statuses|length }}</b> 位</span></div><p>查看当前仍有效禁言的作者。<span>“自动续期”仅是本服务的本地标记，不会改变上游当前禁言。</span></p></div></header>
+  <details class="mute-data-maintenance"><summary><span><b>数据维护</b><small>按需核验禁言状态或补充名单，不执行平台禁言或解除。</small></span><em>展开</em></summary><div class="mute-maintenance-actions"><form method="post" action="{% url 'enqueue-author-mute-status-refresh' %}">{% csrf_token %}<input type="hidden" name="return_query" value="{{ return_query }}"><div><strong>刷新列表状态</strong><small>仅核验列表中的自动续期或仍有效禁言作者。</small></div><button type="submit">刷新状态</button></form><form method="post" action="{% url 'enqueue-post-author-mute-status-sync' %}">{% csrf_token %}<input type="hidden" name="return_query" value="{{ return_query }}"><div><strong>扫描帖子作者</strong><small>扫描当前游戏全部帖子，仅补充仍被禁言的用户；不会设置自动续期。</small></div><button type="submit" class="is-secondary">扫描并补充</button></form></div></details>
+  {% if statuses %}<form id="mute-batch-form" method="post" action="{% url 'apply-permanent-mute-intent' %}" class="mute-batch-toolbar">{% csrf_token %}<input type="hidden" name="return_query" value="{{ return_query }}"><label><input type="checkbox" data-mute-select-all> 全选当前结果</label><span data-mute-selection-count aria-live="polite">未选择作者</span><div class="mute-batch-actions" data-mute-batch-actions hidden><button type="submit" name="action" value="enable" data-mute-confirm="将为所选作者标记为自动续期。此操作不会立即执行平台禁言或续期。">批量标记为自动续期</button><button type="submit" name="action" value="disable" class="is-quiet" data-mute-confirm="将解除所选作者的自动续期标记，并停止后续自动续期；不会解除当前上游禁言。">批量取消自动续期</button></div></form>{% endif %}
+  <div class="mute-list">{% if statuses %}<div class="mute-list-head" aria-hidden="true"><span></span><span>作者</span><span>禁言状态与到期时间</span><span>状态来源</span><span>最近帖子</span><span>操作</span></div>{% endif %}{% for status in statuses %}
     <article class="mute-row">
+      <label class="mute-select"><input form="mute-batch-form" type="checkbox" name="status_id" value="{{ status.pk }}" data-mute-select aria-label="选择 {{ status.nick_name|default:'作者' }}"></label>
       <div class="mute-identity"><strong>{{ status.nick_name|default:"昵称未知" }}</strong><span>最近同步 {{ status.last_synced_at|date:"m月d日 H:i" }}</span></div>
-      <div class="mute-expiry"><span class="mute-scope {% if status.presentation.scope == '全局' %}is-global{% elif status.presentation.scope == '当前游戏及全局' %}is-both{% endif %}">{{ status.presentation.scope }}</span><strong>至 {{ status.presentation.until|date:"Y年m月d日 H:i" }}</strong><span>{{ status.presentation.remaining }}</span></div>
-      <div class="mute-origin"><span>{% if status.system_muted_at %}本系统禁言{% elif status.first_detected_at %}上游首次发现{% else %}状态来源未知{% endif %}</span><strong>{% if status.system_muted_at %}{{ status.system_muted_at|date:"m月d日 H:i" }}{% elif status.first_detected_at %}{{ status.first_detected_at|date:"m月d日 H:i" }}{% else %}--{% endif %}</strong></div>
+      <div class="mute-expiry"><span class="mute-scope {% if status.presentation.scope == '全局' %}is-global{% elif status.presentation.scope == '当前游戏及全局' %}is-both{% endif %}">{{ status.presentation.scope|default:"当前游戏未禁言" }}{% if status.permanent_mute_enabled %}<b class="mute-permanent-badge">自动续期</b>{% endif %}</span><strong>{% if status.presentation.until %}至 {{ status.presentation.until|date:"Y年m月d日 H:i" }}{% else %}等待重新核验{% endif %}</strong><span>{% if status.presentation.active %}{{ status.presentation.remaining }}{% else %}本服务会在 Worker 运行时恢复 30 天禁言{% endif %}</span></div>
+      <div class="mute-origin"><span>{% if status.permanent_mute_enabled %}自动续期标记{% elif status.system_muted_at %}本系统禁言{% elif status.first_detected_at %}上游首次发现{% else %}状态来源未知{% endif %}</span><strong>{% if status.permanent_mute_enabled %}{{ status.permanent_mute_set_at|date:"m月d日 H:i" }}{% elif status.system_muted_at %}{{ status.system_muted_at|date:"m月d日 H:i" }}{% elif status.first_detected_at %}{{ status.first_detected_at|date:"m月d日 H:i" }}{% else %}--{% endif %}</strong></div>
       <div class="mute-post">{% if status.last_source_post %}<span>最近帖子</span><a href="{% url 'operations-dashboard' %}?appid={{ appid|urlencode }}&topic={{ status.last_source_post.topic_id }}">#{{ status.last_source_post.topic_id }}</a>{% else %}<span>最近帖子</span><strong>--</strong>{% endif %}</div>
-      <a class="mute-history-link" href="{% url 'author-mute-history' status.id %}?appid={{ appid|urlencode }}">历史帖子<span>→</span></a>
+      <div class="mute-history-actions"><a class="mute-history-link" href="{% url 'author-mute-history' status.id %}?appid={{ appid|urlencode }}">历史帖子<span>→</span></a><form method="post" action="{% url 'apply-permanent-mute-intent' %}">{% csrf_token %}<input type="hidden" name="return_query" value="{{ return_query }}"><input type="hidden" name="status_id" value="{{ status.pk }}"><button type="submit" name="action" value="{% if status.permanent_mute_enabled %}disable{% else %}enable{% endif %}" class="mute-intent-button {% if status.permanent_mute_enabled %}is-disable{% endif %}" data-mute-confirm="{% if status.permanent_mute_enabled %}将取消自动续期标记，并停止后续自动续期；不会解除当前上游禁言。{% else %}将标记为自动续期；此操作不会立即执行平台禁言或续期。{% endif %}">{% if status.permanent_mute_enabled %}取消自动续期{% else %}标记为自动续期{% endif %}</button></form></div>
     </article>
-  {% empty %}<div class="mute-empty"><strong>当前条件下没有有效禁言对象</strong><span>可调整范围、到期时间或昵称筛选后再查看。</span></div>{% endfor %}</div>
+  {% empty %}<div class="mute-empty"><strong>当前条件下没有禁言对象</strong><span>可调整范围、续期类型、到期时间或昵称筛选后再查看。</span></div>{% endfor %}</div>
 </section>
+<dialog class="operation-modal mute-confirm-dialog" data-mute-confirm-dialog aria-labelledby="mute-confirm-title">
+  <form method="dialog">
+    <button class="modal-close" value="cancel" aria-label="关闭">关闭</button>
+    <p class="eyebrow">AUTO RENEWAL</p>
+    <h2 id="mute-confirm-title" data-mute-confirm-title>确认标记为自动续期</h2>
+    <p data-mute-confirm-message>将更新本地自动续期标记。</p>
+    <p class="mute-confirm-note">标记操作不会立即执行平台禁言或续期；取消标记不会解除当前上游禁言。</p>
+    <div class="operation-footer"><button value="cancel">取消</button><button class="default" type="button" data-mute-confirm-accept>确认提交</button></div>
+  </form>
+</dialog>
+<script>
+  const muteAll=document.querySelector('[data-mute-select-all]');
+  const muteSelected=[...document.querySelectorAll('[data-mute-select]')];
+  const muteCount=document.querySelector('[data-mute-selection-count]');
+  const muteBatchActions=document.querySelector('[data-mute-batch-actions]');
+  const muteDialog=document.querySelector('[data-mute-confirm-dialog]');
+  let pendingMuteSubmission;
+  function updateMuteCount(){const count=muteSelected.filter(input=>input.checked).length;if(muteCount)muteCount.textContent=count?'已选择 '+count+' 位作者':'未选择作者';if(muteBatchActions)muteBatchActions.hidden=!count;if(muteAll)muteAll.checked=Boolean(count)&&count===muteSelected.length}
+  muteAll?.addEventListener('change',()=>{muteSelected.forEach(input=>input.checked=muteAll.checked);updateMuteCount()});
+  muteSelected.forEach(input=>input.addEventListener('change',updateMuteCount));
+  document.querySelectorAll('form[action$="/mute-management/permanent/"]').forEach(form=>form.addEventListener('submit',event=>{
+    if(form.dataset.muteConfirmed==='true'){delete form.dataset.muteConfirmed;return}
+    const button=event.submitter;
+    if(!button?.dataset.muteConfirm)return;
+    event.preventDefault();
+    pendingMuteSubmission={form,button};
+    muteDialog.querySelector('[data-mute-confirm-title]').textContent=button.value==='disable'?'确认取消自动续期':'确认标记为自动续期';
+    muteDialog.querySelector('[data-mute-confirm-message]').textContent=button.dataset.muteConfirm;
+    muteDialog.showModal();
+  }));
+  muteDialog?.querySelector('[data-mute-confirm-accept]')?.addEventListener('click',()=>{
+    if(!pendingMuteSubmission)return;
+    const {form,button}=pendingMuteSubmission;
+    pendingMuteSubmission=undefined;
+    form.dataset.muteConfirmed='true';
+    muteDialog.close();
+    form.requestSubmit(button);
+  });
+  muteDialog?.addEventListener('close',()=>{pendingMuteSubmission=undefined});
+</script>
 {% endblock %}

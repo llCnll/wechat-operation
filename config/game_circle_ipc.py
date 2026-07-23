@@ -36,6 +36,7 @@ POST_METHODS = frozenset(
         "POSTS_LIST_CANDIDATES",
         "POSTS_GET_CONTENT_CARD",
         "POSTS_GET_METRICS",
+        "POSTS_GET_AUTHOR_DETAIL",
         "POSTS_OPERATION",
     }
 )
@@ -285,6 +286,9 @@ class GameCirclePostClient:
 
     def get_post_metrics_with_timeout(self, topic_id: int, *, timeout_seconds: float) -> dict[str, Any]:
         return self._payload("POSTS_GET_METRICS", {"topic_id": topic_id, "timeout_seconds": timeout_seconds})
+
+    def get_author_detail(self, openid: str) -> dict[str, Any]:
+        return self._payload("POSTS_GET_AUTHOR_DETAIL", {"openid": openid})
 
     def perform_confirmed_operation(self, *, topic_id: int, action: str, payload: dict[str, Any], operation_id: str = "") -> dict[str, Any]:
         return self._payload("POSTS_OPERATION", {"topic_id": topic_id, "action": action, "payload": payload}, operation_id=operation_id or str(uuid4()))

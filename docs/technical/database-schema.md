@@ -357,6 +357,7 @@ AI 评估中的单项风险证据，可保存多段命中内容。
 | `id` | 整数，自增，主键 | 本地记录编号。 |
 | `task_type` | 字符串，最长 64 | 任务类别，如采集或 AI 评估。 |
 | `idempotency_key` | 字符串，最长 255，唯一 | 防止重复创建同一任务。 |
+| `active_coalescing_key` | 字符串，最长 255，可空、唯一 | 仅活跃任务占用的语义去重键；任务成功、失败或取消后清空，允许后续创建新一轮任务。 |
 | `parameter_summary` | JSON 对象，默认 `{}` | 脱敏任务参数摘要。 |
 | `checkpoint` | JSON 对象，默认 `{}` | 可恢复执行的分页或阶段检查点。 |
 | `status` | 字符串，最长 16，枚举，默认 `PENDING` | 任务运行状态。 |
@@ -393,6 +394,9 @@ AI 评估中的单项风险证据，可保存多段命中内容。
 | `VIDEO_EXTRACT` | 原创帖视频的本地受限证据提取。任务摘要仅含本地提取记录 ID、帖子 ID、URL 指纹与版本。 | 视频提取 Worker（Supervisor 服务 `video_extraction`） |
 | `AI_AUTOMATED_MODERATION` | 已授权 AI 沉底或屏蔽的一次性上游操作与复审建档。 | AI 自动处置 Worker（Supervisor 服务 `ai_moderation`） |
 | `GAME_CIRCLE_SESSION_KEEPALIVE` | 可选保活任务；参数仅含触发来源、自动化键与时区桶，消费者开始执行时才冻结当前游戏范围。 | 游戏圈会话服务（Supervisor 服务 `game_circle_session`） |
+| `PERMANENT_MUTE_RENEWAL` | 每 12 小时为当前游戏临近到期或禁言时间为 0 的永久标记续期；不处理全局禁言或其他游戏。 | 禁言维护 Worker（Supervisor 服务 `mute_maintenance`） |
+| `AUTHOR_MUTE_STATUS_REFRESH` | 手动刷新当前游戏禁言列表作者的禁言时间；冻结列表判断时刻与作者集合并逐位读取用户详情，不执行上游写操作；同一范围仅保留一个活跃任务。 | 禁言维护 Worker（Supervisor 服务 `mute_maintenance`） |
+| `POST_AUTHOR_MUTE_STATUS_SYNC` | 扫描当前游戏全量帖子作者；按作者去重读取用户详情，只将仍禁言作者补充到禁言管理，不设置永久禁言；同一范围仅保留一个活跃任务。 | 禁言维护 Worker（Supervisor 服务 `mute_maintenance`） |
 | `AUTHOR_MUTE_STATUS_BACKFILL` | 一次性补全历史原创帖作者禁言状态。 | 人工补采 Worker（Supervisor 服务 `backfill_ingestion`） |
 | `METRIC_DAILY_SYNC` / `METRIC_WEEKLY_SYNC` / `METRIC_BACKFILL` | 游戏圈日/周聚合指标同步或人工范围回填；当前工作区已实现、待发布。 | 指标快照 Worker（Supervisor 服务 `metric_sync`） |
 
