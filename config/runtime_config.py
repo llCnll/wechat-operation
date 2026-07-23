@@ -41,12 +41,17 @@ EDITABLE_KEYS = (
     "ENABLE_AI_AUTOMATED_MODERATION",
     "ENABLE_AI_SINK_WRITES",
     "ENABLE_AI_BLOCK_WRITES",
+    "SESSION_REPAIR_ENABLED",
+    "SESSION_KEEPALIVE_ENABLED",
 )
 BOOLEAN_KEYS = frozenset(key for key in EDITABLE_KEYS if key.startswith("ENABLE_")) | {
     "ASR_ENABLED",
     "VIDEO_ENABLED",
     "VIDEO_PREFLIGHT_VERIFIED",
+    "SESSION_REPAIR_ENABLED",
+    "SESSION_KEEPALIVE_ENABLED",
 }
+SESSION_MAINTENANCE_KEYS = frozenset(("SESSION_REPAIR_ENABLED", "SESSION_KEEPALIVE_ENABLED"))
 VIDEO_DEFAULTS = {
     "ASR_ENABLED": "false",
     "ASR_TIMEOUT_SECONDS": "60",
@@ -63,6 +68,17 @@ VIDEO_DEFAULTS = {
 RUNTIME_DEFAULTS = {
     **VIDEO_DEFAULTS,
     **{key: "false" for key in BOOLEAN_KEYS},
+}
+SERVICE_DISPLAY_NAMES = {
+    "web": "Web 服务",
+    "scheduler": "自动调度器",
+    "game_circle_session": "游戏圈会话服务",
+    "ingestion": "实时采集 Worker",
+    "backfill_ingestion": "人工补采 Worker",
+    "metric_sync": "指标同步 Worker",
+    "review": "AI 审核 Worker",
+    "video_extraction": "视频审核 Worker",
+    "ai_moderation": "AI 自动处置 Worker",
 }
 NUMERIC_BOUNDS = {
     "ASR_TIMEOUT_SECONDS": (float, 1, 300),
@@ -197,6 +213,13 @@ def affected_services(changed: set[str]) -> set[str]:
         services.add("review")
     if changed & video_keys:
         services.add("video_extraction")
-    if changed & BOOLEAN_KEYS:
+    if changed & (BOOLEAN_KEYS - SESSION_MAINTENANCE_KEYS):
         services.update(("web", "ai_moderation"))
+    if changed & SESSION_MAINTENANCE_KEYS:
+        services.update(("game_circle_session", "scheduler"))
     return services
+
+
+def display_service_names(services: set[str]) -> list[str]:
+    """Return console-facing service labels without leaking internal service keys."""
+    return [SERVICE_DISPLAY_NAMES.get(service, service) for service in sorted(services)]

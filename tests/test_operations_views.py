@@ -95,7 +95,7 @@ def test_operations_dashboard_renders_original_post_metrics():
     assert "status.frame_can_recover" in response.content.decode()
     assert 'fetch("/auth/status"' in response.content.decode()
     assert 'action="/auth/open-login/"' in response.content.decode()
-    assert 'action="/admin/runtime/session-recover/"' in response.content.decode()
+    assert 'action="/admin/runtime/current-game-frame/"' in response.content.decode()
     assert 'data-operation="SKIP"' in response.content.decode()
     assert 'data-operation="UNMUTE"' in response.content.decode()
     assert f"/posts/{post.topic_id}/refresh/" in response.content.decode()
@@ -104,7 +104,9 @@ def test_operations_dashboard_renders_original_post_metrics():
 @pytest.mark.django_db
 def test_browser_login_status_only_allows_opening_login_page_when_scan_is_required():
     state = GameCircleLoginRuntimeState.objects.create(
-        login_state=GameCircleLoginRuntimeState.LoginState.SCAN_REQUIRED,
+        outer_state=GameCircleLoginRuntimeState.OuterState.LOGIN_PENDING,
+        frame_state=GameCircleLoginRuntimeState.FrameState.UNREADY,
+        available_actions=[GameCircleLoginRuntimeState.Action.OPEN_LOGIN],
         error_category=GameCircleLoginRuntimeState.ErrorCategory.SCAN_REQUIRED,
         checked_at=timezone.now(),
     )
@@ -113,35 +115,29 @@ def test_browser_login_status_only_allows_opening_login_page_when_scan_is_requir
 
     assert scan_required["valid"] is False
     assert scan_required["can_open_login"] is True
-    assert scan_required["state"] == GameCircleLoginRuntimeState.LoginState.SCAN_REQUIRED
+    assert scan_required["state"] == GameCircleLoginRuntimeState.OuterState.LOGIN_PENDING
     assert scan_required["frame_valid"] is False
 
-    state.login_state = GameCircleLoginRuntimeState.LoginState.UNAVAILABLE
+    state.outer_state = GameCircleLoginRuntimeState.OuterState.BROWSER_UNAVAILABLE
+    state.available_actions = []
     state.error_category = GameCircleLoginRuntimeState.ErrorCategory.CHROME_UNAVAILABLE
-    state.save(update_fields=["login_state", "error_category", "updated_at"])
+    state.save(update_fields=["outer_state", "available_actions", "error_category", "updated_at"])
 
     unavailable = Client().get("/auth/status").json()
 
     assert unavailable["can_open_login"] is False
-    assert unavailable["state"] == GameCircleLoginRuntimeState.LoginState.UNAVAILABLE
+    assert unavailable["state"] == GameCircleLoginRuntimeState.OuterState.BROWSER_UNAVAILABLE
 
 
 @pytest.mark.django_db
 def test_browser_login_status_reports_outer_session_and_current_game_frame_separately():
-    _activate_game("wx-frame")
     GameCircleLoginRuntimeState.objects.create(
-        login_state=GameCircleLoginRuntimeState.LoginState.READY,
+        outer_state=GameCircleLoginRuntimeState.OuterState.OUTER_READY,
+        frame_state=GameCircleLoginRuntimeState.FrameState.READY,
         error_category=GameCircleLoginRuntimeState.ErrorCategory.NONE,
         checked_at=timezone.now(),
     )
-    with patch("config.urls.RuntimeStore") as store_class:
-        store = store_class.return_value
-        store.read_json.side_effect = [
-            {"at": timezone.now().isoformat()},
-            {"leases": [{"appid": "wx-frame", "state": "ACTIVE"}]},
-        ]
-
-        status = Client().get("/auth/status").json()
+    status = Client().get("/auth/status").json()
 
     assert status["valid"] is True
     assert status["frame_valid"] is True

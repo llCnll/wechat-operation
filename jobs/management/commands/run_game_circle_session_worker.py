@@ -4,12 +4,13 @@ from threading import Thread
 
 from config.game_circle_ipc import GameCircleIpcServer, ipc_capability_from_environment
 from config.game_circle_service import GameCircleSessionService
-from jobs.game_circle_refresh import GAME_CIRCLE_LOGIN_PROBE_TASK, GAME_CIRCLE_SESSION_REFRESH_TASK, enqueue_login_probe
+from jobs.game_circle_keepalive import GAME_CIRCLE_SESSION_KEEPALIVE_TASK
 from jobs.worker import consume_jobs
+from service_supervisor.runtime import write_worker_heartbeat
 
 
 class Command(BaseCommand):
-    help = "仅认领并执行游戏圈会话续接任务。"
+    help = "运行游戏圈会话服务、IPC 和可选会话维护。"
 
     def add_arguments(self, parser):
         parser.add_argument("--once", action="store_true")
@@ -26,14 +27,13 @@ class Command(BaseCommand):
         )
         server_thread = Thread(target=ipc_server.serve_forever, name="game-circle-ipc", daemon=True)
         server_thread.start()
+        service.start()
         try:
-            enqueue_login_probe(source="worker-start")
+            # SessionBootstrap and LOGIN_PENDING are service-internal.  The
+            # optional keepalive is the only session BackgroundJob consumer.
             consume_jobs(
                 self,
-                {
-                    GAME_CIRCLE_SESSION_REFRESH_TASK: service.refresh,
-                    GAME_CIRCLE_LOGIN_PROBE_TASK: service.probe_login,
-                },
+                {GAME_CIRCLE_SESSION_KEEPALIVE_TASK: service.keepalive},
                 loop=options["loop"],
                 poll_seconds=options["poll_seconds"],
             )

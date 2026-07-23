@@ -8,7 +8,6 @@ from django.core.management import call_command
 from django.core.management.base import CommandError
 
 from jobs.models import BackgroundJob
-from jobs.game_circle_refresh import GAME_CIRCLE_LOGIN_PROBE_TASK
 from posts.game_catalog import set_active_game
 from posts.ingestion_jobs import (
     SHANGHAI,
@@ -167,7 +166,7 @@ def test_scheduler_without_an_active_game_keeps_running_without_creating_source_
     call_command("run_scheduler", "--once", stdout=output)
 
     assert "未创建来源任务" in output.getvalue()
-    assert not BackgroundJob.objects.exclude(task_type=GAME_CIRCLE_LOGIN_PROBE_TASK).exists()
+    assert not BackgroundJob.objects.exists()
 
 
 @pytest.mark.django_db

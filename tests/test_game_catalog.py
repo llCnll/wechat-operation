@@ -53,7 +53,8 @@ def test_successful_sync_upserts_catalog_without_deleting_previous_records():
 def test_admin_sync_failure_keeps_cached_catalog(monkeypatch):
     game = ManagedGame.objects.create(appid="wx-cached", name="缓存游戏")
     monkeypatch.setattr(
-        "posts.admin.list_managed_games", lambda: (_ for _ in ()).throw(GameCircleIpcError("SERVICE_UNAVAILABLE", "不可用"))
+        "posts.admin.sync_authorized_managed_games",
+        lambda: (_ for _ in ()).throw(GameCircleIpcError("SERVICE_UNAVAILABLE", "不可用")),
     )
     admin = ManagedGameAdmin(ManagedGame, AdminSite())
     request = RequestFactory().post("/admin/posts/managedgame/")
@@ -75,7 +76,8 @@ def test_admin_registers_sync_action_as_unbound_method(monkeypatch):
     request = RequestFactory().post("/admin/posts/managedgame/")
     messages = []
     monkeypatch.setattr(
-        "posts.admin.list_managed_games", lambda: [ManagedGameDTO("wx-sync", "已同步游戏")]
+        "posts.admin.sync_authorized_managed_games",
+        lambda: sync_managed_games([ManagedGameDTO("wx-sync", "已同步游戏")]),
     )
     monkeypatch.setattr(
         admin, "message_user", lambda request, message, **kwargs: messages.append(message)

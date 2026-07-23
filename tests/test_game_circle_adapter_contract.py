@@ -101,6 +101,7 @@ def test_switch_reload_uses_the_fixed_outer_home_route():
     GameCircleOuterAdapter(page).reload_after_game_switch()
 
     assert "window.location.assign('/')" in page.evaluate.call_args.args[0]
+    page.close.assert_called_once_with()
 
 
 @pytest.mark.parametrize(

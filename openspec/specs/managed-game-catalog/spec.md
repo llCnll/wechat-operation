@@ -16,11 +16,12 @@
 - **THEN** 系统 SHALL 显示脱敏失败提示且不得清空或覆盖已有游戏目录
 
 ### Requirement: 受控的游戏目录同步
-系统 SHALL 仅在已认证运营人员显式请求时，通过会话服务创建的 owned candidate 调用 `getWxaList`，并仅持久化标准化的 AppID 与游戏名称。目录同步 MUST NOT 创建插件页、刷新浏览器会话、调用身份绑定或改变当前操作游戏（首次默认初始化除外）。系统 SHALL NOT 持久化或输出请求 token、Cookie、完整认证 URL 或运营者身份。
+系统 SHALL 仅在已认证运营人员显式提交系统配置台“同步可管理游戏”操作时，通过固定会话服务 IPC 调用 `getWxaList`，并在同一请求内仅持久化标准化的 AppID 与游戏名称。目录同步 MUST NOT 创建插件页、刷新浏览器会话、调用身份绑定或改变当前操作游戏（首次默认初始化除外）。系统 SHALL NOT 持久化或输出请求 token、Cookie、完整认证 URL 或运营者身份。
 
 #### Scenario: 成功同步目录
 - **WHEN** 受控公众平台页面返回结构有效的可管理游戏列表
 - **THEN** 系统 SHALL 创建或更新对应本地游戏记录并显示最近同步时间
+- **THEN** 系统 SHALL 在同一操作中报告同步数量，不得要求第二次 Admin 操作
 
 ### Requirement: 持久目录与会话范围分离
 

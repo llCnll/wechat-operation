@@ -109,6 +109,25 @@ class ActiveGameScope(models.Model):
 class GameCircleLoginRuntimeState(models.Model):
     """Credential-free projection written only by the session service."""
 
+    class OuterState(models.TextChoices):
+        UNKNOWN = "UNKNOWN", "待检查"
+        BROWSER_UNAVAILABLE = "BROWSER_UNAVAILABLE", "Chrome 不可用"
+        BOOTSTRAPPING = "BOOTSTRAPPING", "正在检查"
+        LOGIN_PENDING = "LOGIN_PENDING", "需要扫码"
+        OUTER_READY = "OUTER_READY", "外层会话有效"
+
+    class FrameState(models.TextChoices):
+        UNKNOWN = "UNKNOWN", "未知"
+        UNREADY = "UNREADY", "未就绪"
+        BUILDING = "BUILDING", "建立中"
+        READY = "READY", "有效"
+
+    class Action(models.TextChoices):
+        CHECK_LOGIN = "CHECK_LOGIN", "检查登录态"
+        OPEN_LOGIN = "OPEN_LOGIN", "打开登录页"
+        BUILD_FRAME = "BUILD_FRAME", "建立当前游戏 Frame"
+        KEEPALIVE = "KEEPALIVE", "保活当前游戏 Frame"
+
     class LoginState(models.TextChoices):
         READY = "READY", "已就绪"
         SCAN_REQUIRED = "SCAN_REQUIRED", "需要扫码"
@@ -120,10 +139,18 @@ class GameCircleLoginRuntimeState(models.Model):
         SCAN_REQUIRED = "SCAN_REQUIRED", "需要扫码"
         CHROME_UNAVAILABLE = "CHROME_UNAVAILABLE", "Chrome 不可用"
         OUTER_SESSION_UNREADY = "OUTER_SESSION_UNREADY", "外层会话未就绪"
-        PROBE_FAILED = "PROBE_FAILED", "探测失败"
+        FRAME_UNREADY = "FRAME_UNREADY", "Frame 未就绪"
+        TARGET_UNAVAILABLE = "TARGET_UNAVAILABLE", "受控页面不可用"
+        SOURCE_VERIFICATION_FAILED = "SOURCE_VERIFICATION_FAILED", "来源验证失败"
+        GAME_NOT_SELECTABLE = "GAME_NOT_SELECTABLE", "当前账号无法切换目标游戏"
+        SERVICE_STOPPING = "SERVICE_STOPPING", "服务正在停止"
 
     id = models.PositiveSmallIntegerField(primary_key=True, default=1, editable=False)
     login_state = models.CharField(max_length=20, choices=LoginState.choices, default=LoginState.UNKNOWN)
+    outer_state = models.CharField(max_length=24, choices=OuterState.choices, default=OuterState.UNKNOWN)
+    frame_state = models.CharField(max_length=16, choices=FrameState.choices, default=FrameState.UNKNOWN)
+    available_actions = models.JSONField(default=list)
+    login_wait_until = models.DateTimeField(null=True, blank=True)
     checked_at = models.DateTimeField(null=True, blank=True)
     last_ready_at = models.DateTimeField(null=True, blank=True)
     error_category = models.CharField(

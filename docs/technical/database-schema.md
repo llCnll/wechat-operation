@@ -392,7 +392,7 @@ AI 评估中的单项风险证据，可保存多段命中内容。
 | `AI_EVALUATE` | 原创帖 AI 内容评估。 | AI 审核 Worker（Supervisor 服务 `review`） |
 | `VIDEO_EXTRACT` | 原创帖视频的本地受限证据提取。任务摘要仅含本地提取记录 ID、帖子 ID、URL 指纹与版本。 | 视频提取 Worker（Supervisor 服务 `video_extraction`） |
 | `AI_AUTOMATED_MODERATION` | 已授权 AI 沉底或屏蔽的一次性上游操作与复审建档。 | AI 自动处置 Worker（Supervisor 服务 `ai_moderation`） |
-| `GAME_CIRCLE_SESSION_REFRESH` | 以 `RECOVER` 或 `KEEPALIVE` 模式重建当前操作游戏的受控 HOME/插件会话；参数与运行态不含认证材料。 | 游戏圈会话续接 Worker（Supervisor 服务 `game_circle_session`） |
+| `GAME_CIRCLE_SESSION_KEEPALIVE` | 可选保活任务；参数仅含触发来源、自动化键与时区桶，消费者开始执行时才冻结当前游戏范围。 | 游戏圈会话服务（Supervisor 服务 `game_circle_session`） |
 | `AUTHOR_MUTE_STATUS_BACKFILL` | 一次性补全历史原创帖作者禁言状态。 | 人工补采 Worker（Supervisor 服务 `backfill_ingestion`） |
 | `METRIC_DAILY_SYNC` / `METRIC_WEEKLY_SYNC` / `METRIC_BACKFILL` | 游戏圈日/周聚合指标同步或人工范围回填；当前工作区已实现、待发布。 | 指标快照 Worker（Supervisor 服务 `metric_sync`） |
 

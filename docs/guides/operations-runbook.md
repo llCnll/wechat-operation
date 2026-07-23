@@ -45,8 +45,24 @@ Compress-Archive -Path $items.FullName -DestinationPath ../wechat-operation.zip 
 - 会话服务按 AppID 维护一个 ACTIVE 及零到多个 RETIRING lease。新 lease 完整验证后才发布；旧 lease 仅在退役等待结束且请求访问归零后关闭它自己的 HOME/PLUGIN tab。因为 Chrome 已由 Supervisor 管理，受控 target 可以回收至零 tab；手动打开的未知 tab 永不接管、使用或关闭。
 - 首次部署执行 `mkdir -p runtime && cp .env.example runtime/.env`。日常 AI/OCR 和人工处置授权均从系统配置首页的 Pipeline 保存；`runtime/.env` 仅用于后台不可用时的运维恢复。
 - AI/OCR 凭据只通过 `AI_*`、`OCR_*` 运行时配置注入。系统配置首页保存时已有密钥不会回显；轮换后由 Pipeline 重启 AI Worker。
+- 运行配置保存后的重启提示使用与 Pipeline 一致的中文服务名；按提示定位对应节点并点击“重启”，无需识别内部 service key。
+- `SESSION_REPAIR_ENABLED`、`SESSION_KEEPALIVE_ENABLED` 只需重启“游戏圈会话服务”和“自动调度器”；不重启 Web 或 AI 自动处置 Worker。
+- 启用自动修复后，当前 scope 的 HOME 或 Frame 丢失会触发候选 lease 替换；候选验证成功才发布新 Frame。损坏 lease 不会阻止重建，也不会在重复检查中积累未发布 HOME。
+- 会话服务启动、建立 Frame、检查外层会话、自动修复和保活使用明确的建立意图：健康 lease 会复用已登记 HOME/Frame，不会因重复点击创建空闲 HOME；已确认损坏时，候选失败显示“Frame 未就绪”，不得沿用旧的“Frame 有效”文案。
+- session Worker 替换期间若 Chrome generation 在限定时间未就绪，Supervisor 保留 replacement Chrome 并记录可重试的启动失败；后续调和只等待该实例，除非它已退出，不会反复关闭并重开浏览器。
 - `ENABLE_UPSTREAM_WRITES` 与对应的 `ENABLE_SINK_WRITES`、`ENABLE_BLOCK_WRITES`、`ENABLE_MUTE_WRITES`、`ENABLE_UNMUTE_WRITES` 或 `ENABLE_RESTORE_WRITES` 必须同时为 `true` 才会发送对应的已验证请求；默认均关闭。禁言和解除禁言均在写前读取详情核验；写后固定立即回读及 2、5、10 秒补读（总等待不超过 20 秒），不会自动重复写入。解除禁言只在当前游戏处于禁言状态且经二次确认后发送请求。
-- 经认证、CSRF 二次确认的单条人工刷新或处置，以及当前游戏内最多 20 条的沉底/屏蔽批量操作，均可同步使用协调器已登记的插件会话以立即反馈结果；批量中的每条独立回读、审计与幂等确认。Web 不创建、扫描或关闭受协调器管理的 target，不切换游戏、不重建插件、不直接绑定身份。会话不可用时协调器仅创建/复用恢复 Job，页面提示稍后重新确认；恢复后绝不自动重放写入。人工扫码可显式打开固定、无认证登录页，但不读取认证信息或接管会话。
+- 经认证、CSRF 二次确认的单条人工刷新或处置，以及当前游戏内最多 20 条的沉底/屏蔽批量操作，均可同步使用协调器已登记的插件会话以立即反馈结果；批量中的每条独立回读、审计与幂等确认。Web 不创建、扫描或关闭受协调器管理的 target，不切换游戏、不重建插件、不直接绑定身份。会话不可用时协调器仅返回固定未就绪结果；运营人员明确建立 Frame 后重新确认，绝不自动重放写入。人工扫码可显式打开固定、无认证登录页，但不读取认证信息或接管会话。
+
+### 游戏圈会话操作路径
+
+| 触发条件 | 系统操作者 | 运营人员动作 | 预期结果 |
+| --- | --- | --- | --- |
+| 受控 Chrome 被关闭或 session Worker 被替换 | Supervisor 将其视为 session owner 更换：重新启动受控 Chrome，再启动游戏圈会话服务；服务自动建立 HOME 与当前游戏 Frame。 | 无；等待状态从“建立中”收敛。 | 外层会话与 Frame 均有效时，来源任务可继续使用新 lease。 |
+| 外层会话失效、显示“需扫码登录” | 会话服务登记唯一登录等待，不自动创建或聚焦登录页。 | 在“受控 Chrome 会话”点击“打开登录页”，完成扫码。 | 会话服务复用该 HOME 建立 Frame；成功前不会发布 lease。 |
+| 外层有效但 Frame 未就绪 | 会话服务仅投影未就绪，不隐式恢复。 | 点击顶部 Frame 状态或“建立当前游戏 Frame”。 | 建立并最小只读验证成功后，Frame 显示有效。 |
+| 需要确认外层会话 | 会话服务只检查 HOME，不切换游戏、不建立候选 Frame。 | 在“受控 Chrome 会话”点击“检查外层会话”。 | 保留既有 Frame 状态；Frame 已有效时仍提供保活入口。 |
+| 需要主动刷新来源身份 | 游戏圈会话服务消费手动保活 Job，以候选会话执行刷新。 | 在“游戏圈会话服务”点击“保活当前游戏 Frame”。 | 只有新 lease 发布才成功；失败按有限重试记录 Job，旧 lease 继续可用。 |
+| 需要更换业务游戏 | 当前操作游戏节点更新全局 scope，并请求对应 Frame 建立。 | 在“当前操作游戏”选择游戏并点击“切换并建立 Frame”。 | 后续任务使用新 scope；已经开始的 Job 保持其冻结 scope。 |
 
 ### 禁言管理最小验证
 
@@ -79,7 +95,7 @@ uv run python manage.py enqueue_author_mute_status_backfill
 | 现象 | 首先检查 | 恢复方式 |
 | --- | --- | --- |
 | 没有新增帖子 | Pipeline 中游戏圈会话服务、受控 Chrome 会话、Scheduler 与实时采集 Worker 是否运行 | 先恢复游戏圈会话服务与受控 Chrome 登录，再在 Pipeline 重启帖子采集 Worker；停机超过 30 分钟时在“帖子采集 Worker”创建历史补采。 |
-| 顶部“会话”状态胶囊为红色 | 先看文案：`需扫码登录`、`Chrome 未启动` 或 `状态待检查` | 只有“需扫码登录”可点击，并只在受控 Chrome 打开固定公众平台登录页 `/cgi-bin/loginpage` 后手动扫码；其余状态不打开登录页。若 Chrome 未启动，在 Supervisor 中重启“受控 Chrome”服务；不要手工启动浏览器或在工作台浏览器直接登录。 |
+| 顶部“外层会话”或“Frame”状态异常 | 先看文案：`需扫码登录`、`Chrome 未启动`、`Frame 未就绪` 或 `状态待检查` | 只有“需扫码登录”可点击，并只在受控 Chrome 打开固定公众平台登录页后手动扫码；`Frame 未就绪` 使用“建立当前游戏 Frame”，其余状态不打开登录页。若 Chrome 未启动，在 Supervisor 中重启游戏圈会话服务；不要手工启动浏览器或在工作台浏览器直接登录。 |
 | 来源任务提示等待会话刷新 | `game_circle_session` 服务、当前操作游戏和刷新 Job 的脱敏摘要 | 保持该服务运行；它会先从新 HOME 自动重建。仅摘要为“需要人工扫码”时，才在受控 Chrome 中扫码后重新创建/等待刷新任务；不得重放人工写操作。 |
 | 任务长期 `PENDING` | 任务的 `task_type` 与 Pipeline 对应 Worker | 在 Pipeline 启动帖子采集 Worker（会同时启动两个采集服务）或 AI Worker；不要并行启动第二个相同职责实例。 |
 | 任务 `FAILED` | 系统配置与追溯台“后台任务”的脱敏 `error_summary` 与 checkpoint | 修复会话、配置或上游契约后重新入队；不要修改会话字段。 |
@@ -117,5 +133,6 @@ uv run python manage.py enqueue_ingestion --appid wx6d2454a8afcd9706 --hours 6
 
 - [文档中心](../README.md)
 - [系统总览](system-overview.md)
+- [游戏圈会话韧性演练记录（2026-07-23）](session-resilience-drill-2026-07-23.md)
 - [视频审核手册](video-review-runbook.md)
 - [数据库数据字典](../technical/database-schema.md)

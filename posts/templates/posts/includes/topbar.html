@@ -9,7 +9,7 @@
   {% if request.user.is_authenticated %}
   <div class="topbar-actions">
     <form class="cdp-login-status is-checking" data-cdp-login-status method="post" action="{% url 'open-controlled-login' %}" title="正在读取受控微信外层会话状态">{% csrf_token %}<input type="hidden" name="return_to" value="{{ request.get_full_path }}"><button type="submit" disabled aria-live="polite"><span class="cdp-mode">会话</span><i></i><b data-cdp-login-label>检测中</b></button></form>
-    <form class="cdp-frame-status is-checking" data-cdp-frame-status method="post" action="{% url 'enqueue-session-recover' %}" title="正在读取当前操作游戏的来源 Frame 状态">{% csrf_token %}<input type="hidden" name="return_to" value="{{ request.get_full_path }}"><button type="submit" disabled aria-live="polite"><span class="cdp-mode">Frame</span><i></i><b data-cdp-frame-label>检测中</b></button></form>
+    <form class="cdp-frame-status is-checking" data-cdp-frame-status method="post" action="{% url 'build-current-game-frame' %}" title="正在读取当前操作游戏的来源 Frame 状态">{% csrf_token %}<input type="hidden" name="return_to" value="{{ request.get_full_path }}"><button type="submit" disabled aria-live="polite"><span class="cdp-mode">Frame</span><i></i><b data-cdp-frame-label>检测中</b></button></form>
     <div class="account">{{ request.user.username }} <a href="{% url 'admin:logout' %}">退出</a></div>
   </div>
   {% endif %}

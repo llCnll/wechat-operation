@@ -27,6 +27,10 @@ class OuterSessionUnreadyError(GameCircleContractError):
     """A fresh HOME exists but does not expose a usable outer session token."""
 
 
+class GameSelectionError(GameCircleContractError):
+    """The current outer account cannot select a requested managed game."""
+
+
 class ExplicitOuterPage(CdpMpPage):
     """A root-frame executor that connects only to a coordinator-owned target ID."""
 
@@ -166,9 +170,9 @@ class GameCircleOuterAdapter:
         listing = self._wxa_list_response()
         appids = listing.get("appids")
         if not isinstance(appids, list) or appids.count(target_appid) != 1:
-            raise GameCircleContractError("当前受控账号不支持切换至任务游戏")
+            raise GameSelectionError("当前受控账号不支持切换至任务游戏")
         if listing.get("switchPermitted") is not True:
-            raise GameCircleContractError("当前受控账号不允许切换游戏")
+            raise GameSelectionError("当前受控账号不允许切换游戏")
         value = self.page.evaluate(
             """(async (targetAppid) => {
               const token = new URL(window.location.href).searchParams.get('token');
@@ -201,12 +205,19 @@ class GameCircleOuterAdapter:
         if not isinstance(appids, list) or not all(isinstance(appid, str) and appid for appid in appids):
             raise GameCircleContractError("游戏列表结构无效")
         if listing.get("switchPermitted") is not True:
-            raise GameCircleContractError("当前受控账号不允许切换游戏")
+            raise GameSelectionError("当前受控账号不允许切换游戏")
         return appids
 
     def reload_after_game_switch(self) -> None:
-        """Schedule the verified outer-page reload after a successful switch."""
+        """Reload after a switch and discard the navigation-invalidated context.
+
+        The outer page's isolated execution context belongs to the pre-switch
+        document.  It must not be reused for the read-back or token read of the
+        new account; the next adapter call will attach a fresh context to the
+        same explicit HOME target.
+        """
         self.page.evaluate("(() => { window.location.assign('/'); return {scheduled: true}; })()")
+        self.page.close()
 
     def wait_for_current_game(self, target_appid: str, *, timeout_seconds: float = 10) -> None:
         """Wait for the single HOME target to finish its switch-triggered reload."""

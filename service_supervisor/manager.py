@@ -20,6 +20,7 @@ from urllib.parse import parse_qs, urlparse
 import httpx
 import psutil
 
+from config.cdp import CdpBrowser, CdpUnavailableError
 from config.settings import (
     CONTROLLED_CHROME_BIN,
     CONTROLLED_CHROME_DEBUG_PORT,
@@ -54,6 +55,7 @@ CONTROLLABLE_SERVICE_NAMES = ("controlled_chrome", *WORKER_NAMES)
 CONTROL_VERSION = "v1"
 WEB_PORT = 8000
 MAX_LOG_BYTES = 1_000_000
+SESSION_REPLACEMENT_WAITING_FOR_CHROME = "WAITING_FOR_CHROME"
 
 
 class SupervisorError(RuntimeError):
@@ -86,6 +88,7 @@ class Supervisor:
         self._server: ThreadingHTTPServer | None = None
         self._server_thread: threading.Thread | None = None
         self._state_lock = threading.RLock()
+        self._scheduled_restarts: set[str] = set()
         self._stopping = threading.Event()
         self._log_handles: dict[str, Any] = {}
 
@@ -327,11 +330,21 @@ class Supervisor:
 
     def reconcile(self) -> None:
         with self._state_lock:
+            session_owner_reconciled = False
             for service in SERVICE_NAMES:
                 state = self._read_state(service)
                 if state.get("desired") and not self._is_process_current(service, state):
-                    self._terminate(service, state)
-                    self._launch(service, state)
+                    if service == "controlled_chrome" and self._read_state("game_circle_session").get("desired"):
+                        # A new browser generation invalidates every in-memory lease
+                        # owned by the still-running session Worker.  Replacing only
+                        # Chrome would leave that owner unable to publish a new Frame.
+                        self._replace_game_circle_session(self._read_state("game_circle_session"))
+                        session_owner_reconciled = True
+                    elif service == "game_circle_session" and not session_owner_reconciled:
+                        self._replace_game_circle_session(state)
+                    else:
+                        self._terminate(service, state)
+                        self._launch(service, state)
                 if service == "web" and self._is_process_current(
                     service, self._read_state(service)
                 ):
@@ -350,6 +363,7 @@ class Supervisor:
                     "started_at": state.get("started_at"),
                     "exit_code": state.get("exit_code"),
                     "restart_count": state.get("restart_count", 0),
+                    "failure_reason": state.get("failure_reason"),
                     "heartbeat_at": heartbeat.get("at"),
                     "log_path": str(self.store.log_path(service)),
                 }
@@ -363,8 +377,8 @@ class Supervisor:
             return {"service": service, "status": self.status()[service]}
         if action == "logs":
             return {"service": service, "lines": self.logs(service, 80)}
-        if service == "web" and action == "restart":
-            threading.Timer(0.7, self.restart, args=(service,)).start()
+        if service in {"web", "game_circle_session"} and action == "restart":
+            self._schedule_restart(service)
             return {"service": service, "state": "restarting"}
         if action == "start":
             self.start(service)
@@ -378,6 +392,14 @@ class Supervisor:
         if service not in CONTROLLABLE_SERVICE_NAMES:
             raise SupervisorError("Web 只能通过重启操作恢复")
         with self._state_lock:
+            if service == "game_circle_session":
+                # Starting a session service establishes a new paired owner, not
+                # an unverified Worker on whichever Chrome happens to be running.
+                state = self._read_state(service)
+                state["desired"] = True
+                self._write_state(service, state)
+                self._replace_game_circle_session(state)
+                return
             state = self._read_state(service)
             state["desired"] = True
             self._write_state(service, state)
@@ -392,14 +414,81 @@ class Supervisor:
             state["desired"] = False
             self._terminate(service, state)
             self._write_state(service, state)
+            if service == "game_circle_session":
+                chrome_state = self._read_state("controlled_chrome")
+                chrome_state["desired"] = False
+                self._terminate("controlled_chrome", chrome_state)
+                self._write_state("controlled_chrome", chrome_state)
 
     def restart(self, service: str) -> None:
         with self._state_lock:
             state = self._read_state(service)
             state["desired"] = True
-            self._terminate(service, state)
-            self._write_state(service, state)
-            self._launch(service, state)
+            if service == "game_circle_session" or (
+                service == "controlled_chrome" and self._read_state("game_circle_session").get("desired")
+            ):
+                session_state = state if service == "game_circle_session" else self._read_state("game_circle_session")
+                self._replace_game_circle_session(session_state)
+            else:
+                self._terminate(service, state)
+                self._write_state(service, state)
+                self._launch(service, state)
+
+    def _schedule_restart(self, service: str) -> None:
+        """Accept a long restart promptly and collapse duplicate control clicks."""
+        with self._state_lock:
+            if service in self._scheduled_restarts:
+                return
+            self._scheduled_restarts.add(service)
+
+        def run() -> None:
+            try:
+                self.restart(service)
+            finally:
+                with self._state_lock:
+                    self._scheduled_restarts.discard(service)
+
+        threading.Thread(target=run, name=f"supervisor-restart-{service}", daemon=True).start()
+
+    def _replace_game_circle_session(self, session_state: dict) -> bool:
+        """Advance the paired Chrome/session-owner replacement state machine."""
+        session_state["desired"] = True
+        chrome_state = self._read_state("controlled_chrome")
+        chrome_state["desired"] = True
+        if session_state.get("replacement_phase") != SESSION_REPLACEMENT_WAITING_FOR_CHROME:
+            # A new owner must never inherit a Chrome generation.  This is the
+            # one destructive transition; later retries only wait for the same
+            # replacement generation rather than repeatedly closing it.
+            self._terminate("game_circle_session", session_state)
+            self._write_state("game_circle_session", session_state)
+            self._terminate("controlled_chrome", chrome_state)
+            self._write_state("controlled_chrome", chrome_state)
+            self._launch("controlled_chrome", chrome_state)
+            session_state["replacement_phase"] = SESSION_REPLACEMENT_WAITING_FOR_CHROME
+            self._write_state("game_circle_session", session_state)
+        elif not self._is_process_current("controlled_chrome", chrome_state):
+            self._launch("controlled_chrome", chrome_state)
+        try:
+            self._wait_for_chrome_generation()
+        except SupervisorError:
+            session_state["failure_reason"] = "CHROME_START_TIMEOUT"
+            self._write_state("game_circle_session", session_state)
+            return False
+
+        session_state.pop("replacement_phase", None)
+        self._launch("game_circle_session", session_state)
+        return True
+
+    @staticmethod
+    def _wait_for_chrome_generation(timeout_seconds: float = 15) -> str:
+        """Wait for the replacement browser's CDP endpoint before assigning a session owner."""
+        deadline = time.monotonic() + timeout_seconds
+        while time.monotonic() < deadline:
+            try:
+                return CdpBrowser(timeout=1).browser_generation()
+            except CdpUnavailableError:
+                time.sleep(0.2)
+        raise SupervisorError("受控 Chrome 未在限定时间内就绪")
 
     def logs(self, service: str, lines: int) -> list[str]:
         if service not in SERVICE_NAMES:
@@ -457,6 +546,7 @@ class Supervisor:
                 "restart_count": int(state.get("restart_count", 0)) + 1,
             }
         )
+        state.pop("failure_reason", None)
         self._write_state(service, state)
 
     def _terminate(self, service: str, state: dict) -> None:

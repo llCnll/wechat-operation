@@ -46,11 +46,20 @@ def test_admin_home_is_configuration_and_traceability_console(admin_client):
     assert "受控 Chrome" in page
     assert "游戏圈会话服务" in page
     assert "受控 Chrome 会话" in page
-    assert "保活 Frame" in page
-    assert "检查会话" in page
-    assert "切换游戏" in page
-    assert "同步目录" in page
+    assert "保活当前游戏 Frame" in page
+    assert "检查外层会话" in page
+    assert "更换操作游戏" in page
+    assert "刷新可管理游戏目录" in page
+    assert 'action="/admin/runtime/game-catalog/sync/"' in page
     assert "受控同步" not in page
+    active_start = page.index(">当前操作游戏<")
+    active_end = page.index(">受控 Chrome<", active_start)
+    active_node = page[active_start:active_end]
+    assert 'action="/admin/runtime/active-game/"' in active_node
+    assert 'action="/admin/runtime/game-catalog/sync/"' in active_node
+    assert 'action="/admin/runtime/session-keepalive/"' not in active_node
+    assert 'action="/admin/runtime/session-check/"' not in active_node
+    assert "会话自动维护" not in active_node
     assert "自动调度器" in page
     assert "帖子采集 Worker" in page
     assert "指标快照 Worker" in page
@@ -311,6 +320,9 @@ def test_runtime_configuration_view_turns_missing_write_switches_off(admin_clien
     assert saved["AI_MODEL"] == "test-model"
     assert saved["ENABLE_BLOCK_WRITES"] == "false"
     assert saved["ENABLE_MUTE_WRITES"] == "false"
+    response_messages = " ".join(str(message) for message in get_messages(response.wsgi_request))
+    assert "Web 服务" in response_messages
+    assert "web" not in response_messages
 
 
 @pytest.mark.django_db

@@ -1,6 +1,7 @@
 import pytest
 from django.contrib.auth.models import User
 
+from config.game_circle_ipc import GameCircleIpcError
 from jobs.models import BackgroundJob
 from posts.game_catalog import (
     active_game_appid,
@@ -84,7 +85,7 @@ def test_execution_scope_rejects_a_compatibility_appid_outside_current_scope():
         resolve_execution_scope(job)
 
 
-def test_staff_scope_change_probe_and_frame_recover_only_enqueue_jobs(client):
+def test_staff_scope_change_uses_explicit_session_controls_and_only_manual_keepalive_is_queued(client):
     first = _game("game-first")
     second = _game("game-second")
     user = User.objects.create(username="operator", is_staff=True, is_superuser=True)
@@ -92,9 +93,8 @@ def test_staff_scope_change_probe_and_frame_recover_only_enqueue_jobs(client):
 
     response = client.post("/admin/runtime/active-game/", {"appid": first.appid, "return_to": "/admin/"})
     keepalive = client.post("/admin/runtime/session-keepalive/", {"return_to": "/admin/"})
-    probe = client.post("/admin/runtime/login-probe/", {"return_to": "/admin/"})
-    BackgroundJob.objects.filter(task_type="GAME_CIRCLE_SESSION_REFRESH").update(status="SUCCEEDED")
-    recover = client.post("/admin/runtime/session-recover/", {"return_to": "/admin/"})
+    probe = client.post("/admin/runtime/session-check/", {"return_to": "/admin/"})
+    recover = client.post("/admin/runtime/current-game-frame/", {"return_to": "/admin/"})
     switched = client.post("/admin/runtime/active-game/", {"appid": second.appid, "return_to": "/admin/"})
 
     assert response.status_code == 302
@@ -103,19 +103,41 @@ def test_staff_scope_change_probe_and_frame_recover_only_enqueue_jobs(client):
     assert recover.status_code == 302
     assert switched.status_code == 302
     assert ActiveGameScope.objects.get().active_appid == second.appid
-    assert BackgroundJob.objects.filter(
-        task_type="GAME_CIRCLE_LOGIN_PROBE", parameter_summary={"source": "manual"}
-    ).count() == 1
-    refresh_jobs = BackgroundJob.objects.filter(task_type="GAME_CIRCLE_SESSION_REFRESH")
-    assert refresh_jobs.count() == 4
-    assert refresh_jobs.filter(parameter_summary={"refresh_mode": "KEEPALIVE"}).count() == 1
-    assert refresh_jobs.filter(parameter_summary={"refresh_mode": "RECOVER"}).count() == 3
-    assert {
-        tuple(job.checkpoint["execution_scope"].items()) for job in refresh_jobs
-    } == {
-        tuple({"target_appid": first.appid, "scope_version": 1}.items()),
-        tuple({"target_appid": second.appid, "scope_version": 2}.items()),
-    }
+    keepalive_jobs = BackgroundJob.objects.filter(task_type="GAME_CIRCLE_SESSION_KEEPALIVE")
+    assert keepalive_jobs.count() == 1
+    assert keepalive_jobs.get().parameter_summary == {"trigger": "manual"}
+    assert keepalive_jobs.get().checkpoint == {}
+    assert BackgroundJob.objects.count() == 1
+
+
+def test_staff_catalog_sync_uses_the_session_backed_catalog_service(client, monkeypatch):
+    user = User.objects.create(username="catalog-operator", is_staff=True, is_superuser=True)
+    client.force_login(user)
+    calls = []
+    monkeypatch.setattr(
+        "config.supervisor_views.sync_authorized_managed_games",
+        lambda: calls.append("sync") or 2,
+    )
+
+    response = client.post("/admin/runtime/game-catalog/sync/", {"return_to": "/admin/"}, follow=True)
+
+    assert calls == ["sync"]
+    assert "已同步 2 个可管理游戏。" in response.content.decode()
+
+
+def test_staff_catalog_sync_preserves_existing_catalog_on_session_failure(client, monkeypatch):
+    _game("catalog-existing")
+    user = User.objects.create(username="catalog-failure-operator", is_staff=True, is_superuser=True)
+    client.force_login(user)
+
+    def unavailable():
+        raise GameCircleIpcError("SESSION_UNAVAILABLE", "当前游戏 Frame 尚未就绪")
+
+    monkeypatch.setattr("config.supervisor_views.sync_authorized_managed_games", unavailable)
+    response = client.post("/admin/runtime/game-catalog/sync/", {"return_to": "/admin/"}, follow=True)
+
+    assert "同步可管理游戏失败，已保留本地目录。" in response.content.decode()
+    assert ManagedGame.objects.filter(appid="catalog-existing").exists()
 
 
 def test_direct_post_source_access_rejects_a_different_active_game():

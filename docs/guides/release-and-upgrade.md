@@ -110,6 +110,14 @@ uv run python manage.py upgrade_plan --json
 
 当发布新增或调整游戏圈会话 IPC、`GameCircleLoginRuntimeState` 或 `game_circle_session` 的常驻职责时，必须声明 `database=migrate`（如有迁移）和 `restart.mode=supervisor`。会话服务重启会主动丢弃内存中的短期 lease/Access 并重新探测；升级过程不得复制 `runtime/supervisor/game-circle-session.json`、Cookie、token 或未完成的人工写请求。人工写审计为“待回读确认”时，先回读确认状态，绝不自动重放。
 
+本变更移除旧 `GAME_CIRCLE_LOGIN_PROBE` 和 `GAME_CIRCLE_SESSION_REFRESH` consumer。升级时，先停止旧 Supervisor/会话 Worker，完成迁移并启动新代码前运行一次：
+
+```powershell
+uv run python manage.py terminalize_legacy_game_circle_session_jobs
+```
+
+该命令会取得旧 Worker 的同一任务锁；锁仍被占用时会拒绝执行。它只把活动旧 Job 标为 `RELEASED_LEGACY_SESSION_JOB`，保留参数、checkpoint 和审计记录；可重复执行。随后重启 Supervisor，由新会话服务启动 Chrome、建立外层会话与当前游戏 Frame。最小验证：在 `/admin/` 确认外层会话与 Frame 分别显示正确状态，并对一个非写入来源读取确认无 lease 时不会创建浏览器 tab。
+
 完成后，以计划的 `to_version` 运行确认命令，并且只传入计划实际要求的 `--confirm-*` 参数：
 
 ```bash

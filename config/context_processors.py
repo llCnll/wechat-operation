@@ -112,18 +112,14 @@ def admin_console_overview(request):
         services.setdefault(name, {"running": False, "desired": False})
     from posts.models import GameCircleLoginRuntimeState
     login_state = GameCircleLoginRuntimeState.objects.filter(pk=1).first()
-    stale_login_state = (
-        login_state is None
-        or login_state.checked_at is None
-        or login_state.checked_at < timezone.now() - timedelta(minutes=10)
-    )
+    stale_login_state = login_state is None or login_state.checked_at is None or login_state.checked_at < timezone.now() - timedelta(minutes=10)
     chrome_service_running = bool(services["controlled_chrome"]["running"])
     session_service_running = bool(services["game_circle_session"]["running"])
     controlled_chrome_ready = bool(
         chrome_service_running
         and session_service_running
         and not stale_login_state
-        and login_state.login_state == GameCircleLoginRuntimeState.LoginState.READY
+        and login_state.frame_state == GameCircleLoginRuntimeState.FrameState.READY
     )
     controlled_chrome_reason = (
         "受控 Chrome 服务未运行"
@@ -132,9 +128,12 @@ def admin_console_overview(request):
             "游戏圈会话服务未运行，暂不能检查"
             if not session_service_running
             else (
-                "已检测到有效的受控微信外层会话"
+                "外层会话和当前游戏 Frame 均有效"
                 if controlled_chrome_ready
-                else "状态待检查" if stale_login_state else "需要人工扫码或检查受控 Chrome"
+                else (
+                    "状态待检查" if stale_login_state
+                    else f"外层：{login_state.get_outer_state_display()}；Frame：{login_state.get_frame_state_display()}"
+                )
             )
         )
     )
@@ -200,9 +199,9 @@ def admin_console_overview(request):
             "active_game_scope",
             "当前操作游戏",
             active_scope is not None,
-            "同步目录并选择操作游戏",
+            "同步可管理游戏并选择操作游戏",
             (
-                f"当前：{active_scope.active_game.name} · 范围版本 {active_scope.scope_version}；后续任务将固定此游戏"
+                f"当前：{active_scope.active_game.name}；后续任务将固定此游戏"
                 if active_scope
                 else "尚未选择操作游戏；不会创建或执行来源任务"
             ),
@@ -459,6 +458,8 @@ def _service_reason(service: dict) -> str:
             if heartbeat
             else "运行中；尚未写入心跳"
         )
+    elif service.get("failure_reason") == "CHROME_START_TIMEOUT":
+        state = "受控 Chrome 未在限定时间内就绪；Supervisor 将继续重试"
     elif service.get("exit_code") is not None:
         state = f"未运行；最近退出码 {service['exit_code']}"
     else:

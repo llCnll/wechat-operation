@@ -1,17 +1,14 @@
-from datetime import UTC, timedelta
+from datetime import timedelta
 
 from django.contrib import admin
 from django.http import JsonResponse
 from django.urls import path
 from django.utils import timezone
-from django.utils.dateparse import parse_datetime
 
 from config import supervisor_views
-from config.settings import RUNTIME_DIR
 from posts import views as post_views
-from posts.models import ActiveGameScope, GameCircleLoginRuntimeState
+from posts.models import GameCircleLoginRuntimeState
 from reporting import views as reporting_views
-from service_supervisor.runtime import RuntimeStore
 
 admin.site.site_header = "游戏圈运营"
 admin.site.site_title = "系统配置"
@@ -23,44 +20,8 @@ def health_check(request):
     return JsonResponse({"status": "ok"})
 
 
-def _frame_status() -> tuple[bool, str, str]:
-    """Read the current game's lease from local, credential-free runtime state only."""
-    scope = ActiveGameScope.objects.filter(pk=1).only("active_game").first()
-    if scope is None:
-        return False, "NO_ACTIVE_SCOPE", "尚未配置当前操作游戏"
-
-    store = RuntimeStore(RUNTIME_DIR)
-    try:
-        heartbeat = store.read_json(store.heartbeat_path("game_circle_session"), {})
-    except OSError:
-        return False, "SERVICE_UNAVAILABLE", "游戏圈会话服务状态暂不可读取"
-    checked_at = parse_datetime(heartbeat.get("at", "")) if isinstance(heartbeat, dict) else None
-    if checked_at is None:
-        return False, "SERVICE_UNAVAILABLE", "游戏圈会话服务未运行"
-    if timezone.is_naive(checked_at):
-        checked_at = timezone.make_aware(checked_at, UTC)
-    if checked_at < timezone.now() - timedelta(minutes=1):
-        return False, "SERVICE_UNAVAILABLE", "游戏圈会话服务未运行"
-
-    try:
-        projection = store.read_json(store.game_circle_session_path, {})
-    except OSError:
-        return False, "SERVICE_UNAVAILABLE", "游戏圈会话服务状态暂不可读取"
-    leases = projection.get("leases", []) if isinstance(projection, dict) else []
-    if any(
-        isinstance(lease, dict)
-        and lease.get("appid") == scope.active_appid
-        and lease.get("state") == "ACTIVE"
-        for lease in leases
-    ):
-        return True, "READY", "当前操作游戏的来源 Frame 已就绪"
-    return False, "NOT_READY", "当前操作游戏尚无可用来源 Frame"
-
-
 def browser_login_status(request):
     state = GameCircleLoginRuntimeState.objects.filter(pk=1).first()
-    frame_valid, frame_state, frame_reason = _frame_status()
-    frame_can_recover = frame_state == "NOT_READY"
     stale = state is None or state.checked_at is None or state.checked_at < timezone.now() - timedelta(minutes=10)
     if stale:
         return JsonResponse(
@@ -69,29 +30,31 @@ def browser_login_status(request):
                 "can_open_login": False,
                 "reason": "状态待检查",
                 "state": "UNKNOWN",
-                "frame_valid": frame_valid,
-                "frame_state": frame_state,
-                "frame_reason": frame_reason,
-                "frame_can_recover": frame_can_recover,
+                "outer_state": "UNKNOWN",
+                "frame_state": "UNKNOWN",
+                "frame_valid": False,
+                "frame_can_recover": False,
             }
         )
-    valid = state.login_state == GameCircleLoginRuntimeState.LoginState.READY
+    valid = state.outer_state == GameCircleLoginRuntimeState.OuterState.OUTER_READY
     reasons = {
-        GameCircleLoginRuntimeState.LoginState.READY: "已检测到有效的受控微信外层会话",
-        GameCircleLoginRuntimeState.LoginState.SCAN_REQUIRED: "微信页面等待扫码登录",
-        GameCircleLoginRuntimeState.LoginState.UNAVAILABLE: "受控 Chrome 未启动",
+        GameCircleLoginRuntimeState.OuterState.OUTER_READY: "已检测到有效的受控微信外层会话",
+        GameCircleLoginRuntimeState.OuterState.LOGIN_PENDING: "微信页面等待扫码登录",
+        GameCircleLoginRuntimeState.OuterState.BROWSER_UNAVAILABLE: "受控 Chrome 未启动",
     }
     return JsonResponse(
         {
             "valid": valid,
-            "can_open_login": state.login_state
-            == GameCircleLoginRuntimeState.LoginState.SCAN_REQUIRED,
-            "reason": reasons.get(state.login_state, "状态待检查"),
-            "state": state.login_state,
-            "frame_valid": frame_valid,
-            "frame_state": frame_state,
-            "frame_reason": frame_reason,
-            "frame_can_recover": frame_can_recover,
+            "can_open_login": GameCircleLoginRuntimeState.Action.OPEN_LOGIN in (state.available_actions or []),
+            "reason": reasons.get(state.outer_state, "状态待检查"),
+            "state": state.outer_state,
+            "outer_state": state.outer_state,
+            "frame_valid": state.frame_state == GameCircleLoginRuntimeState.FrameState.READY,
+            "frame_state": state.frame_state,
+            "frame_reason": state.get_error_category_display(),
+            "frame_can_recover": GameCircleLoginRuntimeState.Action.BUILD_FRAME in (state.available_actions or []),
+            "available_actions": state.available_actions,
+            "login_wait_until": state.login_wait_until.isoformat() if state.login_wait_until else None,
         }
     )
 
@@ -126,19 +89,24 @@ urlpatterns = [
         name="set-active-game-scope",
     ),
     path(
-        "admin/runtime/login-probe/",
-        supervisor_views.enqueue_login_probe_request,
-        name="enqueue-login-probe",
+        "admin/runtime/session-check/",
+        supervisor_views.check_outer_session,
+        name="check-outer-session",
     ),
     path(
-        "admin/runtime/session-recover/",
-        supervisor_views.enqueue_session_recover_request,
-        name="enqueue-session-recover",
+        "admin/runtime/current-game-frame/",
+        supervisor_views.build_current_game_frame,
+        name="build-current-game-frame",
     ),
     path(
         "admin/runtime/session-keepalive/",
         supervisor_views.enqueue_session_keepalive_request,
         name="enqueue-session-keepalive",
+    ),
+    path(
+        "admin/runtime/game-catalog/sync/",
+        supervisor_views.sync_managed_game_catalog,
+        name="sync-managed-game-catalog",
     ),
     path(
         "admin/runtime/configuration/",

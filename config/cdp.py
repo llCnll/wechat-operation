@@ -57,10 +57,12 @@ class CdpBrowser:
             raise CdpBrowserUnavailableError("受控 Chrome CDP 未返回浏览器标识")
         return sha256(websocket_url.encode()).hexdigest()[:24]
 
-    def create_target(self, url: str) -> str:
+    def create_target(self, url: str, *, background: bool = False) -> str:
         if not isinstance(url, str) or not url.startswith("https://mp.weixin.qq.com/"):
             raise CdpTargetUnavailableError("不允许创建非受控公众平台 target")
-        target_id = self._browser_command("Target.createTarget", {"url": url}).get("targetId", "")
+        target_id = self._browser_command(
+            "Target.createTarget", {"url": url, "background": background}
+        ).get("targetId", "")
         if not isinstance(target_id, str) or not target_id:
             raise CdpTargetUnavailableError("受控 Chrome 未返回新 target")
         return target_id
@@ -71,6 +73,12 @@ class CdpBrowser:
         result = self._browser_command("Target.closeTarget", {"targetId": target_id})
         if result.get("success") is not True:
             raise CdpTargetUnavailableError("受控 Chrome target 未确认关闭")
+
+    def activate_target(self, target_id: str) -> None:
+        """Make an explicitly operator-requested target visible."""
+        if not target_id:
+            raise CdpTargetUnavailableError("受控 Chrome target 无效")
+        self._browser_command("Target.activateTarget", {"targetId": target_id})
 
     def target_exists(self, target_id: str) -> bool:
         if not target_id:

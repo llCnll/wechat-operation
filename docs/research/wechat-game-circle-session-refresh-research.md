@@ -73,6 +73,8 @@ https://gamemp.weixin.qq.com/cgi-bin/gamewxagsettingwap/getappinfo
 
 受控页面的静态代码与受控实验均表明：外层目录请求返回可切换 AppID 集合与 `account_switch_permit`；切换请求使用外层运行时 token，提交目标 `appid`，业务成功后 HOME 会重载。测试中从当前游戏直接切到目标游戏后，最终 HOME 能重新读取 token，创建最终插件并完成绑定和只读查询。
 
+HOME 重载会使重载前 CDP 隔离执行上下文失效，但不会改变该受管 HOME target 的所有权。后续 AppID 回读和 token 读取必须在同一 HOME 上重新建立上下文；若复用旧上下文，首次 `A → B` 会在回读阶段失败并关闭候选，重试又从已切换的 B 开始，形成 `A → B`、`B → A` 却始终无法建立目标 Frame 的假性 target 故障。释放旧上下文后，`A → B → A` 可在同一候选 HOME 内完成并继续创建目标 Frame。
+
 结论：`RECOVER` 或当前不在目标游戏的 `KEEPALIVE`，仅允许目录中目标 AppID 唯一存在、平台许可后直接切到目标一次。当前已在目标游戏的 `KEEPALIVE`，从目录/许可内所有非目标游戏中随机选择中转 B，再执行 `A → B → A`。目录缺少目标、中转候选为空、许可缺失、切换失败或每次切换后的回读不一致都不得发布 lease。不得依据切换面板 DOM 或列表顺序做回退。
 
 ## 失败边界

@@ -1,6 +1,6 @@
 import pytest
 
-from config.runtime_config import affected_services, public_runtime_config, update_runtime_config
+from config.runtime_config import affected_services, display_service_names, public_runtime_config, update_runtime_config
 
 
 def test_runtime_configuration_preserves_blank_secrets(tmp_path):
@@ -52,6 +52,17 @@ def test_runtime_configuration_maps_restarts_to_affected_services():
     assert affected_services({"AI_MODEL"}) == {"review"}
     assert affected_services({"ENABLE_BLOCK_WRITES"}) == {"web", "ai_moderation"}
     assert affected_services({"ENABLE_AI_SINK_WRITES"}) == {"web", "ai_moderation"}
+    assert affected_services({"SESSION_REPAIR_ENABLED"}) == {"game_circle_session", "scheduler"}
+    assert affected_services({"SESSION_KEEPALIVE_ENABLED"}) == {"game_circle_session", "scheduler"}
+
+
+def test_runtime_configuration_displays_affected_services_with_console_labels():
+    assert display_service_names({"web", "scheduler", "game_circle_session", "ai_moderation"}) == [
+        "AI 自动处置 Worker",
+        "游戏圈会话服务",
+        "自动调度器",
+        "Web 服务",
+    ]
 
 
 def test_runtime_configuration_explicitly_disables_unchecked_write_switches(tmp_path):

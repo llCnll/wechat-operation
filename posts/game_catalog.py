@@ -182,3 +182,13 @@ def sync_managed_games(games: Iterable[ManagedGameDTO]) -> int:
         raise ValueError("游戏列表响应中没有有效游戏")
     initialize_active_game_scope()
     return count
+
+
+def sync_authorized_managed_games() -> int:
+    """Refresh the local catalogue through the fixed session-service IPC intent."""
+    # This local import avoids making the catalog model layer initialise the IPC
+    # module during Django app loading.
+    from config.game_circle_ipc import GameCircleIpcClient
+
+    items = GameCircleIpcClient().list_managed_games()
+    return sync_managed_games(ManagedGameDTO(**item) for item in items)

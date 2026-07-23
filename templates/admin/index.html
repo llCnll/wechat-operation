@@ -37,7 +37,7 @@
       <div class="console-pipeline-node-heading">
         <div class="console-pipeline-node-state">
           <span class="console-pipeline-node-step">{{ forloop.counter|stringformat:"02d" }}</span>
-          <span>{% if node.ready %}已就绪{% elif node.optional %}可选{% else %}待处理{% endif %}</span>
+          <span>{% if node.key == "active_game_scope" %}{% if node.ready %}已配置{% else %}待选择{% endif %}{% elif node.ready %}已就绪{% elif node.optional %}可选{% else %}待处理{% endif %}</span>
         </div>
         <div class="console-pipeline-node-indicators">
           <i aria-hidden="true"></i>
@@ -48,10 +48,10 @@
       </div>
       <strong>{{ node.label }}</strong>
       <small>{{ node.reason }}</small>
-      <span class="console-pipeline-node-check">
+      {% if node.key != "active_game_scope" %}<span class="console-pipeline-node-check">
         <span>检测 {{ node.checked_at|date:"Y-m-d H:i:s" }}</span>
         <span>下一步：{{ node.next_step }}</span>
-      </span>
+      </span>{% endif %}
       {% if node.key == "ai" %}
       <button type="button" data-config-dialog="ai" aria-haspopup="dialog">配置 AI 审核</button>
       {% elif node.key == "ocr" %}
@@ -73,17 +73,18 @@
       <a href="{% url 'admin:reviews_policyversion_changelist' %}">管理策略</a>
       {% elif node.key == "controlled_chrome_session" %}
       {% if node.session_service_running %}
-      <form method="post" action="{% url 'open-controlled-login' %}">{% csrf_token %}<input type="hidden" name="return_to" value="/admin/"><button type="submit">打开登录页</button></form>
+      <div class="console-service-actions">
+        <form method="post" action="{% url 'open-controlled-login' %}">{% csrf_token %}<input type="hidden" name="return_to" value="/admin/"><button type="submit">打开登录页</button></form>
+        <form method="post" action="{% url 'check-outer-session' %}">{% csrf_token %}<input type="hidden" name="return_to" value="/admin/"><button class="is-quiet" type="submit">检查外层会话</button></form>
+      </div>
       {% endif %}
       {% elif node.key == "active_game_scope" %}
       <div class="console-active-game-actions">
         <details class="console-active-game-switch" {% if not admin_console.active_game_scope %}open{% endif %}>
-          <summary>切换游戏</summary>
-          <form method="post" action="{% url 'set-active-game-scope' %}">{% csrf_token %}<input type="hidden" name="return_to" value="/admin/"><label>操作游戏<select name="appid" required>{% for game in admin_console.manual_ingestion_games %}<option value="{{ game.appid }}" {% if game.appid == admin_console.manual_ingestion_default_appid %}selected{% endif %}>{{ game.name }}</option>{% endfor %}</select></label><button type="submit">切换并刷新 Frame</button></form>
+          <summary>更换操作游戏</summary>
+          <form method="post" action="{% url 'set-active-game-scope' %}">{% csrf_token %}<input type="hidden" name="return_to" value="/admin/"><label>操作游戏<select name="appid" required>{% for game in admin_console.manual_ingestion_games %}<option value="{{ game.appid }}" {% if game.appid == admin_console.manual_ingestion_default_appid %}selected{% endif %}>{{ game.name }}</option>{% endfor %}</select></label><button type="submit">切换并建立 Frame</button></form>
+          <form method="post" action="{% url 'sync-managed-game-catalog' %}">{% csrf_token %}<input type="hidden" name="return_to" value="/admin/"><button class="is-quiet" type="submit">刷新可管理游戏目录</button></form>
         </details>
-        <form method="post" action="{% url 'enqueue-session-keepalive' %}">{% csrf_token %}<input type="hidden" name="return_to" value="/admin/"><button type="submit">保活 Frame</button></form>
-        <form method="post" action="{% url 'enqueue-login-probe' %}">{% csrf_token %}<input type="hidden" name="return_to" value="/admin/"><button class="is-quiet" type="submit">检查会话</button></form>
-        <a class="is-quiet" href="{% url 'admin:posts_managedgame_changelist' %}">同步目录</a>
       </div>
       {% elif node.key == "ingestion" %}
       <details class="console-ingestion-details" {% if not node.ready %}open{% endif %}>
@@ -119,6 +120,12 @@
         {% endif %}
         <button class="is-quiet" type="button" data-supervisor-logs="{% url 'supervisor-service-logs' service=node.service %}" data-supervisor-log-label="{{ node.label }}">日志</button>
       </div>
+      {% if node.key == "game_circle_session" %}
+      <div class="console-service-actions">
+        <form method="post" action="{% url 'enqueue-session-keepalive' %}">{% csrf_token %}<input type="hidden" name="return_to" value="/admin/"><button type="submit">保活当前游戏 Frame</button></form>
+        <details class="console-active-game-switch"><summary>可选自动维护</summary><form method="post" action="{% url 'save-runtime-configuration' %}">{% csrf_token %}<input type="hidden" name="return_to" value="/admin/"><input type="hidden" name="config_scope" value="session_maintenance"><label><input name="SESSION_REPAIR_ENABLED" type="checkbox" value="true" {% if admin_console.runtime_config.session_repair_enabled == "true" %}checked{% endif %}> 自动修复 Frame</label><label><input name="SESSION_KEEPALIVE_ENABLED" type="checkbox" value="true" {% if admin_console.runtime_config.session_keepalive_enabled == "true" %}checked{% endif %}> 每四小时自动保活</label><button class="is-quiet" type="submit">保存维护设置</button></form></details>
+      </div>
+      {% endif %}
       {% endif %}
     </article>
     {% endfor %}

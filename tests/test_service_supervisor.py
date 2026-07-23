@@ -90,11 +90,80 @@ def test_reconcile_replaces_a_recorded_process_when_its_fixed_command_changes(
     monkeypatch.setattr(
         supervisor, "_launch", lambda service, received: calls.append(("launch", service, received))
     )
+    monkeypatch.setattr(supervisor, "_wait_for_chrome_generation", lambda: "test-generation")
 
     supervisor.reconcile()
 
     assert ("terminate", "ingestion", state) in calls
     assert ("launch", "ingestion", state) in calls
+
+
+def test_reconcile_replaces_session_owner_when_controlled_chrome_is_lost(tmp_path, monkeypatch):
+    supervisor = Supervisor(Path.cwd(), tmp_path)
+    states = {
+        service: {"desired": False}
+        for service in (
+            "controlled_chrome", "web", "scheduler", "game_circle_session", "ingestion",
+            "backfill_ingestion", "metric_sync", "review", "video_extraction", "ai_moderation",
+        )
+    }
+    states["controlled_chrome"] = {"desired": True, "pid": 101, "created_at": 1}
+    states["game_circle_session"] = {"desired": True, "pid": 102, "created_at": 1}
+    current = {"controlled_chrome": False, "game_circle_session": True}
+    calls = []
+
+    monkeypatch.setattr(supervisor, "_read_state", lambda service: states[service])
+    monkeypatch.setattr(supervisor, "_is_process_current", lambda service, _state: current.get(service, False))
+
+    def replace(state):
+        calls.append(state)
+        current["controlled_chrome"] = True
+        current["game_circle_session"] = True
+
+    monkeypatch.setattr(supervisor, "_replace_game_circle_session", replace)
+
+    supervisor.reconcile()
+
+    assert calls == [states["game_circle_session"]]
+
+
+def test_controlled_chrome_restart_replaces_session_owner_when_session_is_desired(tmp_path, monkeypatch):
+    supervisor = Supervisor(Path.cwd(), tmp_path)
+    states = {
+        "controlled_chrome": {"desired": True, "pid": 101, "created_at": 1},
+        "game_circle_session": {"desired": True, "pid": 102, "created_at": 1},
+    }
+    calls = []
+    monkeypatch.setattr(supervisor, "_read_state", lambda service: states[service])
+    monkeypatch.setattr(supervisor, "_replace_game_circle_session", lambda state: calls.append(state))
+
+    supervisor.restart("controlled_chrome")
+
+    assert calls == [states["game_circle_session"]]
+
+
+def test_session_restart_is_submitted_asynchronously(tmp_path, monkeypatch):
+    supervisor = Supervisor(Path.cwd(), tmp_path)
+    calls = []
+    monkeypatch.setattr(supervisor, "_schedule_restart", lambda service: calls.append(service))
+
+    result = supervisor.control("game_circle_session", "restart")
+
+    assert result == {"service": "game_circle_session", "state": "restarting"}
+    assert calls == ["game_circle_session"]
+
+
+def test_starting_session_service_uses_the_paired_owner_replacement(tmp_path, monkeypatch):
+    supervisor = Supervisor(Path.cwd(), tmp_path)
+    state = {"desired": False}
+    calls = []
+    monkeypatch.setattr(supervisor, "_read_state", lambda _service: state)
+    monkeypatch.setattr(supervisor, "_write_state", lambda service, received: calls.append(("write", service, received["desired"])))
+    monkeypatch.setattr(supervisor, "_replace_game_circle_session", lambda received: calls.append(("replace", received["desired"])))
+
+    supervisor.start("game_circle_session")
+
+    assert calls == [("write", "game_circle_session", True), ("replace", True)]
 
 
 def test_controlled_chrome_uses_fixed_loopback_debugging_and_dedicated_profile(tmp_path, monkeypatch):
@@ -125,3 +194,60 @@ def test_controlled_chrome_is_started_as_a_default_supervisor_dependency(tmp_pat
 
     assert supervisor._read_state("controlled_chrome")["desired"] is True
     assert calls == ["reconcile"]
+
+
+def test_replacing_game_circle_session_retires_chrome_generation_first(tmp_path, monkeypatch):
+    supervisor = Supervisor(Path.cwd(), tmp_path)
+    states = {
+        "game_circle_session": {"desired": True, "pid": 101, "created_at": 1},
+        "controlled_chrome": {"desired": True, "pid": 102, "created_at": 1},
+    }
+    calls = []
+
+    monkeypatch.setattr(supervisor, "_read_state", lambda service: states[service])
+    monkeypatch.setattr(supervisor, "_write_state", lambda service, state: calls.append(("write", service)))
+    monkeypatch.setattr(supervisor, "_terminate", lambda service, state: calls.append(("terminate", service)))
+    monkeypatch.setattr(supervisor, "_launch", lambda service, state: calls.append(("launch", service)))
+    monkeypatch.setattr(supervisor, "_wait_for_chrome_generation", lambda: "new-generation")
+
+    supervisor._replace_game_circle_session(states["game_circle_session"])
+
+    assert calls == [
+        ("terminate", "game_circle_session"),
+        ("write", "game_circle_session"),
+        ("terminate", "controlled_chrome"),
+        ("write", "controlled_chrome"),
+        ("launch", "controlled_chrome"),
+        ("write", "game_circle_session"),
+        ("launch", "game_circle_session"),
+    ]
+
+
+def test_chrome_start_timeout_keeps_the_replacement_generation_for_the_next_reconcile(tmp_path, monkeypatch):
+    supervisor = Supervisor(Path.cwd(), tmp_path)
+    states = {
+        "game_circle_session": {"desired": True, "pid": 101, "created_at": 1},
+        "controlled_chrome": {"desired": True, "pid": 102, "created_at": 1},
+    }
+    calls = []
+    readiness = iter((SupervisorError("not ready"), "generation"))
+
+    monkeypatch.setattr(supervisor, "_read_state", lambda service: states[service])
+    monkeypatch.setattr(supervisor, "_write_state", lambda service, state: calls.append(("write", service)))
+    monkeypatch.setattr(supervisor, "_terminate", lambda service, state: calls.append(("terminate", service)))
+    monkeypatch.setattr(supervisor, "_launch", lambda service, state: calls.append(("launch", service)))
+    def wait_for_chrome_generation():
+        outcome = next(readiness)
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
+
+    monkeypatch.setattr(supervisor, "_wait_for_chrome_generation", wait_for_chrome_generation)
+    monkeypatch.setattr(supervisor, "_is_process_current", lambda service, _state: service == "controlled_chrome")
+
+    assert supervisor._replace_game_circle_session(states["game_circle_session"]) is False
+    assert supervisor._replace_game_circle_session(states["game_circle_session"]) is True
+
+    assert calls.count(("terminate", "controlled_chrome")) == 1
+    assert calls.count(("launch", "controlled_chrome")) == 1
+    assert calls.count(("launch", "game_circle_session")) == 1

@@ -11,16 +11,11 @@ from django.shortcuts import redirect
 from django.utils import timezone
 from django.views.decorators.http import require_GET, require_POST
 
-from config.runtime_config import affected_services, update_runtime_config
+from config.runtime_config import affected_services, display_service_names, update_runtime_config
 from config.supervisor import SupervisorClient, SupervisorUnavailableError
-from jobs.game_circle_refresh import (
-    REFRESH_KEEPALIVE,
-    REFRESH_RECOVER,
-    enqueue_login_probe,
-    enqueue_session_refresh,
-)
-from posts.game_catalog import active_game_appid
-from posts.game_catalog import set_active_game
+from config.game_circle_ipc import GameCircleIpcClient, GameCircleIpcError
+from jobs.game_circle_keepalive import enqueue_keepalive
+from posts.game_catalog import active_game_appid, set_active_game, sync_authorized_managed_games
 from posts.ingestion_jobs import SHANGHAI, enqueue_manual_ingestion_window
 from posts.models import ManagedGame
 
@@ -117,38 +112,35 @@ def set_active_game_scope(request):
     appid = request.POST.get("appid", "").strip()
     try:
         scope = set_active_game(appid=appid, updated_by=request.user)
-        refresh = enqueue_session_refresh(refresh_mode=REFRESH_RECOVER)
-    except ValueError as exc:
+        GameCircleIpcClient().call("BUILD_CURRENT_GAME_FRAME")
+    except (ValueError, GameCircleIpcError) as exc:
         messages.error(request, str(exc))
     else:
-        outcome = "已创建" if refresh.created else "已复用"
-        messages.success(request, f"当前操作游戏已更新（范围版本 {scope.scope_version}）；Frame 恢复任务{outcome}。")
+        messages.success(request, f"当前操作游戏已更新（范围版本 {scope.scope_version}）；正在建立对应 Frame。")
     return redirect(_return_to(request))
 
 
 @staff_member_required
 @require_POST
-def enqueue_login_probe_request(request):
+def check_outer_session(request):
     try:
-        refresh = enqueue_login_probe(source="manual")
-    except ValueError as exc:
+        GameCircleIpcClient().call("CHECK_LOGIN")
+    except GameCircleIpcError as exc:
         messages.error(request, str(exc))
     else:
-        outcome = "已创建" if refresh.created else "已复用"
-        messages.success(request, f"外层会话检查任务{outcome}；不会创建当前游戏 Frame。")
+        messages.success(request, "已检查外层会话；不会切换游戏或建立 Frame。")
     return redirect(_return_to(request))
 
 
 @staff_member_required
 @require_POST
-def enqueue_session_recover_request(request):
+def build_current_game_frame(request):
     try:
-        refresh = enqueue_session_refresh(refresh_mode=REFRESH_RECOVER)
-    except ValueError as exc:
+        GameCircleIpcClient().call("BUILD_CURRENT_GAME_FRAME")
+    except GameCircleIpcError as exc:
         messages.error(request, str(exc))
     else:
-        outcome = "已创建" if refresh.created else "已复用"
-        messages.success(request, f"当前游戏 Frame 恢复任务{outcome}；完成后请刷新状态确认。")
+        messages.success(request, "已请求建立当前游戏 Frame；完成后请刷新状态确认。")
     return redirect(_return_to(request))
 
 
@@ -156,12 +148,24 @@ def enqueue_session_recover_request(request):
 @require_POST
 def enqueue_session_keepalive_request(request):
     try:
-        refresh = enqueue_session_refresh(refresh_mode=REFRESH_KEEPALIVE)
+        result = enqueue_keepalive(trigger="manual")
     except ValueError as exc:
         messages.error(request, str(exc))
     else:
-        outcome = "已创建" if refresh.created else "已复用"
-        messages.success(request, f"当前游戏 Frame 保活任务{outcome}；不会修改当前操作游戏。")
+        outcome = "已创建" if result.created else "已复用"
+        messages.success(request, f"当前游戏 Frame 保活任务{outcome}。")
+    return redirect(_return_to(request))
+
+
+@staff_member_required
+@require_POST
+def sync_managed_game_catalog(request):
+    try:
+        count = sync_authorized_managed_games()
+    except (GameCircleIpcError, ValueError):
+        messages.error(request, "同步可管理游戏失败，已保留本地目录。")
+    else:
+        messages.success(request, f"已同步 {count} 个可管理游戏。")
     return redirect(_return_to(request))
 
 
@@ -184,12 +188,16 @@ def save_runtime_configuration(request):
             "ENABLE_UPSTREAM_WRITES", "ENABLE_SINK_WRITES", "ENABLE_BLOCK_WRITES",
             "ENABLE_MUTE_WRITES", "ENABLE_UNMUTE_WRITES", "ENABLE_RESTORE_WRITES",
             "ENABLE_AI_AUTOMATED_MODERATION", "ENABLE_AI_SINK_WRITES", "ENABLE_AI_BLOCK_WRITES",
+            "SESSION_REPAIR_ENABLED", "SESSION_KEEPALIVE_ENABLED",
         ):
             values.setdefault(key, "false")
     if request.POST.get("config_scope") == "video":
         values.setdefault("VIDEO_ENABLED", "false")
         values.setdefault("VIDEO_PREFLIGHT_VERIFIED", "false")
         values.setdefault("ASR_ENABLED", "false")
+    if request.POST.get("config_scope") == "session_maintenance":
+        values.setdefault("SESSION_REPAIR_ENABLED", "false")
+        values.setdefault("SESSION_KEEPALIVE_ENABLED", "false")
     try:
         changed = update_runtime_config(values)
     except ValueError as exc:
@@ -200,7 +208,7 @@ def save_runtime_configuration(request):
         messages.info(request, "运行配置没有变化。")
     elif services:
         messages.success(
-            request, f"配置已保存；请重启 {', '.join(sorted(services))} 以加载新配置。"
+            request, f"配置已保存；请重启 {'、'.join(display_service_names(services))} 以加载新配置。"
         )
     else:
         messages.success(request, "配置已保存。")
