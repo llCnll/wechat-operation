@@ -12,13 +12,13 @@ from django.conf import settings
 from jobs.models import BackgroundJob, JobStatus
 from jobs.services import enqueue_job_with_result
 
+from .game_catalog import active_game_appid
 from .tasks import (
     MANUAL_INGEST_WINDOW_TASK,
     METRICS_REFRESH_WINDOW_TASK,
     SCHEDULED_INGEST_WINDOW_TASK,
     STATUS_SYNC_TASK,
 )
-from .game_catalog import active_game_appid
 
 SHANGHAI = ZoneInfo("Asia/Shanghai")
 
@@ -138,14 +138,14 @@ def enqueue_ingestion_window(
     )
 
 
-def scheduled_ingestion_window(now: datetime) -> IngestionWindow:
-    """Return the configured Shanghai-aligned window for one scheduler invocation."""
+def scheduled_ingestion_window(now: datetime, *, interval_minutes: int = 15) -> IngestionWindow:
+    """Return one scheduler-owned window while retaining fixed safe work size."""
     if now.tzinfo is None:
         raise ValueError("调度时间必须包含时区")
-    interval = _positive_int(settings.SCHEDULED_INGESTION_INTERVAL_MINUTES, name="调度间隔")
+    interval = _positive_int(interval_minutes, name="调度间隔")
     lookback = _positive_int(settings.SCHEDULED_INGESTION_LOOKBACK_MINUTES, name="回看时长")
-    if interval != 15 or lookback != 30:
-        raise ValueError("自动采集调度参数必须为15分钟间隔和30分钟回看")
+    if lookback != 30:
+        raise ValueError("自动采集回看时长必须为30分钟")
     local_now = now.astimezone(SHANGHAI)
     end_at = local_now.replace(
         minute=local_now.minute - (local_now.minute % interval), second=0, microsecond=0
@@ -154,13 +154,15 @@ def scheduled_ingestion_window(now: datetime) -> IngestionWindow:
     return IngestionWindow(start_time=int(start_at.timestamp()), end_time=int(end_at.timestamp()))
 
 
-def enqueue_scheduled_ingestion(now: datetime) -> IngestionEnqueueResult:
+def enqueue_scheduled_ingestion(
+    now: datetime, *, interval_minutes: int = 15
+) -> IngestionEnqueueResult:
     """Enqueue the current operation scope without invoking any browser adapter."""
     appid = active_game_appid(persist_default=False)
     page_size = _positive_int(settings.SCHEDULED_INGESTION_PAGE_SIZE, name="默认页面大小")
     if page_size != 20:
         raise ValueError("自动采集默认页面大小必须为20")
-    window = scheduled_ingestion_window(now)
+    window = scheduled_ingestion_window(now, interval_minutes=interval_minutes)
     return _enqueue_ingestion_window(
         appid=appid,
         start_time=window.start_time,
@@ -171,10 +173,12 @@ def enqueue_scheduled_ingestion(now: datetime) -> IngestionEnqueueResult:
     )
 
 
-def enqueue_scheduled_status_sync(now: datetime) -> IngestionEnqueueResult:
+def enqueue_scheduled_status_sync(
+    now: datetime, *, interval_minutes: int = 15
+) -> IngestionEnqueueResult:
     """Queue one small pending-post status scan in the same scheduler time bucket."""
     appid = active_game_appid(persist_default=False)
-    window = scheduled_ingestion_window(now)
+    window = scheduled_ingestion_window(now, interval_minutes=interval_minutes)
     result = enqueue_job_with_result(
         task_type=STATUS_SYNC_TASK,
         idempotency_key=f"status-sync:{appid}:{window.end_time}:20",
@@ -183,11 +187,11 @@ def enqueue_scheduled_status_sync(now: datetime) -> IngestionEnqueueResult:
     return IngestionEnqueueResult(job=result.job, created=result.created)
 
 
-def enqueue_scheduled_jobs(now: datetime) -> ScheduledJobsResult:
+def enqueue_scheduled_jobs(now: datetime, *, interval_minutes: int = 15) -> ScheduledJobsResult:
     """Create the complete, ordered scheduler workload for the current time bucket."""
     return ScheduledJobsResult(
-        status_sync=enqueue_scheduled_status_sync(now),
-        ingestion=enqueue_scheduled_ingestion(now),
+        status_sync=enqueue_scheduled_status_sync(now, interval_minutes=interval_minutes),
+        ingestion=enqueue_scheduled_ingestion(now, interval_minutes=interval_minutes),
     )
 
 
@@ -217,9 +221,7 @@ def enqueue_metrics_refresh_window(
     *, appid: object, start_time: object, end_time: object
 ) -> MetricsRefreshEnqueueResult:
     """Queue a manual refresh, reusing the same active scope when present."""
-    parameters = _metrics_refresh_parameters(
-        appid=appid, start_time=start_time, end_time=end_time
-    )
+    parameters = _metrics_refresh_parameters(appid=appid, start_time=start_time, end_time=end_time)
     active = _active_metrics_refresh_job(parameters)
     if active is not None:
         return MetricsRefreshEnqueueResult(job=active, created=False)
@@ -238,9 +240,7 @@ def latest_metrics_refresh_job(
     *, appid: object, start_time: object, end_time: object
 ) -> BackgroundJob | None:
     """Return the most recent refresh result for a scope, if any."""
-    parameters = _metrics_refresh_parameters(
-        appid=appid, start_time=start_time, end_time=end_time
-    )
+    parameters = _metrics_refresh_parameters(appid=appid, start_time=start_time, end_time=end_time)
     for job in BackgroundJob.objects.filter(task_type=METRICS_REFRESH_WINDOW_TASK).order_by(
         "-created_at"
     ):

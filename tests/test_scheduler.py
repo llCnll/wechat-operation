@@ -138,11 +138,8 @@ def test_scheduler_command_reports_window_and_duplicate_result():
         call_command("run_scheduler", "--once", stdout=created_output)
         call_command("run_scheduler", "--once", stdout=existing_output)
 
-    assert "wx6d2454a8afcd9706" in created_output.getvalue()
-    assert "2026-07-19T09:45:00+08:00" in created_output.getvalue()
-    assert "已创建" in created_output.getvalue()
-    assert "已存在" in existing_output.getvalue()
-    assert "待审核帖子状态巡检" in created_output.getvalue()
+    assert "post_ingestion:default=ENQUEUED" in created_output.getvalue()
+    assert "post_ingestion:default=NOT_DUE" in existing_output.getvalue()
     assert (
         BackgroundJob.objects.get(task_type="STATUS_SYNC").pk
         < BackgroundJob.objects.get(task_type="SCHEDULED_INGEST_WINDOW").pk
@@ -165,7 +162,7 @@ def test_scheduler_without_an_active_game_keeps_running_without_creating_source_
 
     call_command("run_scheduler", "--once", stdout=output)
 
-    assert "未创建来源任务" in output.getvalue()
+    assert "post_ingestion:default=NO_ACTIVE_GAME" in output.getvalue()
     assert not BackgroundJob.objects.exists()
 
 

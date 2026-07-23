@@ -118,6 +118,10 @@ urlpatterns = [
         supervisor_views.save_runtime_configuration,
         name="save-runtime-configuration",
     ),
+    path("admin/scheduled-producers/<int:producer_id>/", supervisor_views.save_scheduled_producer, name="save-scheduled-producer"),
+    path("admin/scheduled-producers/<int:producer_id>/rules/", supervisor_views.create_scheduled_producer_rule, name="create-scheduled-producer-rule"),
+    path("admin/scheduled-producer-rules/<int:rule_id>/", supervisor_views.save_scheduled_producer_rule, name="save-scheduled-producer-rule"),
+    path("admin/scheduled-producer-rules/<int:rule_id>/delete/", supervisor_views.delete_scheduled_producer_rule, name="delete-scheduled-producer-rule"),
     path("", post_views.operations_dashboard, name="operations-dashboard"),
     path("mute-management/", post_views.mute_management, name="mute-management"),
     path(
