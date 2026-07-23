@@ -134,7 +134,7 @@
       {% if node.key == "game_circle_session" %}
       <div class="console-service-actions">
         <form method="post" action="{% url 'enqueue-session-keepalive' %}">{% csrf_token %}<input type="hidden" name="return_to" value="/admin/"><button type="submit">保活当前游戏 Frame</button></form>
-        <details class="console-active-game-switch"><summary>可选自动维护</summary><form method="post" action="{% url 'save-runtime-configuration' %}">{% csrf_token %}<input type="hidden" name="return_to" value="/admin/"><input type="hidden" name="config_scope" value="session_maintenance"><label><input name="SESSION_REPAIR_ENABLED" type="checkbox" value="true" {% if admin_console.runtime_config.session_repair_enabled == "true" %}checked{% endif %}> 自动修复 Frame</label><label><input name="SESSION_KEEPALIVE_ENABLED" type="checkbox" value="true" {% if admin_console.runtime_config.session_keepalive_enabled == "true" %}checked{% endif %}> 每四小时自动保活</label><button class="is-quiet" type="submit">保存维护设置</button></form></details>
+        <details class="console-active-game-switch"><summary>可选自动维护</summary><form method="post" action="{% url 'save-runtime-configuration' %}">{% csrf_token %}<input type="hidden" name="return_to" value="/admin/"><input type="hidden" name="config_scope" value="session_maintenance"><label><input name="SESSION_REPAIR_ENABLED" type="checkbox" value="true" {% if admin_console.runtime_config.session_repair_enabled == "true" %}checked{% endif %}> 自动修复 Frame</label><button class="is-quiet" type="submit">保存维护设置</button></form></details>
       </div>
       {% endif %}
       {% endif %}
@@ -243,6 +243,49 @@
     <footer><span>未勾选的授权会在保存时关闭；保存后重启 web、ai_moderation。</span><button class="console-config-submit" type="submit">保存授权</button></footer>
   </form>
 </dialog>
+
+<section class="console-section">
+  <div class="console-section-heading">
+    <div><p>自动化任务</p><h2>自动任务生产者</h2></div>
+    <span>只控制未来自动入队；不会停止 Scheduler 或取消已有任务</span>
+  </div>
+  <div class="console-producer-grid">
+    {% for item in admin_console.scheduled_producers %}
+    <article class="console-producer-card {% if item.producer.enabled %}is-enabled{% else %}is-paused{% endif %}">
+      <header>
+        <div class="console-producer-identity"><i aria-hidden="true"></i><div><strong>{{ item.label }}</strong><span>{% if item.producer.enabled %}自动入队中{% else %}已暂停{% endif %}</span></div></div>
+        <div class="console-producer-actions"><button type="button" class="is-quiet" data-config-dialog="producer-{{ item.producer.pk }}" aria-haspopup="dialog">管理规则</button><form class="console-producer-toggle" method="post" action="{% url 'save-scheduled-producer' producer_id=item.producer.pk %}">{% csrf_token %}<input type="hidden" name="return_to" value="/admin/"><input type="hidden" name="enabled" value="{% if item.producer.enabled %}false{% else %}true{% endif %}"><button type="submit">{% if item.producer.enabled %}暂停{% else %}恢复{% endif %}</button></form></div>
+      </header>
+      <dl class="console-producer-card-summary">
+        <div><dt>规则</dt><dd>{{ item.rules|length }} 条</dd></div>
+        <div><dt>最近自动入队</dt><dd>{{ item.producer.last_enqueued_at|date:"m-d H:i:s"|default:"尚未自动入队" }}</dd></div>
+        <div><dt>下次触发</dt><dd>{% if item.next_rule %}{{ item.next_rule.next_due_at|date:"m-d H:i" }} · {{ item.next_rule.label }}{% else %}暂无启用规则{% endif %}</dd></div>
+        <div><dt>最近检查</dt><dd>{% if item.recent_rule %}{{ item.recent_rule.rule.last_checked_at|date:"m-d H:i"|default:"尚未检查" }} · {% if item.recent_rule.last_result %}{{ item.recent_rule.last_result }}{% else %}运行正常{% endif %}{% else %}尚未检查{% endif %}</dd></div>
+      </dl>
+    </article>
+    {% endfor %}
+  </div>
+  {% for item in admin_console.scheduled_producers %}
+  <dialog class="console-config-dialog console-producer-dialog" data-config-dialog-panel="producer-{{ item.producer.pk }}" aria-labelledby="producer-dialog-{{ item.producer.pk }}-title">
+    <header><div><p>自动化任务</p><h2 id="producer-dialog-{{ item.producer.pk }}-title">{{ item.label }} · 规则管理</h2></div><button type="button" class="console-dialog-close" data-config-dialog-close aria-label="关闭">关闭</button></header>
+    <p class="console-dialog-intro">规则只影响未来自动入队；统一使用中国标准时间，不会取消已有任务。</p>
+    <div class="console-producer-dialog-body">
+      {% for item_rule in item.rules %}
+      <section class="console-producer-rule">
+        <div class="console-producer-rule-heading"><div><strong>{{ item_rule.label }}</strong><span>{{ item_rule.template_label }}</span></div><em>{% if item_rule.rule.enabled %}已启用{% else %}已暂停{% endif %}</em></div>
+        <form method="post" action="{% url 'save-scheduled-producer-rule' rule_id=item_rule.rule.pk %}">{% csrf_token %}<input type="hidden" name="return_to" value="/admin/">
+          <label class="console-producer-switch"><input name="enabled" type="checkbox" value="true" {% if item_rule.rule.enabled %}checked{% endif %}> 启用此规则</label>
+          <div class="console-producer-fields">{% if item_rule.is_interval %}<label class="console-dialog-field-wide">执行间隔（分钟）<input name="interval_minutes" type="number" min="1" value="{{ item_rule.schedule_value }}" required></label>{% else %}<label class="console-dialog-field-wide">执行时点<input name="schedule_time" type="time" value="{{ item_rule.schedule_value }}" required></label>{% endif %}</div>
+          <div class="console-producer-rule-footer"><p>最近检查：{{ item_rule.rule.last_checked_at|date:"Y-m-d H:i:s"|default:"尚未检查" }}{% if item_rule.last_result %} · {{ item_rule.last_result }}{% endif %}</p><button type="submit">保存此规则</button></div>
+        </form>
+        <form class="console-producer-delete-rule" method="post" action="{% url 'delete-scheduled-producer-rule' rule_id=item_rule.rule.pk %}">{% csrf_token %}<input type="hidden" name="return_to" value="/admin/"><button type="submit">删除规则</button></form>
+      </section>
+      {% endfor %}
+      <form class="console-producer-add-rule" method="post" action="{% url 'create-scheduled-producer-rule' producer_id=item.producer.pk %}">{% csrf_token %}<input type="hidden" name="return_to" value="/admin/"><strong>新增运行时点</strong><span>系统将自动生成并保存受限调度表达式。</span>{% if item.new_rule_templates|length > 1 %}<label>规则类型<select name="rule_type">{% for template in item.new_rule_templates %}<option value="{{ template.key }}">{{ template.label }}</option>{% endfor %}</select></label>{% else %}<input name="rule_type" type="hidden" value="{{ item.new_rule_templates.0.key }}">{% endif %}{% if item.new_rule_is_interval %}<label>执行间隔（分钟）<input name="interval_minutes" type="number" min="1" required></label>{% else %}<label>执行时点<input name="schedule_time" type="time" required></label>{% endif %}<label class="console-producer-switch"><input name="enabled" type="checkbox" value="true" checked> 新规则启用</label><button type="submit">新增时点</button></form>
+    </div>
+  </dialog>
+  {% endfor %}
+</section>
 
 <section class="console-section">
   <div class="console-section-heading">

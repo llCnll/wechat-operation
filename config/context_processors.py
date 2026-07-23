@@ -3,7 +3,7 @@
 from datetime import timedelta
 from importlib.util import find_spec
 
-from django.db.models import Max
+from django.db.models import Max, Prefetch
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 
@@ -24,6 +24,15 @@ MANAGED_SERVICE_NAMES = (
     "ai_moderation",
     "mute_maintenance",
 )
+SCHEDULED_PRODUCER_RESULT_LABELS = {
+    "NOT_DUE": "尚未到触发时间",
+    "MISFIRE_SKIPPED": "错过时点，已跳过",
+    "OVERLAP_SKIPPED": "已有任务执行中，已跳过",
+    "OVERLAP_HELD": "已有任务执行中，等待合并",
+    "NO_ACTIVE_GAME": "未选择当前操作游戏",
+    "CONFIG_INVALID": "配置无效",
+    "ENQUEUE_FAILED": "自动入队失败",
+}
 
 
 def _pipeline_node(
@@ -55,7 +64,19 @@ def admin_console_overview(request):
     ):
         return {}
 
-    from jobs.models import BackgroundJob, JobStatus
+    from jobs.models import (
+        BackgroundJob,
+        JobStatus,
+        ScheduledProducerConfig,
+        ScheduledProducerRuleConfig,
+    )
+    from jobs.scheduled_producers import (
+        DEFINITION_BY_KEY,
+        definition_for_rule,
+        next_due_for_display,
+        schedule_description_for_rule,
+        schedule_value_for_rule,
+    )
     from posts.models import ActiveGameScope, ManagedGame
     from reviews.models import PolicyVersion, risk_label_display
 
@@ -103,6 +124,57 @@ def admin_console_overview(request):
     active_scope = ActiveGameScope.objects.select_related("active_game").filter(pk=1).first()
     game_summary = ManagedGame.objects.aggregate(last_synced_at=Max("last_synced_at"))
     runtime_config = public_runtime_config()
+    scheduled_producers = []
+    active_rules = ScheduledProducerRuleConfig.objects.filter(archived_at__isnull=True).order_by(
+        "pk"
+    )
+    for producer in ScheduledProducerConfig.objects.prefetch_related(
+        Prefetch("rules", queryset=active_rules, to_attr="active_rules")
+    ).order_by("pk"):
+        rules = tuple(producer.active_rules)
+        rule_items = [
+            {
+                "rule": rule,
+                "label": schedule_description_for_rule(rule),
+                "template_label": definition_for_rule(rule).label,
+                "schedule_value": schedule_value_for_rule(rule),
+                "is_interval": rule.schedule_kind
+                == ScheduledProducerRuleConfig.ScheduleKind.INTERVAL,
+                "next_due_at": next_due_for_display(rule),
+                "last_result": SCHEDULED_PRODUCER_RESULT_LABELS.get(
+                    rule.last_error_category, rule.last_error_category
+                ),
+            }
+            for rule in rules
+        ]
+        enabled_rule_items = [item for item in rule_items if item["rule"].enabled]
+        next_rule = min(enabled_rule_items, key=lambda item: item["next_due_at"], default=None)
+        recent_rule = max(
+            rule_items,
+            key=lambda item: (
+                item["rule"].last_checked_at.timestamp()
+                if item["rule"].last_checked_at is not None
+                else 0
+            ),
+            default=None,
+        )
+        scheduled_producers.append(
+            {
+                "producer": producer,
+                "label": DEFINITION_BY_KEY[producer.producer_key].label,
+                "new_rule_templates": tuple(
+                    {"key": definition.key, "label": definition.label}
+                    for definition in DEFINITION_BY_KEY[producer.producer_key].templates
+                ),
+                "rules": rule_items,
+                "next_rule": next_rule,
+                "recent_rule": recent_rule,
+                "new_rule_is_interval": (
+                    DEFINITION_BY_KEY[producer.producer_key].templates[0].schedule_kind
+                    == ScheduledProducerRuleConfig.ScheduleKind.INTERVAL
+                ),
+            }
+        )
     try:
         services = SupervisorClient().status()
         supervisor_error = ""
@@ -112,8 +184,13 @@ def admin_console_overview(request):
     for name in MANAGED_SERVICE_NAMES:
         services.setdefault(name, {"running": False, "desired": False})
     from posts.models import GameCircleLoginRuntimeState
+
     login_state = GameCircleLoginRuntimeState.objects.filter(pk=1).first()
-    stale_login_state = login_state is None or login_state.checked_at is None or login_state.checked_at < timezone.now() - timedelta(minutes=10)
+    stale_login_state = (
+        login_state is None
+        or login_state.checked_at is None
+        or login_state.checked_at < timezone.now() - timedelta(minutes=10)
+    )
     chrome_service_running = bool(services["controlled_chrome"]["running"])
     session_service_running = bool(services["game_circle_session"]["running"])
     controlled_chrome_ready = bool(
@@ -132,7 +209,8 @@ def admin_console_overview(request):
                 "外层会话和当前游戏 Frame 均有效"
                 if controlled_chrome_ready
                 else (
-                    "状态待检查" if stale_login_state
+                    "状态待检查"
+                    if stale_login_state
                     else f"外层：{login_state.get_outer_state_display()}；Frame：{login_state.get_frame_state_display()}"
                 )
             )
@@ -345,8 +423,7 @@ def admin_console_overview(request):
                 service="video_extraction",
                 running=bool(services["video_extraction"]["running"]),
                 description=(
-                    "本机抽帧并仅向 OCR/ASR 传帧或音频字节；"
-                    "不传视频 URL、Cookie 或二维码目标。"
+                    "本机抽帧并仅向 OCR/ASR 传帧或音频字节；不传视频 URL、Cookie 或二维码目标。"
                 ),
             ),
             _pipeline_node(
@@ -393,15 +470,11 @@ def admin_console_overview(request):
             _pipeline_node(
                 "ai_moderation",
                 "AI 自动处置 Worker（可选）",
-                (
-                    ai_moderation_authorized
-                    and bool(services["ai_moderation"]["running"])
-                ),
+                (ai_moderation_authorized and bool(services["ai_moderation"]["running"])),
                 "完成 AI 自动处置授权后启动 Worker",
                 (
                     "AI 自动处置 Worker 已运行；固定上限为 100 条/24 小时"
-                    if ai_moderation_authorized
-                    and services["ai_moderation"]["running"]
+                    if ai_moderation_authorized and services["ai_moderation"]["running"]
                     else "默认关闭；需同时完成 AI、人工动作和规则级授权"
                 ),
                 checked_at,
@@ -456,6 +529,7 @@ def admin_console_overview(request):
             "running_job_count": BackgroundJob.objects.filter(status=JobStatus.RUNNING).count(),
             "failed_job_count": BackgroundJob.objects.filter(status=JobStatus.FAILED).count(),
             "runtime_config": runtime_config,
+            "scheduled_producers": scheduled_producers,
             "services": services,
             "supervisor_error": supervisor_error,
             "pipeline": pipeline,

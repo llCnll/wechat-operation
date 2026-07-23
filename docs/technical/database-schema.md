@@ -380,6 +380,55 @@ AI 评估中的单项风险证据，可保存多段命中内容。
 | `FAILED` | 执行失败。 |
 | `CANCELED` | 已取消。 |
 
+## `jobs_scheduledproducerconfig`（自动任务生产者）
+
+每个代码注册自动生产者的一条运营配置与脱敏运行投影。它只控制未来自动入队，不是 Worker 或 Supervisor 服务配置。
+
+| 字段 | 类型与约束 | 含义 |
+| --- | --- | --- |
+| `id` | 整数，自增，主键 | 本地记录编号。 |
+| `producer_key` | 字符串，最长 64，唯一 | 代码注册的稳定生产者键，不向运营页面展示或编辑。 |
+| `enabled` | 布尔，默认 `true` | 是否允许该生产者继续自动入队。 |
+| `config_version` | 正整数，默认 `1` | 运营配置版本，仅用于逻辑槽审计。 |
+| `last_checked_at` / `last_enqueued_at` | 日期时间，可空 | 最近调和检查与最近成功自动入队时间。 |
+| `last_error_category` | 字符串，最长 64，可空 | 固定脱敏运行结果类别。 |
+| `updated_at` | 日期时间，自动更新 | 最近配置或运行投影更新时间。 |
+
+## `jobs_scheduledproducerruleconfig`（自动任务生产规则）
+
+生产者下的受限规则实例。页面只按模板维护运行时点或间隔；保存的表达式、时区和策略均由服务端固定或校验。
+
+| 字段 | 类型与约束 | 含义 |
+| --- | --- | --- |
+| `producer_id` | 外键，指向 `jobs_scheduledproducerconfig`，级联删除 | 所属生产者。 |
+| `rule_type` / `rule_key` | 字符串，最长 64 | 代码模板键与稳定规则实例键；同一生产者内 `rule_key` 唯一。 |
+| `enabled` | 布尔，默认 `true` | 是否允许该规则继续自动入队。 |
+| `schedule_kind` / `schedule_expression` | 字符串 | 固定间隔或五字段 Cron 及其服务端生成表达式。 |
+| `timezone_name` | 字符串，默认 `Asia/Shanghai` | 固定中国标准时间，不接受运营编辑。 |
+| `misfire_policy` / `overlap_policy` | 字符串 | 代码定义的错过触发与活动任务重叠策略。 |
+| `config_version` | 正整数，默认 `1` | 用于逻辑槽审计，不能使已处理槽重新入队。 |
+| `covered_through_at` | 日期时间，可空 | 已覆盖到的最新 UTC 调度实例。 |
+| `last_skipped_from_at` / `last_skipped_to_at` | 日期时间，可空 | 最近一次跳过区间摘要。 |
+| `last_checked_at` / `last_enqueued_at` / `last_error_category` | 日期时间或字符串，可空 | 脱敏运行投影。 |
+| `archived_at` | 日期时间，可空 | 删除规则时写入；归档规则退出页面与调和循环，但保留审计。 |
+| `updated_at` | 日期时间，自动更新 | 最近配置或运行投影更新时间。 |
+
+## `jobs_scheduledproducerslot` 与 `jobs_scheduledproducerslotjob`（逻辑槽审计）
+
+逻辑槽是实际调度事件的持久化账本。唯一键为规则与 UTC 实例，配置保存不会改变该唯一性；槽—Job 关联保留一次自动生产实际创建或复用的后台任务。
+
+| 字段 | 类型与约束 | 含义 |
+| --- | --- | --- |
+| `rule_id` | 外键，指向 `jobs_scheduledproducerruleconfig`，级联删除 | 所属规则；规则日常删除使用归档，因此不会删除既有槽。 |
+| `utc_instance` | 日期时间 | 真实触发实例，和规则共同唯一。 |
+| `config_version` | 正整数 | 创建该槽时的规则配置快照版本。 |
+| `state` | 字符串，枚举 | `READY`、`HELD`、`SKIPPED`、`ENQUEUED` 或 `FAILED`。 |
+| `attempt_count` | 正整数，默认 `0` | 已进行的有限生产尝试次数。 |
+| `error_category` | 字符串，最长 64，可空 | 固定脱敏失败或跳过类别。 |
+| `coalesced_from_at` | 日期时间，可空 | 合并错过或重叠槽时的起始实例。 |
+| `created_at` / `updated_at` | 日期时间 | 逻辑槽创建与最后更新时间。 |
+| `slot_id` / `job_id` | 槽—Job 关联，联合唯一 | 同一槽与同一后台任务最多关联一次；`job_id` 保护删除。 |
+
 当前 `task_type` 取值：
 
 | 值 | 含义 | 默认消费者服务 |
@@ -393,8 +442,8 @@ AI 评估中的单项风险证据，可保存多段命中内容。
 | `AI_EVALUATE` | 原创帖 AI 内容评估。 | AI 审核 Worker（Supervisor 服务 `review`） |
 | `VIDEO_EXTRACT` | 原创帖视频的本地受限证据提取。任务摘要仅含本地提取记录 ID、帖子 ID、URL 指纹与版本。 | 视频提取 Worker（Supervisor 服务 `video_extraction`） |
 | `AI_AUTOMATED_MODERATION` | 已授权 AI 沉底或屏蔽的一次性上游操作与复审建档。 | AI 自动处置 Worker（Supervisor 服务 `ai_moderation`） |
-| `GAME_CIRCLE_SESSION_KEEPALIVE` | 可选保活任务；参数仅含触发来源、自动化键与时区桶，消费者开始执行时才冻结当前游戏范围。 | 游戏圈会话服务（Supervisor 服务 `game_circle_session`） |
-| `PERMANENT_MUTE_RENEWAL` | 每 12 小时为当前游戏临近到期或禁言时间为 0 的永久标记续期；不处理全局禁言或其他游戏。 | 禁言维护 Worker（Supervisor 服务 `mute_maintenance`） |
+| `GAME_CIRCLE_SESSION_KEEPALIVE` | 可选保活任务；由自动任务生产者按受限间隔入队，参数仅含触发来源与自动化键，消费者开始执行时才冻结当前游戏范围。 | 游戏圈会话服务（Supervisor 服务 `game_circle_session`） |
+| `PERMANENT_MUTE_RENEWAL` | 由自动任务生产者按受限定时规则为当前游戏临近到期或禁言时间为 0 的永久标记续期；不处理全局禁言或其他游戏。 | 禁言维护 Worker（Supervisor 服务 `mute_maintenance`） |
 | `AUTHOR_MUTE_STATUS_REFRESH` | 手动刷新当前游戏禁言列表作者的禁言时间；冻结列表判断时刻与作者集合并逐位读取用户详情，不执行上游写操作；同一范围仅保留一个活跃任务。 | 禁言维护 Worker（Supervisor 服务 `mute_maintenance`） |
 | `POST_AUTHOR_MUTE_STATUS_SYNC` | 扫描当前游戏全量帖子作者；按作者去重读取用户详情，只将仍禁言作者补充到禁言管理，不设置永久禁言；同一范围仅保留一个活跃任务。 | 禁言维护 Worker（Supervisor 服务 `mute_maintenance`） |
 | `AUTHOR_MUTE_STATUS_BACKFILL` | 一次性补全历史原创帖作者禁言状态。 | 人工补采 Worker（Supervisor 服务 `backfill_ingestion`） |
