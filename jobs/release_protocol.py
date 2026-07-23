@@ -55,13 +55,16 @@ def _require_mapping(value: object, *, context: str) -> dict[str, Any]:
     return value
 
 
-def _require_string_list(value: object, *, context: str) -> list[str]:
+def _require_string_list(
+    value: object, *, context: str, allow_empty: bool = False
+) -> list[str]:
     if (
         not isinstance(value, list)
-        or not value
+        or (not allow_empty and not value)
         or not all(isinstance(item, str) and item for item in value)
     ):
-        raise ReleaseProtocolError(f"{context} 必须为非空字符串列表")
+        requirement = "字符串列表" if allow_empty else "非空字符串列表"
+        raise ReleaseProtocolError(f"{context} 必须为{requirement}")
     return value
 
 
@@ -101,7 +104,9 @@ def _validate_document(document: dict[str, Any], *, path: Path) -> Release:
     previous = document["previous"]
     if previous is not None:
         _version_key(previous)
-    _require_string_list(document["changes"], context=f"{path.name}.changes")
+    _require_string_list(
+        document["changes"], context=f"{path.name}.changes", allow_empty=True
+    )
     _require_string_list(document["verification"], context=f"{path.name}.verification")
     upgrade = _require_mapping(document["upgrade"], context=f"{path.name}.upgrade")
     expected_upgrade_fields = {
