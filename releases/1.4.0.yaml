@@ -1,0 +1,22 @@
+version: 1.4.0
+previous: 1.3.0
+changes:
+  - 新增按“作者 + 当前游戏”保存的自动续期（永久禁言意图）、禁言管理筛选和历史帖子入口；本地标记不立即调用上游。
+  - 新增禁言维护 Worker，按 12 小时时间槽处理自动续期，并提供禁言列表状态刷新和全量帖子作者禁言扫描两个只读 Job。
+  - 作者禁言状态同时存在当前游戏与全局禁言时，统一按较晚截止时间展示和筛选；全量扫描与列表刷新均冻结目标集合并复用活跃任务。
+  - 新增禁言维护审计、任务活跃去重键及相关数据库结构；Supervisor 将管理 `mute_maintenance` 服务。
+upgrade:
+  dependencies: none
+  database: migrate
+  static: collectstatic
+  restart:
+    mode: supervisor
+    services: []
+  once_jobs: []
+  manual: []
+verification:
+  - uv run python manage.py validate_releases
+  - uv run pytest -q tests/test_release_protocol.py tests/test_release_source_archive.py
+  - uv run python manage.py check
+  - 确认 Supervisor 重启后 `mute_maintenance` 正常运行；禁言管理可查看状态刷新与全量作者扫描入口，且这两个入口只创建只读 Job。
+  - 如需验证自动续期上游写入，仅可对已明确授权的测试账号按运行手册执行一次；确认“标记为自动续期”本身不立即发送上游写请求。
