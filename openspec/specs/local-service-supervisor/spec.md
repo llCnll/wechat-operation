@@ -5,7 +5,7 @@
 ## Requirements
 
 ### Requirement: Supervisor 启动与服务所有权
-系统 SHALL 提供独立于 Django Web 的本机 Supervisor 入口，作为 `web`、`scheduler`、`ingestion`、`backfill_ingestion`、`metric_sync` 与 `review` 六个固定服务的唯一进程所有者。`ingestion` SHALL 运行实时采集 Worker，`backfill_ingestion` SHALL 运行人工补采 Worker，`metric_sync` SHALL 运行固定的指标同步管理命令。Supervisor SHALL 在启动时创建所需运行态目录，执行幂等迁移、静态资源收集和默认策略初始化预检，然后启动 Web 并等待健康检查成功；日常部署 MUST 通过 Supervisor 启动和控制指标同步服务。
+系统 SHALL 提供独立于 Django Web 的本机 Supervisor 入口，作为 `controlled_chrome`、`web`、`scheduler`、`game_circle_session`、`ingestion`、`backfill_ingestion`、`metric_sync`、`review`、`video_extraction`、`ai_moderation` 与 `mute_maintenance` 固定服务的唯一进程所有者。`ingestion` SHALL 运行实时采集 Worker，`backfill_ingestion` SHALL 运行人工补采 Worker，`metric_sync` SHALL 运行固定的指标同步管理命令。Supervisor SHALL 在启动时创建所需运行态目录，执行幂等迁移、静态资源收集和默认策略初始化预检，然后启动 Web 并等待健康检查成功；日常部署 MUST 通过 Supervisor 启动和控制受管服务。
 
 #### Scenario: 首次或日常启动 Supervisor
 - **WHEN** 运营人员启动 Supervisor 且预检成功
@@ -17,10 +17,10 @@
 - **THEN** Supervisor SHALL 记录脱敏阶段错误并以非成功状态退出，且 MUST NOT 启动 Web 或任一 Worker
 
 ### Requirement: 固定服务的受限生命周期控制
-Supervisor SHALL 使用跨平台独占运行态文件锁保证同一部署仅有一个实例。`web` 仅接受 `status`、日志读取和延迟 `restart`；`scheduler`、`ingestion`、`backfill_ingestion`、`metric_sync` 与 `review` 接受 `start`、`stop`、`restart`、`status` 和日志读取操作。Supervisor SHALL 使用固定的受管 Python 与管理命令启动服务，且 MUST NOT 接受浏览器、数据库或配置文件提供的任意可执行命令、参数、路径或 PID。
+Supervisor SHALL 使用跨平台独占运行态文件锁保证同一部署仅有一个实例。`web` 仅接受 `status`、日志读取和延迟 `restart`；`controlled_chrome`、`scheduler`、`game_circle_session`、`ingestion`、`backfill_ingestion`、`metric_sync`、`review`、`video_extraction`、`ai_moderation` 与 `mute_maintenance` 接受 `start`、`stop`、`restart`、`status` 和日志读取操作。Supervisor SHALL 使用固定的受管 Python 与管理命令启动服务，且 MUST NOT 接受浏览器、数据库或配置文件提供的任意可执行命令、参数、路径或 PID。
 
 #### Scenario: 启动已配置的 Worker
-- **WHEN** Supervisor 收到对已停止的 `scheduler`、`ingestion`、`backfill_ingestion`、`metric_sync` 或 `review` 的启动请求
+- **WHEN** Supervisor 收到对已停止的任一可控 Worker 或 `controlled_chrome` 的启动请求
 - **THEN** Supervisor SHALL 只启动对应固定 Worker 命令，并记录该服务为期望运行状态
 
 #### Scenario: 已有 Supervisor 正在运行
@@ -56,6 +56,20 @@ Supervisor SHALL 在 `runtime/supervisor/` 持久化每个托管服务的期望�
 #### Scenario: Worker 优雅停止
 - **WHEN** Supervisor 停止或重启一个 Worker
 - **THEN** 它 SHALL 先发送优雅终止信号并等待受限超时，再在必要时强制终止；中断任务 SHALL 继续依赖既有锁和 checkpoint 恢复机制
+
+### Requirement: 禁言维护 Worker 的受管生命周期
+Supervisor SHALL 将 `mute_maintenance` 作为固定受管 Worker。该 Worker 只消费永久禁言续期 Job、禁言列表状态刷新 Job 和全部帖子作者状态同步 Job，并通过既有会话服务请求来源操作；不得直接管理浏览器、认证材料或任意外部命令。
+
+系统配置运行节点 SHALL 展示该 Worker 的状态，并提供启动、停止、重启、日志与“执行一次”固定操作。“执行一次” SHALL 仅创建或复用当前游戏的永久禁言续期 Job，不得在 Web 请求中执行续期。
+
+#### Scenario: Worker 未运行时的人工续期
+- **WHEN** 运营人员在运行节点请求执行一次，但 `mute_maintenance` 未运行
+- **THEN** 系统 SHALL 创建或复用续期 Job，并明确提示该 Job 将等待 Worker 启动
+
+#### Scenario: Worker 只认领禁言维护任务
+- **WHEN** `mute_maintenance` 与其他 Worker 同时运行
+- **THEN** 它 SHALL 仅认领永久禁言续期、禁言列表状态刷新和全量帖子作者状态同步 Job
+- **THEN** 其他 Worker 不得认领这些 Job 或将其标记为未注册
 
 ### Requirement: 本机受认证控制通道
 Supervisor SHALL 仅监听本机回环地址，并使用存放在受限 `runtime/` 文件中的高熵控制令牌认证 Django 后端请求。浏览器 SHALL 只能通过已认证且受 CSRF 保护的 Django 端点请求固定控制操作，且不得接收或持久化 Supervisor 地址、令牌或任意服务命令。
