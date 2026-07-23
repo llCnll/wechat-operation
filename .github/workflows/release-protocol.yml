@@ -10,6 +10,21 @@ permissions:
   contents: read
 
 jobs:
+  release-source:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Require a release branch matching the project version
+        shell: bash
+        env:
+          HEAD_REF: ${{ github.head_ref }}
+        run: |
+          set -euo pipefail
+          version="$(python3 -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')"
+          expected="release/v${version}"
+          test "${HEAD_REF}" = "${expected}"
+
   validate:
     runs-on: ubuntu-latest
     steps:
@@ -19,7 +34,7 @@ jobs:
       - uses: astral-sh/setup-uv@v7
       - run: uv sync --locked --all-groups
       - run: uv run python manage.py validate_releases
-      - run: uv run pytest tests/test_release_protocol.py -q
+      - run: uv run pytest tests/test_release_protocol.py tests/test_release_source_archive.py -q
 
   tag-release:
     if: github.event_name == 'push'

@@ -29,6 +29,56 @@
 
 历史基线也由发布清单维护：`1.0.0` 对应历史提交 `2d522bd932e760094bbe81fb2477f2da1462e359`；`1.0.1` 的原提交 `2905bcb04509e2ffae3877ee1a2aabcc026fa190` 因作者信息重写，当前历史提交为 `12a5a17168a27ee3088b18e708389c4a6c117510`。后续发布使用不可移动的 `v<version>` tag。
 
+## 分支与提升策略
+
+`main` 是唯一的生产发布分支，也是 GitHub Release 和部署端点拉取的唯一来源；它始终对应一个已经发布、可由 tag 精确定位的版本。禁止直接推送 `main`，也禁止将未准备版本号和发布清单的 `develop` 直接合入 `main`。
+
+### `feature/*` 到 `develop`
+
+`develop` 仅是日常集成分支：它汇集已完成评审的 feature，不触发部署、正式 tag、GitHub Release 或生产升级，也不作为 CI 状态门禁。所有 feature 从最新 `develop` 创建，并以 Pull Request 合回 `develop`：
+
+- 每个 feature PR 必须选择 **Squash and merge**，因此在 `develop` 上恰好留下一个提交；五个 feature 合入后，应有五个可回溯的 squash 提交。
+- 提交标题使用 `<type>(<scope>): <简短结果>`；PR 模板中的“变更摘要”成为 squash 提交正文。
+- 摘要说明用户或系统行为变化、数据库/配置/服务/升级影响、验证结果以及风险和回滚方式；无影响项明确写“无”。涉及高风险能力时，摘要必须写明隔离范围和最小验证方式。
+
+`releases/<version>.yaml` 的 `changes` 只记录平台功能更新：`feat`、`fix`、`hotfix`、`perf` 和 `security` 的实际用户或运行行为变化。它既是升级清单的一部分，也是 GitHub Release 的“平台功能更新”唯一来源。`docs`、`ci`、`build`、`chore`、`refactor`、`style` 和 `test` 不写入 `changes`；若某项重构或维护实际改变了用户或运行行为，必须使用 `feat` 或 `fix` 标题。维护型发布没有平台功能变化时，显式写 `changes: []`，Release 页显示“本版本没有平台功能更新”。
+
+GitHub 不能按目标分支单独强制 merge method：为保留发布后的 `main -> develop` 正常回灌，仓库仍需保留 merge commit。因此“feature 必须 squash”由 PR 审阅流程执行；验证目标是合入后的 Git 历史每个 feature 只有一个 squash 提交，而不是 GitHub 界面只显示一种合并按钮。
+
+### `release/v<version>` 到 `main`
+
+每次正式发布按以下提升路径进行，而不是在 `main` 合并后再补准备发布信息：
+
+1. 从已验证的 `develop` 创建短期 `release/v<version>` 分支并冻结其功能范围。
+2. 只用功能相关的 squash 提交生成 `changes` 草稿：
+
+   ```bash
+   git log --first-parent --no-merges --extended-regexp --grep='^(feat|fix|hotfix|perf|security)(\([^)]+\))?: ' --format='- %s%n%b' v<上一版本>..develop
+   ```
+
+   该命令只汇总提交标题和正文，不能替代发布清单；必须结合实际代码、迁移、配置和服务变更，人工写入 `releases/<version>.yaml`。没有功能相关提交时写 `changes: []`。发布清单仍是升级动作的唯一事实来源。
+3. 在 `release/v<version>` 更新版本号、`uv.lock` 和 `releases/<version>.yaml`，执行发布前最小验证。
+4. 创建 `release/v<version> -> main` 的发布 PR。`Release protocol` 的 `release-source` 校验会要求分支名与 `pyproject.toml` 中的版本严格匹配；PR 合入 `main` 后才创建 tag、源码附件和 GitHub Release。Release 页面按以下顺序展示：
+
+   1. **平台功能更新**：直接渲染该版本发布清单的 `changes`。
+   2. **工程与文档维护**：按时间正序收录 `docs`、`ci`、`build`、`chore`、`refactor`、`style` 和 `test` 提交标题。
+   3. **完整提交记录**：链接到上一个 tag 与当前 tag 的 GitHub compare 页面。
+
+   非平台提交仍随 release 分支交付，只是不进入发布清单的 `changes` 或端点升级动作。首次发布没有上一个 tag 时，不显示“完整提交记录”。
+5. 发布工作流成功后，将 `main` 正常合回 `develop`，仅用于带回发布提交、tag 对应版本和紧急修复；不要 squash 回灌，避免丢失发布祖先关系。
+
+正式发布由 **`main` 合入已准备好的发布分支** 触发；`develop` 只承担集成。紧急修复从 `main` 创建 `hotfix/*`，完成修复后仍经匹配版本的 `release/v<version>` 进入 `main`，随后再合回 `develop`。
+
+### GitHub 仓库设置
+
+仓库管理员还必须在 GitHub 中完成以下不可由 Git 提交表达的保护规则：
+
+- `develop`：要求 Pull Request 和至少一位审批；启用 squash merge，并将 squash 默认消息设为 Pull Request 标题与描述。验证结果记录在 PR 模板中，但不要求 `develop` 产生或等待 CI 状态。
+- `main`：要求 Pull Request、`Release protocol / release-source`、`Release protocol / validate` 和至少一位审批；禁止直接推送。来源分支必须精确为 `release/v<pyproject.toml 中的版本>`。
+- 不允许删除或强制推送 `main`、`develop` 及任何已发布的 `v*` tag。
+
+上述设置的最小验证：创建一个仅改文档的 `feature/*` PR，以 squash 合入后检查 `develop` 新增恰好一个非 merge 提交且摘要完整；再创建一个包含完整版本清单、名称与版本匹配的 `release/v<version>` PR，确认 `release-source` 和 `validate` 均通过，合入 `main` 后生成指向该提交的 `v<version>` tag。不得用生产端点或上游写入操作验证分支策略。
+
 ## 发布新版本
 
 在准备合并到 `main` 的发布分支上执行：

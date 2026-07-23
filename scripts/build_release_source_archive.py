@@ -5,6 +5,8 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
+import re
 import subprocess
 import tempfile
 import tomllib
@@ -12,12 +14,20 @@ import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 
+import yaml
+
 
 class SourceArchiveError(RuntimeError):
     """Raised when a release source archive cannot be safely produced."""
 
 
 FORBIDDEN_TOP_LEVEL_PATHS = frozenset({"runtime", ".git", ".venv"})
+NON_PLATFORM_CHANGE_TYPES = frozenset(
+    {"docs", "ci", "build", "chore", "refactor", "style", "test"}
+)
+CONVENTIONAL_COMMIT_PATTERN = re.compile(
+    r"^(?P<type>[a-z]+)(?:\([^)]+\))?:\s+(?P<summary>\S.*)$"
+)
 
 
 @dataclass(frozen=True)
@@ -58,6 +68,80 @@ def _version_at_tag(root: Path, tag: str) -> str:
         return document["project"]["version"]
     except (KeyError, tomllib.TOMLDecodeError) as error:
         raise SourceArchiveError(f"{tag} 中的 pyproject.toml 缺少有效项目版本") from error
+
+
+def _release_document_at_tag(root: Path, tag: str, version: str) -> dict[str, object]:
+    try:
+        document = yaml.safe_load(_git(root, "show", f"{tag}:releases/{version}.yaml"))
+    except yaml.YAMLError as error:
+        raise SourceArchiveError(f"{tag} 中的 releases/{version}.yaml 无效") from error
+    if not isinstance(document, dict) or document.get("version") != version:
+        raise SourceArchiveError(f"{tag} 中的 releases/{version}.yaml 与版本不匹配")
+    if not isinstance(document.get("changes"), list) or not all(
+        isinstance(change, str) and change for change in document["changes"]
+    ):
+        raise SourceArchiveError(f"{tag} 中的 releases/{version}.yaml 缺少有效 changes")
+    previous = document.get("previous")
+    if previous is not None and not isinstance(previous, str):
+        raise SourceArchiveError(f"{tag} 中的 releases/{version}.yaml previous 无效")
+    return document
+
+
+def _non_platform_change_subjects(root: Path, previous_tag: str | None, tag: str) -> list[str]:
+    if previous_tag is None:
+        return []
+    subjects = _git(
+        root,
+        "log",
+        "--reverse",
+        "--no-merges",
+        "--format=%s",
+        f"{previous_tag}..{tag}",
+    ).splitlines()
+    result: list[str] = []
+    for subject in subjects:
+        match = CONVENTIONAL_COMMIT_PATTERN.fullmatch(subject)
+        if match and match["type"] in NON_PLATFORM_CHANGE_TYPES:
+            result.append(subject)
+    return result
+
+
+def _github_repository(root: Path) -> str:
+    repository = os.environ.get("GITHUB_REPOSITORY")
+    if repository:
+        return repository
+
+    remote = _git(root, "remote", "get-url", "origin").removesuffix(".git")
+    match = re.fullmatch(r"(?:https://github\.com/|git@github\.com:)([^/]+/[^/]+)", remote)
+    if not match:
+        raise SourceArchiveError("无法确定 GitHub 仓库，需设置 GITHUB_REPOSITORY")
+    return match[1]
+
+
+def render_release_notes(root: Path, artifact: SourceArchive) -> str:
+    """Render GitHub Release notes from the tagged release manifest and commit history."""
+    document = _release_document_at_tag(root, artifact.tag, artifact.version)
+    previous_version = document["previous"]
+    previous_tag = f"v{previous_version}" if previous_version else None
+    non_platform_changes = _non_platform_change_subjects(root, previous_tag, artifact.tag)
+
+    lines = ["## 平台功能更新"]
+    if document["changes"]:
+        lines.extend(f"- {change}" for change in document["changes"])
+    else:
+        lines.append("- 本版本没有平台功能更新。")
+    lines.extend(["", "## 工程与文档维护"])
+    if non_platform_changes:
+        lines.extend(f"- {subject}" for subject in non_platform_changes)
+    else:
+        lines.append("- 本版本没有工程或文档维护项。")
+
+    if previous_tag:
+        compare_url = (
+            f"https://github.com/{_github_repository(root)}/compare/{previous_tag}...{artifact.tag}"
+        )
+        lines.extend(["", "## 完整提交记录", f"[查看完整提交记录]({compare_url})"])
+    return "\n".join(lines) + "\n"
 
 
 def _validate_archive(archive_path: Path, prefix: str) -> None:
@@ -143,17 +227,27 @@ def _verify_existing_release_asset(tag: str, artifact_path: Path) -> None:
             )
 
 
-def publish_source_archive(artifact: SourceArchive) -> None:
+def publish_source_archive(root: Path, artifact: SourceArchive) -> None:
+    notes = render_release_notes(root.resolve(), artifact)
     try:
-        _gh(
-            "release",
-            "create",
-            artifact.tag,
-            "--verify-tag",
-            "--title",
-            f"Release {artifact.tag}",
-            "--generate-notes",
-        )
+        with tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", suffix=".md", delete=False
+        ) as notes_file:
+            notes_file.write(notes)
+            notes_path = Path(notes_file.name)
+        try:
+            _gh(
+                "release",
+                "create",
+                artifact.tag,
+                "--verify-tag",
+                "--title",
+                f"Release {artifact.tag}",
+                "--notes-file",
+                str(notes_path),
+            )
+        finally:
+            notes_path.unlink(missing_ok=True)
         existing_assets: set[str] = set()
     except SourceArchiveError:
         try:
@@ -179,7 +273,7 @@ def main() -> None:
     arguments = parser.parse_args()
     artifact = build_source_archive(arguments.root, arguments.tag, arguments.output_dir)
     if arguments.publish_release:
-        publish_source_archive(artifact)
+        publish_source_archive(arguments.root, artifact)
     print(artifact.archive_path)
     print(artifact.checksum_path)
 

@@ -54,6 +54,15 @@ def test_release_catalog_validates_the_current_release_chain(tmp_path):
     assert [release.version for release in validate_releases(tmp_path)] == ["1.0.0", "1.0.1"]
 
 
+def test_release_catalog_allows_a_maintenance_release_without_platform_changes(tmp_path):
+    first = _document()
+    second = _document("1.0.1", "1.0.0")
+    second["changes"] = []
+    _project(tmp_path, [first, second])
+
+    assert [release.version for release in validate_releases(tmp_path)] == ["1.0.0", "1.0.1"]
+
+
 def test_release_catalog_rejects_a_once_job_without_exact_idempotency_key(tmp_path):
     document = _document()
     document["upgrade"]["once_jobs"] = [
