@@ -58,6 +58,14 @@ class ProducerDefinition:
     enabled_by_default: bool = True
 
 
+@dataclass(frozen=True)
+class ScheduleEditorPresentation:
+    """Operator-facing cadence projection without exposing Cron syntax."""
+
+    frequency_label: str
+    value_label: str
+
+
 POST_RULE = RuleDefinition(
     "default",
     "帖子采集",
@@ -297,6 +305,35 @@ def schedule_value_for_rule(rule: ScheduledProducerRuleConfig) -> str:
     )
 
 
+def schedule_editor_presentation_for_rule(
+    rule: ScheduledProducerRuleConfig,
+) -> ScheduleEditorPresentation:
+    """Describe every allowed schedule through the same operator-facing fields."""
+    if rule.schedule_kind == ScheduledProducerRuleConfig.ScheduleKind.INTERVAL:
+        return ScheduleEditorPresentation("每 X 分钟", "执行计划（分钟）")
+    try:
+        weekday = rule.schedule_expression.split()[4]
+    except IndexError:
+        return ScheduleEditorPresentation("定时执行", "执行计划")
+    if weekday == "*":
+        return ScheduleEditorPresentation("每天", "执行计划")
+    weekdays = ("周日", "周一", "周二", "周三", "周四", "周五", "周六")
+    if weekday.isdecimal() and 0 <= int(weekday) <= 6:
+        return ScheduleEditorPresentation(f"每周（{weekdays[int(weekday)]}）", "执行计划")
+    return ScheduleEditorPresentation("定时执行", "执行计划")
+
+
+def schedule_editor_presentation_for_template(
+    *, producer_key: str, template: RuleDefinition
+) -> ScheduleEditorPresentation:
+    """Project a new-rule template with the same vocabulary as saved rules."""
+    if template.schedule_kind == ScheduledProducerRuleConfig.ScheduleKind.INTERVAL:
+        return ScheduleEditorPresentation("每 X 分钟", "执行计划（分钟）")
+    if producer_key == "metric_weekly":
+        return ScheduleEditorPresentation("每周（由任务类型固定）", "执行计划")
+    return ScheduleEditorPresentation("每天", "执行计划")
+
+
 def _clean_schedule_values(
     *, rule: ScheduledProducerRuleConfig, values: dict[str, str], required: bool
 ) -> dict[str, str | bool]:
@@ -398,19 +435,27 @@ def _latest_due(rule: ScheduledProducerRuleConfig, now: datetime) -> datetime | 
 def next_due_for_display(
     rule: ScheduledProducerRuleConfig, now: datetime | None = None
 ) -> datetime:
+    return next_due_times_for_display(rule, count=1, now=now)[0]
+
+
+def next_due_times_for_display(
+    rule: ScheduledProducerRuleConfig, *, count: int = 3, now: datetime | None = None
+) -> tuple[datetime, ...]:
+    """Return upcoming display-only occurrences using Scheduler-equivalent semantics."""
+    if count < 1:
+        raise ValueError("触发时间数量必须至少为 1")
     moment = (now or timezone.now()).astimezone(UTC).replace(second=0, microsecond=0)
     if rule.schedule_kind == ScheduledProducerRuleConfig.ScheduleKind.INTERVAL:
         minutes = int(rule.schedule_expression)
         epoch_minutes = int(moment.timestamp() // 60)
-        return datetime.fromtimestamp(
-            (epoch_minutes - epoch_minutes % minutes + minutes) * 60, tz=UTC
+        first_epoch_minute = epoch_minutes - epoch_minutes % minutes + minutes
+        return tuple(
+            datetime.fromtimestamp((first_epoch_minute + index * minutes) * 60, tz=UTC)
+            for index in range(count)
         )
     local_now = moment.astimezone(ZoneInfo(rule.timezone_name))
-    return (
-        croniter(rule.schedule_expression, local_now, day_or=True)
-        .get_next(datetime)
-        .astimezone(UTC)
-    )
+    iterator = croniter(rule.schedule_expression, local_now, day_or=True)
+    return tuple(iterator.get_next(datetime).astimezone(UTC) for _ in range(count))
 
 
 def _fresh_enough(rule: ScheduledProducerRuleConfig, slot_at: datetime, now: datetime) -> bool:

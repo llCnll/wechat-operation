@@ -74,6 +74,9 @@ def admin_console_overview(request):
         DEFINITION_BY_KEY,
         definition_for_rule,
         next_due_for_display,
+        next_due_times_for_display,
+        schedule_editor_presentation_for_rule,
+        schedule_editor_presentation_for_template,
         schedule_description_for_rule,
         schedule_value_for_rule,
     )
@@ -137,10 +140,12 @@ def admin_console_overview(request):
                 "rule": rule,
                 "label": schedule_description_for_rule(rule),
                 "template_label": definition_for_rule(rule).label,
+                "schedule_editor": schedule_editor_presentation_for_rule(rule),
                 "schedule_value": schedule_value_for_rule(rule),
                 "is_interval": rule.schedule_kind
                 == ScheduledProducerRuleConfig.ScheduleKind.INTERVAL,
                 "next_due_at": next_due_for_display(rule),
+                "next_due_times": next_due_times_for_display(rule),
                 "last_result": SCHEDULED_PRODUCER_RESULT_LABELS.get(
                     rule.last_error_category, rule.last_error_category
                 ),
@@ -148,7 +153,6 @@ def admin_console_overview(request):
             for rule in rules
         ]
         enabled_rule_items = [item for item in rule_items if item["rule"].enabled]
-        next_rule = min(enabled_rule_items, key=lambda item: item["next_due_at"], default=None)
         recent_rule = max(
             rule_items,
             key=lambda item: (
@@ -158,6 +162,17 @@ def admin_console_overview(request):
             ),
             default=None,
         )
+        upcoming_triggers = sorted(
+            (
+                {
+                    "at": due_at,
+                    "label": item["template_label"],
+                }
+                for item in enabled_rule_items
+                for due_at in item["next_due_times"]
+            ),
+            key=lambda item: (item["at"], item["label"]),
+        )[:3]
         scheduled_producers.append(
             {
                 "producer": producer,
@@ -167,11 +182,15 @@ def admin_console_overview(request):
                     for definition in DEFINITION_BY_KEY[producer.producer_key].templates
                 ),
                 "rules": rule_items,
-                "next_rule": next_rule,
+                "upcoming_triggers": upcoming_triggers,
                 "recent_rule": recent_rule,
                 "new_rule_is_interval": (
                     DEFINITION_BY_KEY[producer.producer_key].templates[0].schedule_kind
                     == ScheduledProducerRuleConfig.ScheduleKind.INTERVAL
+                ),
+                "new_rule_schedule_editor": schedule_editor_presentation_for_template(
+                    producer_key=producer.producer_key,
+                    template=DEFINITION_BY_KEY[producer.producer_key].templates[0],
                 ),
             }
         )

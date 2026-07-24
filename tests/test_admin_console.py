@@ -91,7 +91,13 @@ def test_admin_home_is_configuration_and_traceability_console(admin_client):
     assert "检测" in page
     assert "下一步：" in page
     assert "自动化任务" in page
-    assert "新增运行时点" in page
+    assert "新增规则" in page
+    assert 'class="console-producer-add-card"' in page
+    assert "任务类型" in page
+    assert "执行频率" in page
+    assert "未来三次触发" in page
+    assert "下次触发" in page
+    assert 'aria-label="查看下次触发"' not in page
     assert 'name="timezone_name"' not in page
     assert "AUTOMATED PRODUCTION" not in page
 

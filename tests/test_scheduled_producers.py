@@ -13,7 +13,9 @@ from jobs.scheduled_producers import (
     create_rule_configuration,
     delete_rule_configuration,
     ensure_producer_configurations,
+    next_due_times_for_display,
     reconcile_scheduled_producers,
+    schedule_editor_presentation_for_rule,
     schedule_description_for_rule,
     update_producer_enabled,
     update_rule_configuration,
@@ -111,6 +113,39 @@ def test_schedule_labels_are_reversed_from_the_saved_expression():
 
     assert schedule_description_for_rule(daily) == "每天 07:30"
     assert schedule_description_for_rule(ingestion) == "每 15 分钟"
+
+
+@pytest.mark.django_db
+def test_schedule_editor_uses_consistent_frequency_and_plan_fields():
+    ensure_producer_configurations()
+    daily = ScheduledProducerRuleConfig.objects.get(producer__producer_key="metric_daily")
+    weekly = ScheduledProducerRuleConfig.objects.get(
+        producer__producer_key="metric_weekly", rule_type="morning-recheck"
+    )
+    ingestion = ScheduledProducerRuleConfig.objects.get(producer__producer_key="post_ingestion")
+
+    assert schedule_editor_presentation_for_rule(daily).frequency_label == "每天"
+    assert schedule_editor_presentation_for_rule(weekly).frequency_label == "每周（周二）"
+    assert schedule_editor_presentation_for_rule(ingestion).value_label == "执行计划（分钟）"
+
+
+@pytest.mark.django_db
+def test_next_display_times_follow_interval_and_cron_schedule_semantics():
+    ensure_producer_configurations()
+    ingestion = ScheduledProducerRuleConfig.objects.get(producer__producer_key="post_ingestion")
+    daily = ScheduledProducerRuleConfig.objects.get(producer__producer_key="metric_daily")
+    now = datetime(2026, 7, 24, 7, 31, tzinfo=ZoneInfo("Asia/Shanghai"))
+
+    assert next_due_times_for_display(ingestion, now=now) == (
+        datetime(2026, 7, 24, 7, 45, tzinfo=ZoneInfo("Asia/Shanghai")),
+        datetime(2026, 7, 24, 8, 0, tzinfo=ZoneInfo("Asia/Shanghai")),
+        datetime(2026, 7, 24, 8, 15, tzinfo=ZoneInfo("Asia/Shanghai")),
+    )
+    assert next_due_times_for_display(daily, now=now) == (
+        datetime(2026, 7, 25, 7, 30, tzinfo=ZoneInfo("Asia/Shanghai")),
+        datetime(2026, 7, 26, 7, 30, tzinfo=ZoneInfo("Asia/Shanghai")),
+        datetime(2026, 7, 27, 7, 30, tzinfo=ZoneInfo("Asia/Shanghai")),
+    )
 
 
 @pytest.mark.django_db
