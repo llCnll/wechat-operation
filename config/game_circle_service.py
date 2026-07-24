@@ -257,6 +257,7 @@ class GameCircleSessionService:
         category: str = GameCircleLoginRuntimeState.ErrorCategory.NONE,
         actions: tuple[str, ...] = (),
         wait_until: datetime | None = None,
+        frame_scope_version: int | None = None,
     ) -> None:
         row, _ = GameCircleLoginRuntimeState.objects.get_or_create(pk=1)
         legacy = (
@@ -272,6 +273,9 @@ class GameCircleSessionService:
         row.login_state = legacy
         row.outer_state = outer
         row.frame_state = frame
+        row.frame_scope_version = (
+            frame_scope_version if frame == GameCircleLoginRuntimeState.FrameState.READY else None
+        )
         row.available_actions = list(actions)
         row.login_wait_until = wait_until
         row.error_category = category
@@ -280,7 +284,7 @@ class GameCircleSessionService:
             row.last_ready_at = now
         row.save(
             update_fields=[
-                "login_state", "outer_state", "frame_state", "available_actions", "login_wait_until",
+                "login_state", "outer_state", "frame_state", "frame_scope_version", "available_actions", "login_wait_until",
                 "error_category", "checked_at", "last_ready_at", "updated_at",
             ]
         )
@@ -288,10 +292,16 @@ class GameCircleSessionService:
     def runtime_status(self) -> dict[str, object]:
         row = GameCircleLoginRuntimeState.objects.filter(pk=1).first()
         if row is None:
-            return {"outer_state": "UNKNOWN", "frame_state": "UNKNOWN", "available_actions": []}
+            return {
+                "outer_state": "UNKNOWN",
+                "frame_state": "UNKNOWN",
+                "frame_scope_version": None,
+                "available_actions": [],
+            }
         return {
             "outer_state": row.outer_state,
             "frame_state": row.frame_state,
+            "frame_scope_version": row.frame_scope_version,
             "available_actions": list(row.available_actions or []),
             "login_wait_until": row.login_wait_until.isoformat() if row.login_wait_until else None,
             "error_category": row.error_category,
@@ -593,6 +603,7 @@ class GameCircleSessionService:
                 if ready
                 else (GameCircleLoginRuntimeState.Action.BUILD_FRAME, GameCircleLoginRuntimeState.Action.CHECK_LOGIN)
             ),
+            frame_scope_version=scope.scope_version if ready and scope is not None else None,
         )
 
     def _bootstrap_locked(
@@ -626,6 +637,7 @@ class GameCircleSessionService:
                         GameCircleLoginRuntimeState.OuterState.OUTER_READY,
                         GameCircleLoginRuntimeState.FrameState.READY,
                         actions=(GameCircleLoginRuntimeState.Action.CHECK_LOGIN, GameCircleLoginRuntimeState.Action.KEEPALIVE),
+                        frame_scope_version=scope.scope_version if scope is not None else None,
                     )
                     return BootstrapResult(False)
             if intent.checks_outer_only and active_lease is not None and not broken_active_lease:
@@ -652,6 +664,7 @@ class GameCircleSessionService:
                         if frame_ready
                         else (GameCircleLoginRuntimeState.Action.BUILD_FRAME,)
                     ),
+                    frame_scope_version=scope.scope_version if frame_ready and scope is not None else None,
                 )
                 return BootstrapResult(False)
             if scope is None:
@@ -696,6 +709,7 @@ class GameCircleSessionService:
                     GameCircleLoginRuntimeState.OuterState.OUTER_READY,
                     GameCircleLoginRuntimeState.FrameState.READY,
                     actions=(GameCircleLoginRuntimeState.Action.CHECK_LOGIN, GameCircleLoginRuntimeState.Action.KEEPALIVE),
+                    frame_scope_version=scope.scope_version,
                 )
             else:
                 # A frozen keepalive may finish after the operator selects a

@@ -19,6 +19,12 @@ from posts.models import GameCircleLoginRuntimeState
 from service_supervisor.runtime import RuntimeStore
 
 
+@pytest.fixture(autouse=True)
+def isolate_game_circle_runtime_store(monkeypatch, tmp_path):
+    """Keep session projections out of the live Supervisor runtime on Windows."""
+    monkeypatch.setattr("config.game_circle_service.RUNTIME_DIR", tmp_path)
+
+
 def _lease(appid="game-a"):
     return SessionLease(
         appid=appid,

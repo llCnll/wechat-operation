@@ -150,6 +150,7 @@ class GameCircleLoginRuntimeState(models.Model):
     login_state = models.CharField(max_length=20, choices=LoginState.choices, default=LoginState.UNKNOWN)
     outer_state = models.CharField(max_length=24, choices=OuterState.choices, default=OuterState.UNKNOWN)
     frame_state = models.CharField(max_length=16, choices=FrameState.choices, default=FrameState.UNKNOWN)
+    frame_scope_version = models.PositiveBigIntegerField(null=True, blank=True)
     available_actions = models.JSONField(default=list)
     login_wait_until = models.DateTimeField(null=True, blank=True)
     checked_at = models.DateTimeField(null=True, blank=True)
