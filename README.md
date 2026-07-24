@@ -46,6 +46,17 @@ uv run python manage.py upgrade_plan --json
 
 按计划完成迁移、一次性 Job、重启和验证后，执行 `upgrade_ack`。完整命令、状态文件格式、发布约束和最小验证见[发布与多端升级](docs/guides/release-and-upgrade.md)。
 
+## 开发与集成端点同步
+
+跟随 `develop` 或 `feature/*` 的非发布端点，在每次拉取或切换到新提交后，必须先同步锁定依赖，再启动或重启任何服务：
+
+```bash
+git pull --ff-only
+uv sync --locked --all-groups
+```
+
+依赖同步失败时停止；完整边界见[发布与多端升级](docs/guides/release-and-upgrade.md#非发布端点同步)。`main` 端点仍必须按上一节的正式升级流程执行。
+
 ## 常用入口
 
 | 入口 | 用途 |
