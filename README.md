@@ -46,6 +46,17 @@ uv run python manage.py upgrade_plan --json
 
 按计划完成迁移、一次性 Job、重启和验证后，执行 `upgrade_ack`。完整命令、状态文件格式、发布约束和最小验证见[发布与多端升级](docs/guides/release-and-upgrade.md)。
 
+## 开发与集成端点同步
+
+跟随 `develop` 或 `feature/*` 的非发布端点，在每次拉取或切换到新提交后，必须先同步锁定依赖，再启动或重启任何服务：
+
+```bash
+git pull --ff-only
+uv sync --locked --all-groups
+```
+
+依赖同步失败时停止；完整边界见[发布与多端升级](docs/guides/release-and-upgrade.md#非发布端点同步)。`main` 端点仍必须按上一节的正式升级流程执行。
+
 ## 常用入口
 
 | 入口 | 用途 |
@@ -69,9 +80,9 @@ uv run python manage.py upgrade_plan --json
 ## 安全边界
 
 - 受控 Chrome 由 Supervisor 以独立 profile 与仅本机 CDP 调试端口启动；不得手工接管其进程，也不得读取、记录或伪造 Cookie、令牌或二维码内容。
-- 在 `/admin/` 同步可管理游戏并选择“当前操作游戏”后，`game_circle_session` 服务会通过 `SessionBootstrap` 建立受控 HOME、当前游戏 Frame、来源身份和最小只读验证，全部成功后才发布内存 lease。来源调用只使用已发布 lease；无 lease 时返回脱敏未就绪结果，不会建页、切换游戏、入队恢复或重放人工写入。服务启动、手动检查、建立当前游戏 Frame 和切换当前游戏都使用同一 Bootstrap。可选 Repair 默认关闭；可选定时 Keepalive 也默认关闭，启用后按四小时桶执行候选会话的 `A → B → A`（或直接对齐），并在消费者开始执行时冻结当前游戏范围。Cookie、外层 token、来源身份 token、完整 URL 和 target ID 均不持久化。
+- 在 `/admin/` 同步可管理游戏并选择“当前操作游戏”后，`game_circle_session` 服务会通过 `SessionBootstrap` 建立受控 HOME、当前游戏 Frame、来源身份和最小只读验证，全部成功后才发布内存 lease。来源调用只使用已发布 lease；无 lease 时返回脱敏未就绪结果，不会建页、切换游戏、入队恢复或重放人工写入。服务启动、手动检查、建立当前游戏 Frame 和切换当前游戏都使用同一 Bootstrap。可选 Repair 默认关闭；可选定时 Keepalive 也默认关闭，启用后按自动任务生产者中配置的受限间隔执行候选会话的 `A → B → A`（或直接对齐），并在消费者开始执行时冻结当前游戏范围。Cookie、外层 token、来源身份 token、完整 URL 和 target ID 均不持久化。
 - 游戏圈 Worker 与 Web 的本机 IPC 由 Supervisor 注入独立进程 capability；必须通过 Supervisor 启动整套服务，不得手工暴露、复制或复用 `runtime/supervisor/` 中的控制或会话能力文件。
 - 项目不内置 AI、OCR 或 ASR 服务。部署方负责提供地址、密钥和模型，并确认数据处理边界；密钥只可写入、不回显。
 - 视频审核默认关闭，必须先完成无 Cookie 的授权样本预检。详见[视频审核手册](docs/guides/video-review-runbook.md)。
 - 上游写操作默认关闭。人工处置需在工作台二次确认；AI 自动处置需要单独的高风险授权。
-- 人工禁言默认建立本服务的“自动续期（永久禁言意图）”，并以 30 天作为首次上游期限；它只作用于当前游戏。禁言管理中的“标记为自动续期”只更新本地标记，不立即调用上游平台。`mute_maintenance` Worker 每 12 小时在到期前或禁言时间为 0 时续期；候选回读后若有效期仍至少 5 天则跳过。禁言管理可刷新自动续期/有效禁言的列表作者，或扫描全量帖子作者并仅补充仍禁言的作者；两者均不执行禁言、解除或设置自动续期。取消自动续期只停止续期，不会解除当前上游禁言。
+- 人工禁言默认建立本服务的“自动续期（永久禁言意图）”，并以 30 天作为首次上游期限；它只作用于当前游戏。禁言管理中的“标记为自动续期”只更新本地标记，不立即调用上游平台。`mute_maintenance` Worker 由自动任务生产者的受限定时规则入队（默认每日 00:00、12:00），在到期前或禁言时间为 0 时续期；候选回读后若有效期仍至少 5 天则跳过。禁言管理可刷新自动续期/有效禁言的列表作者，或扫描全量帖子作者并仅补充仍禁言的作者；两者均不执行禁言、解除或设置自动续期。取消自动续期只停止续期，不会解除当前上游禁言。

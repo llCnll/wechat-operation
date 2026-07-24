@@ -84,7 +84,7 @@ flowchart LR
 
 | 进程 | 数量 | 角色 | 不负责的事 |
 | --- | ---: | --- | --- |
-| 自动调度器（Supervisor 服务 `scheduler`） | 1 | 创建采集、状态巡检、指标同步，以及启用后按四小时桶创建会话保活 Job。 | 不连接 CDP、不读取微信、不调用 AI、不消费任务。 |
+| 自动调度器（Supervisor 服务 `scheduler`） | 1 | 每 30 秒按数据库中的受控生产者规则创建采集、状态巡检、指标同步、会话保活和禁言续期 Job。 | 不连接 CDP、不读取微信、不调用 AI、不消费任务；同一 runtime 只能有一个实例。 |
 | 游戏圈会话服务（Supervisor 服务 `game_circle_session`） | 1 | 运行 Bootstrap、登录等待和可选 Repair；唯一持有 CDP、系统 target 与来源身份，并只消费可选保活 Job。 | 不消费帖子、指标或 AI Job。 |
 | 实时采集 Worker（Supervisor 服务 `ingestion`） | 1 | 消费自动采集与状态巡检任务；经固定 IPC 读取来源并写入帖子、状态与互动快照；原创帖入库后创建审核流水线。 | 不消费人工补采、范围互动刷新或旧采集任务；不调用 AI，不执行上游写处置。 |
 | 人工补采 Worker（Supervisor 服务 `backfill_ingestion`） | 1 | 消费人工历史补采、范围互动刷新、作者禁言回填和旧 `INGEST_WINDOW`；复用检查点逻辑。 | 不消费 Scheduler 创建的实时任务；不调用 AI，不执行上游写处置。 |
@@ -118,15 +118,15 @@ flowchart LR
 
 ### 定时入队
 
-所有时间均为北京时间；Scheduler 每 30 秒轮询，但同一业务时间槽按幂等键只创建一次 Job。
+生产者配置在系统配置台“自动任务生产者”管理：首页卡片显示启用状态、规则数、最近自动入队、下次触发和最近检查；规则在弹窗内按运行时点管理。运营人员可从受控模板新增、调整、暂停或删除规则实例；定时规则只填写 `HH:MM`，间隔规则只填写分钟数，系统生成并保存五字段 Cron 或固定间隔表达式。调度统一使用中国标准时间。删除只停止未来自动入队，不会删除已入队 Job 或逻辑槽审计；Scheduler 每 30 秒轮询，同一逻辑槽以 UTC 实例和数据库唯一约束去重。配置保存后无需重启，最迟下一轮生效。
 
-| 时间 | Job |
+| 默认规则 | Job |
 | --- | --- |
-| 每 15 分钟整点 | `STATUS_SYNC`、`SCHEDULED_INGEST_WINDOW` |
-| 启用会话保活后，每个北京时间四小时桶 | `GAME_CIRCLE_SESSION_KEEPALIVE` |
-| 每日 00:00、12:00 | `PERMANENT_MUTE_RENEWAL` |
-| 每日 07:30 后 | `METRIC_DAILY_SYNC` |
-| 周一 17:30 后、周二 10:00 后、周二 16:00 后 | `METRIC_WEEKLY_SYNC` |
+| 每 15 分钟（可在 5–1440 分钟内调整） | `STATUS_SYNC`、`SCHEDULED_INGEST_WINDOW` |
+| 默认每 4 小时；启用后可在 60–1440 分钟内调整 | `GAME_CIRCLE_SESSION_KEEPALIVE` |
+| 默认每日 00:00、12:00；可按受限每日时点调整 | `PERMANENT_MUTE_RENEWAL` |
+| 默认每日 07:30；可按受限每日时点调整 | `METRIC_DAILY_SYNC` |
+| 默认周一 17:30、周二 10:00、周二 16:00；周几由阶段模板固定，仅可调整时点 | `METRIC_WEEKLY_SYNC` |
 
 未选择当前操作游戏时，Scheduler 跳过所有需要游戏范围的来源 Job；已入队保活在首次消费时以 `NO_ACTIVE_GAME_SCOPE` 终态结束，不创建浏览器页面。
 
@@ -242,7 +242,7 @@ cp .env.example runtime/.env
 | `ENABLE_MUTE_WRITES`、`ENABLE_UNMUTE_WRITES` | 禁言、解除禁言开关。 |
 | `ENABLE_RESTORE_WRITES` | 恢复正常开关。 |
 | `SESSION_REPAIR_ENABLED` | 默认 `false`；仅检查 current-owner HOME/Frame，失效时合并一次 Bootstrap。 |
-| `SESSION_KEEPALIVE_ENABLED` | 默认 `false`；Scheduler 仅在启用后接受未来四小时桶，已入队任务保持原队列语义。 |
+| 自动任务生产者中的“会话保活” | 默认关闭；在系统配置台启用后按规则创建未来保活 Job，已入队任务保持原队列语义。 |
 
 不要将浏览器 Cookie、令牌、完整跳转 URL、运营者身份标识或未脱敏的作者用户 ID写入 `runtime/.env`、文档或日志。作者用户 ID仅允许保存到原创帖与作者禁言状态表，不进入报表或通用搜索。
 

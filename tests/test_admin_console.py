@@ -11,7 +11,13 @@ from django.utils import timezone
 
 from config.context_processors import _service_reason, admin_console_overview
 from config.supervisor import SupervisorUnavailableError
-from jobs.models import BackgroundJob, JobStatus
+from jobs.models import (
+    BackgroundJob,
+    JobStatus,
+    ScheduledProducerConfig,
+    ScheduledProducerRuleConfig,
+)
+from jobs.scheduled_producers import delete_rule_configuration
 from posts.game_catalog import set_active_game
 from posts.models import ManagedGame, OriginalPost
 from reviews.adapters import AssessmentOutput
@@ -84,6 +90,51 @@ def test_admin_home_is_configuration_and_traceability_console(admin_client):
     assert "查看帖子采集 Worker说明" not in page
     assert "检测" in page
     assert "下一步：" in page
+    assert "自动化任务" in page
+    assert "新增规则" in page
+    assert 'class="console-producer-add-card"' in page
+    assert "任务类型" in page
+    assert "执行频率" in page
+    assert "未来三次触发" in page
+    assert "下次触发" in page
+    assert 'aria-label="查看下次触发"' not in page
+    assert 'name="timezone_name"' not in page
+    assert "AUTOMATED PRODUCTION" not in page
+
+
+@pytest.mark.django_db
+def test_admin_can_add_a_time_point_rule_instance(admin_client):
+    producer = ScheduledProducerConfig.objects.get(producer_key="metric_weekly")
+
+    response = admin_client.post(
+        f"/admin/scheduled-producers/{producer.pk}/rules/",
+        {
+            "return_to": "/admin/",
+            "rule_type": "afternoon-recheck",
+            "schedule_time": "18:00",
+            "enabled": "true",
+        },
+        follow=True,
+    )
+
+    assert response.status_code == 200
+    assert "已新增周指标·每周二 18:00" in response.content.decode()
+    assert ScheduledProducerRuleConfig.objects.filter(
+        producer=producer,
+        rule_type="afternoon-recheck",
+        schedule_expression="0 18 * * 2",
+    ).exists()
+
+
+@pytest.mark.django_db
+def test_admin_hides_archived_rule_instances(admin_client):
+    rule = ScheduledProducerRuleConfig.objects.get(producer__producer_key="metric_daily")
+
+    delete_rule_configuration(rule_id=rule.pk)
+    page = admin_client.get("/admin/").content.decode()
+
+    assert "暂无启用规则" in page
+    assert 'action="/admin/scheduled-producer-rules/%s/delete/"' % rule.pk not in page
 
 
 @pytest.mark.django_db
@@ -123,7 +174,9 @@ def test_admin_pipeline_does_not_misreport_chrome_login_when_session_service_is_
             "game_circle_session": {"running": False, "desired": False},
         }
 
-    monkeypatch.setattr("config.context_processors.SupervisorClient.status", stopped_session_service)
+    monkeypatch.setattr(
+        "config.context_processors.SupervisorClient.status", stopped_session_service
+    )
 
     page = admin_client.get("/admin/").content.decode()
 

@@ -41,6 +41,16 @@
 - 提交标题遵循 [AGENTS.md](../../AGENTS.md) 的规范；PR 模板中的“变更摘要”成为 squash 提交正文。
 - 摘要说明用户或系统行为变化、数据库/配置/服务/升级影响、验证结果以及风险和回滚方式；无影响项明确写“无”。涉及高风险能力时，摘要必须写明隔离范围和最小验证方式。
 
+### 非发布端点同步
+
+跟随 `develop` 或 `feature/*` 的端点没有发布版本状态。每次 `git pull`、`git switch`、`git checkout` 或其他操作使其代码提交变化后，必须在运行任何 `uv run` 项目命令、Django 管理命令、启动 Supervisor 或重启服务前执行：
+
+```bash
+uv sync --locked --all-groups
+```
+
+该命令成功后才能继续运行或重启服务；失败时停止排障，不得由 Supervisor、Web 或 Worker 自动安装依赖。这一约束只准备与 `uv.lock` 一致的本地环境，不创建版本、tag、发布清单或 `runtime/release-state.json`，也不替代 `main` 的 `upgrade_plan`、`upgrade_ack` 和发布清单流程。
+
 `releases/<version>.yaml` 的 `changes` 只记录平台功能更新：`feat`、`fix`、`hotfix`、`perf` 和 `security` 的实际用户或运行行为变化。它既是升级清单的一部分，也是 GitHub Release 的“平台功能更新”唯一来源。`docs`、`ci`、`build`、`chore`、`refactor`、`style` 和 `test` 不写入 `changes`；若某项重构或维护实际改变了用户或运行行为，必须使用 `feat` 或 `fix` 标题。维护型发布没有平台功能变化时，显式写 `changes: []`，Release 页显示“本版本没有平台功能更新”。
 
 GitHub 不能按目标分支单独强制 merge method：为保留发布后的 `main -> develop` 正常回灌，仓库仍需保留 merge commit。因此“feature 必须 squash”由 PR 审阅流程执行；验证目标是合入后的 Git 历史每个 feature 只有一个 squash 提交，而不是 GitHub 界面只显示一种合并按钮。

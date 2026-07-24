@@ -53,7 +53,7 @@ def test_runtime_configuration_maps_restarts_to_affected_services():
     assert affected_services({"ENABLE_BLOCK_WRITES"}) == {"web", "ai_moderation"}
     assert affected_services({"ENABLE_AI_SINK_WRITES"}) == {"web", "ai_moderation"}
     assert affected_services({"SESSION_REPAIR_ENABLED"}) == {"game_circle_session", "scheduler"}
-    assert affected_services({"SESSION_KEEPALIVE_ENABLED"}) == {"game_circle_session", "scheduler"}
+    assert affected_services({"SESSION_KEEPALIVE_ENABLED"}) == set()
 
 
 def test_runtime_configuration_displays_affected_services_with_console_labels():
