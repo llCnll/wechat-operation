@@ -1,0 +1,30 @@
+<script>
+  (() => {
+    const storageKey = "operations-theme";
+    const legacyKey = "operations-console-theme";
+    const toggles = () => document.querySelectorAll("[data-operations-theme-toggle]");
+    const readTheme = () => {
+      try { return localStorage.getItem(storageKey) || localStorage.getItem(legacyKey) || "light"; }
+      catch (_) { return "light"; }
+    };
+    const applyTheme = (value, persist = false) => {
+      const theme = value === "dark" ? "dark" : "light";
+      document.body.dataset.operationsTheme = theme;
+      document.body.dataset.consoleTheme = theme;
+      toggles().forEach((toggle) => {
+        toggle.setAttribute("aria-pressed", String(theme === "dark"));
+        toggle.setAttribute("aria-label", theme === "dark" ? "切换至原色配色" : "切换至深色配色");
+        toggle.setAttribute("title", theme === "dark" ? "切换至原色配色" : "切换至深色配色");
+      });
+      if (persist) {
+        try { localStorage.setItem(storageKey, theme); } catch (_) { /* Preference is optional. */ }
+      }
+    };
+    applyTheme(readTheme());
+    document.addEventListener("click", (event) => {
+      if (!(event.target instanceof Element) || !event.target.closest("[data-operations-theme-toggle]")) return;
+      event.preventDefault();
+      applyTheme(document.body.dataset.operationsTheme === "dark" ? "light" : "dark", true);
+    }, true);
+  })();
+</script>

@@ -1,4 +1,6 @@
 from types import SimpleNamespace
+from datetime import timedelta
+from pathlib import Path
 
 import pytest
 from django.contrib.auth import get_user_model
@@ -9,7 +11,7 @@ from django.test.utils import CaptureQueriesContext
 from django.urls import resolve
 from django.utils import timezone
 
-from config.context_processors import _service_reason, admin_console_overview
+from config.context_processors import MANAGED_SERVICE_NAMES, _service_reason, admin_console_overview
 from config.supervisor import SupervisorUnavailableError
 from jobs.models import (
     BackgroundJob,
@@ -48,18 +50,27 @@ def test_admin_home_is_configuration_and_traceability_console(admin_client):
     assert "数据追溯" in page
     assert "仅此区域允许编辑" in page
     assert "未启用策略" in page
-    assert "初始化与运行状态" in page
+    assert "运行概览" in page
+    assert "按运行流程" in page
+    assert "按服务管理" in page
+    assert "console-lucide" in page
+    assert 'data-operations-theme-toggle' in page
+    assert 'aria-label="切换至深色配色"' in page
+    assert "console-hero-mark" not in page
+    assert "当前范围" in page
     assert "受控 Chrome" in page
     assert "游戏圈会话服务" in page
-    assert "受控 Chrome 会话" in page
+    assert "外层会话" in page
     assert "保活当前游戏 Frame" in page
+    assert 'class="console-session-maintenance"' in page
+    assert "自动修复当前游戏 Frame" in page
     assert "检查外层会话" in page
     assert "更换操作游戏" in page
     assert "刷新可管理游戏目录" in page
     assert 'action="/admin/runtime/game-catalog/sync/"' in page
     assert "受控同步" not in page
     active_start = page.index(">当前操作游戏<")
-    active_end = page.index(">受控 Chrome<", active_start)
+    active_end = page.index('id="service-foundation"', active_start)
     active_node = page[active_start:active_end]
     assert 'action="/admin/runtime/active-game/"' in active_node
     assert 'action="/admin/runtime/game-catalog/sync/"' in active_node
@@ -83,13 +94,13 @@ def test_admin_home_is_configuration_and_traceability_console(admin_client):
     assert 'data-config-dialog-panel="ocr"' in page
     assert 'data-config-dialog-panel="writes"' in page
     assert "配置 AI、OCR 与人工处置授权" not in page
-    assert "console-pipeline-info" in page
-    assert "管理采集" in page
-    assert 'class="console-pipeline-node-step">01</span>' in page
-    assert "查看视频审核 Worker（可选）说明" in page
-    assert "查看帖子采集 Worker说明" not in page
-    assert "检测" in page
+    assert "生命周期" in page
+    assert "业务条件" in page
+    assert "条件缺失时" in page
+    assert "当前状态" in page
     assert "下一步：" in page
+    assert 'data-runtime-service-link' in page
+    assert 'class="console-subservice-log-button"' in page
     assert "自动化任务" in page
     assert "新增规则" in page
     assert 'class="console-producer-add-card"' in page
@@ -100,6 +111,39 @@ def test_admin_home_is_configuration_and_traceability_console(admin_client):
     assert 'aria-label="查看下次触发"' not in page
     assert 'name="timezone_name"' not in page
     assert "AUTOMATED PRODUCTION" not in page
+    assert 'class="console-section-surface console-producer-grid"' in page
+    assert 'class="console-section-surface console-configuration-surface"' in page
+    assert 'class="console-section-surface console-health-grid"' in page
+    assert 'class="console-section-surface console-trace-grid"' in page
+
+
+def test_runtime_console_feedback_bounds_its_icon_size():
+    stylesheet = Path("posts/static/posts/admin_console.css").read_text(encoding="utf-8")
+
+    assert ".console-feedback-icon svg" in stylesheet
+    assert ".console-feedback-icon { display:grid; flex:none; width:20px; height:20px;" in stylesheet
+    assert ".console-subservice-log-button { display:inline-flex;" in stylesheet
+    assert "The lower console is one continuous system" in stylesheet
+    assert 'data-console-theme="dark"] .console-producer-card' in stylesheet
+    assert 'data-console-theme="dark"] .console-runtime-tabs' in stylesheet
+    assert 'data-console-theme="dark"] :is(.console-config-dialog,.console-log-dialog)::backdrop' in stylesheet
+    assert ".console-session-maintenance { flex-basis:100%;" in stylesheet
+    assert ".console-section-surface { box-sizing:border-box;" in stylesheet
+    assert 'data-console-theme="dark"] .console-section-surface' in stylesheet
+    assert ".configuration-dashboard .console-section { margin-top:28px;" in stylesheet
+    assert 'data-console-theme="dark"] .console-section {' in stylesheet
+
+
+def test_runtime_flow_service_link_switches_to_the_service_view():
+    base_template = Path("templates/admin/base_site.html").read_text(encoding="utf-8")
+
+    assert "[data-runtime-service-link]" in base_template
+    assert 'document.getElementById(`runtime-${view}-tab`)' in base_template
+    assert "target.scrollIntoView" in base_template
+    assert 'operations-console-runtime-view' in base_template
+    assert 'activateRuntimeView("services", true)' in base_template
+    assert 'operations-console-runtime-scroll' in base_template
+    assert 'window.scrollTo(0, scrollTop)' in base_template
 
 
 @pytest.mark.django_db
@@ -138,29 +182,20 @@ def test_admin_hides_archived_rule_instances(admin_client):
 
 
 @pytest.mark.django_db
-def test_admin_pipeline_follows_the_content_flow(admin_client):
+def test_runtime_console_flow_follows_the_operational_dependency_order(admin_client):
     response = admin_client.get("/admin/")
 
-    pipeline = admin_console_overview(response.wsgi_request)["admin_console"]["pipeline"]
+    flow = admin_console_overview(response.wsgi_request)["admin_console"]["runtime_console"]["flow"]
 
-    assert [node["key"] for node in pipeline] == [
-        "web",
-        "active_game_scope",
-        "controlled_chrome",
-        "game_circle_session",
-        "controlled_chrome_session",
-        "scheduler",
-        "ingestion",
-        "metric_sync",
-        "ocr",
-        "video_extraction",
-        "ai",
-        "policy",
-        "review",
-        "writes",
-        "ai_moderation",
-        "mute_maintenance",
+    assert [node["key"] for node in flow] == [
+        "console",
+        "game-circle-connection",
+        "active-game-scope",
+        "current-game-frame",
+        "audit-configuration",
+        "core-workers",
     ]
+    assert sum(node["recommended"] for node in flow) == 1
 
 
 @pytest.mark.django_db
@@ -180,8 +215,99 @@ def test_admin_pipeline_does_not_misreport_chrome_login_when_session_service_is_
 
     page = admin_client.get("/admin/").content.decode()
 
-    assert "游戏圈会话服务未运行，暂不能检查" in page
+    assert "游戏圈会话服务未运行，状态暂不可用" in page
     assert "打开登录页" not in page
+
+
+@pytest.mark.django_db
+def test_runtime_overview_requires_a_fresh_frame_for_the_current_scope(admin_client, monkeypatch):
+    from posts.game_catalog import set_active_game
+    from posts.models import GameCircleLoginRuntimeState, ManagedGame
+
+    game = ManagedGame.objects.create(appid="wx-runtime-current", name="当前游戏")
+    scope = set_active_game(appid=game.appid)
+    monkeypatch.setattr(
+        "config.context_processors.SupervisorClient.status",
+        lambda _self: {name: {"running": True, "desired": True} for name in MANAGED_SERVICE_NAMES},
+    )
+    state = GameCircleLoginRuntimeState.objects.create(
+        outer_state=GameCircleLoginRuntimeState.OuterState.OUTER_READY,
+        frame_state=GameCircleLoginRuntimeState.FrameState.READY,
+        frame_scope_version=scope.scope_version,
+        checked_at=timezone.now(),
+    )
+
+    overview = admin_console_overview(admin_client.get("/admin/").wsgi_request)["admin_console"]
+    assert overview["runtime_console"]["readiness"]["source_ready"] is True
+
+    other = ManagedGame.objects.create(appid="wx-runtime-next", name="下一游戏")
+    set_active_game(appid=other.appid)
+    overview = admin_console_overview(admin_client.get("/admin/").wsgi_request)["admin_console"]
+    assert overview["runtime_console"]["readiness"]["source_ready"] is False
+
+    state.frame_scope_version = 2
+    state.checked_at = timezone.now() - timedelta(minutes=11)
+    state.save(update_fields=["frame_scope_version", "checked_at"])
+    overview = admin_console_overview(admin_client.get("/admin/").wsgi_request)["admin_console"]
+    assert overview["runtime_console"]["readiness"]["source_ready"] is False
+
+
+@pytest.mark.django_db
+def test_runtime_console_groups_fixed_services_and_keeps_lifecycle_separate_from_conditions(
+    admin_client, monkeypatch
+):
+    ScheduledProducerRuleConfig.objects.update(enabled=False)
+    monkeypatch.setattr(
+        "config.context_processors.SupervisorClient.status",
+        lambda _self: {name: {"running": True, "desired": True} for name in MANAGED_SERVICE_NAMES},
+    )
+
+    console = admin_console_overview(admin_client.get("/admin/").wsgi_request)["admin_console"][
+        "runtime_console"
+    ]
+    groups = {group["key"]: group for group in console["service_groups"]}
+
+    assert list(groups) == [
+        "foundation",
+        "game-circle-access",
+        "core-workers",
+        "optional-capabilities",
+    ]
+    assert [node["key"] for node in groups["game-circle-access"]["nodes"]] == [
+        "game-circle-session"
+    ]
+    scheduler = next(node for node in groups["core-workers"]["nodes"] if node["key"] == "scheduler")
+    mute = next(node for node in groups["core-workers"]["nodes"] if node["key"] == "mute-maintenance")
+    assert scheduler["lifecycle"].startswith("运行中")
+    assert scheduler["business_ready"] is False
+    assert "无规则时服务仍运行" in scheduler["missing_behavior"]
+    assert "只读状态刷新可直接消费" in mute["business_condition"]
+
+
+@pytest.mark.django_db
+def test_runtime_console_only_renders_fixed_csrf_protected_controls(admin_client):
+    page = admin_client.get("/admin/").content.decode()
+
+    assert 'id="runtime-flow-tab"' in page
+    assert 'id="runtime-services-tab"' in page
+    assert 'action="/admin/runtime/services/controlled_chrome/' not in page
+    assert 'action="/admin/runtime/session-check/"' in page
+    assert 'action="/admin/runtime/current-game-frame/"' in page
+    assert 'name="csrfmiddlewaretoken"' in page
+    assert "target_id" not in page
+    assert "source_token" not in page
+
+
+def test_system_configuration_uses_local_lucide_icons_without_emoji_assets():
+    icon_template = Path("posts/templates/posts/includes/lucide_icon.html").read_text(
+        encoding="utf-8"
+    )
+    console_template = Path("templates/admin/index.html").read_text(encoding="utf-8")
+
+    assert "<svg" in icon_template
+    assert "lucide_icon.html" in console_template
+    assert "https://" not in icon_template
+    assert "😀" not in console_template
 
 
 @pytest.mark.django_db
@@ -194,7 +320,7 @@ def test_admin_home_degrades_when_supervisor_is_unavailable(admin_client, monkey
     page = admin_client.get("/admin/").content.decode()
 
     assert "Supervisor 未启动或运行态文件不可用" in page
-    assert "启动 Supervisor" in page
+    assert "查看基础托管" in page
 
 
 def test_service_reason_formats_heartbeat_in_local_time():
@@ -568,3 +694,9 @@ def test_review_task_is_trace_only_and_legacy_operation_urls_are_gone(admin_clie
     assert "恢复正常" not in page
     assert legacy.status_code == 410
     assert not task.operation_audits.exists()
+
+
+def test_dark_console_policy_summary_uses_a_dark_surface():
+    stylesheet = Path("posts/static/posts/admin_console.css").read_text(encoding="utf-8")
+
+    assert 'body.configuration-dashboard[data-console-theme="dark"] .console-policy-rules-summary { background:linear-gradient(105deg,#162922,#10151d); }' in stylesheet

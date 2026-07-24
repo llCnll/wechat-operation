@@ -1,0 +1,48 @@
+<article class="console-service-card {% if node.ready %}is-ready{% else %}is-blocked{% endif %}{% if node.optional %} is-optional{% endif %}" id="service-{{ node.key }}">
+  <header>
+    <div><span class="console-service-card-state">{% if node.ready %}已就绪{% elif node.optional %}可选{% else %}待处理{% endif %}</span><h4>{{ node.label }}</h4></div>
+    <span class="console-service-card-icon" aria-hidden="true">{% if node.key == "game-circle-session" %}{% include "posts/includes/lucide_icon.html" with name="gamepad" %}{% elif node.key == "review" %}{% include "posts/includes/lucide_icon.html" with name="shield-check" %}{% elif node.key == "scheduler" %}{% include "posts/includes/lucide_icon.html" with name="workflow" %}{% elif node.key == "web" %}{% include "posts/includes/lucide_icon.html" with name="panel-top" %}{% else %}{% include "posts/includes/lucide_icon.html" with name="settings" %}{% endif %}</span>
+  </header>
+  <p>{{ node.purpose }}</p>
+  <dl>
+    <div><dt>生命周期</dt><dd>{{ node.lifecycle }}</dd></div>
+    <div><dt>业务条件</dt><dd>{{ node.business_condition }}</dd></div>
+    <div><dt>当前状态</dt><dd>{{ node.reason }}</dd></div>
+    <div><dt>条件缺失时</dt><dd>{{ node.missing_behavior }}</dd></div>
+  </dl>
+  {% if node.key == "game-circle-session" %}
+  <div class="console-service-layers" aria-label="游戏圈访问状态">
+    {% for layer in node.connection_layers %}<span class="{% if layer.ready %}is-ready{% else %}is-blocked{% endif %}">{{ layer.label }}：{{ layer.reason }}</span>{% endfor %}
+  </div>
+  <div class="console-service-actions">
+    {% if node.running %}
+    <form method="post" action="{% url 'supervisor-control-service' service=node.service action='restart' %}">{% csrf_token %}<input type="hidden" name="return_to" value="/admin/"><button type="submit">重启服务</button></form>
+    {% else %}
+    <form method="post" action="{% url 'supervisor-control-service' service=node.service action='start' %}">{% csrf_token %}<input type="hidden" name="return_to" value="/admin/"><button type="submit">启动服务</button></form>
+    {% endif %}
+    {% if node.running %}
+    <form method="post" action="{% url 'open-controlled-login' %}">{% csrf_token %}<input type="hidden" name="return_to" value="/admin/"><button class="is-quiet" type="submit">打开登录页</button></form>
+    <form method="post" action="{% url 'check-outer-session' %}">{% csrf_token %}<input type="hidden" name="return_to" value="/admin/"><button class="is-quiet" type="submit">检查外层会话</button></form>
+    <form method="post" action="{% url 'build-current-game-frame' %}">{% csrf_token %}<input type="hidden" name="return_to" value="/admin/"><button class="is-quiet" type="submit">建立当前游戏 Frame</button></form>
+    <form method="post" action="{% url 'enqueue-session-keepalive' %}">{% csrf_token %}<input type="hidden" name="return_to" value="/admin/"><button class="is-quiet" type="submit">保活当前游戏 Frame</button></form>
+    <details class="console-session-maintenance"><summary><span>可选自动维护</span><span class="console-lucide" aria-hidden="true">{% include "posts/includes/lucide_icon.html" with name="chevron-right" %}</span></summary><form method="post" action="{% url 'save-runtime-configuration' %}">{% csrf_token %}<input type="hidden" name="return_to" value="/admin/"><input type="hidden" name="config_scope" value="session_maintenance"><label><input name="SESSION_REPAIR_ENABLED" type="checkbox" value="true" {% if admin_console.runtime_config.session_repair_enabled == "true" %}checked{% endif %}><span><strong>自动修复当前游戏 Frame</strong><small>检测到已登记的 Home 或 Frame 损坏时，由会话服务尝试恢复。</small></span></label><button class="is-quiet" type="submit">保存自动维护</button></form></details>
+    {% endif %}
+    <button class="is-quiet" type="button" data-supervisor-logs="{% url 'supervisor-service-logs' service=node.service %}" data-supervisor-log-label="{{ node.label }}">日志</button>
+  </div>
+  {% elif node.key == "ingestion" %}
+  <div class="console-service-actions"><button type="button" class="is-quiet" data-config-dialog="manual-ingestion" aria-haspopup="dialog">创建历史补采</button>{% if node.running %}<form method="post" action="{% url 'supervisor-control-ingestion-workers' action='restart' %}">{% csrf_token %}<input type="hidden" name="return_to" value="/admin/"><button type="submit">重启两个 Worker</button></form><form method="post" action="{% url 'supervisor-control-ingestion-workers' action='stop' %}">{% csrf_token %}<input type="hidden" name="return_to" value="/admin/"><button class="is-quiet" type="submit">停止两个 Worker</button></form>{% else %}<form method="post" action="{% url 'supervisor-control-ingestion-workers' action='start' %}">{% csrf_token %}<input type="hidden" name="return_to" value="/admin/"><button type="submit">启动两个 Worker</button></form>{% endif %}</div>
+  <div class="console-ingestion-subservices">{% for service in node.subservices %}<div><span class="{% if service.running %}is-running{% else %}is-stopped{% endif %}">{{ service.label }}</span><button class="console-subservice-log-button" type="button" data-supervisor-logs="{% url 'supervisor-service-logs' service=service.service %}" data-supervisor-log-label="{{ service.label }}">日志</button></div>{% endfor %}</div>
+  {% elif node.key == "review" %}
+  <div class="console-service-actions"><button type="button" data-config-dialog="ai" aria-haspopup="dialog">配置 AI 审核</button><a class="console-service-link" href="{% url 'admin:reviews_policyversion_changelist' %}">管理策略</a>{% include "admin/includes/runtime_service_controls.html" %}</div>
+  {% elif node.key == "ocr" %}
+  <div class="console-service-actions"><button type="button" class="is-quiet" data-config-dialog="ocr" aria-haspopup="dialog">配置 OCR</button></div>
+  {% elif node.key == "video-extraction" %}
+  <div class="console-service-actions"><button type="button" class="is-quiet" data-config-dialog="video" aria-haspopup="dialog">配置视频审核</button>{% include "admin/includes/runtime_service_controls.html" %}</div>
+  {% elif node.key == "writes" %}
+  <div class="console-service-actions"><button type="button" class="is-quiet" data-config-dialog="writes" aria-haspopup="dialog">管理授权</button></div>
+  {% elif node.key == "mute-maintenance" %}
+  <div class="console-service-actions">{% include "admin/includes/runtime_service_controls.html" %}<form method="post" action="{% url 'enqueue-permanent-mute-renewal' %}">{% csrf_token %}<input type="hidden" name="return_to" value="/admin/"><button class="is-quiet" type="submit">执行一次</button></form></div>
+  {% else %}
+  <div class="console-service-actions">{% include "admin/includes/runtime_service_controls.html" %}</div>
+  {% endif %}
+</article>
