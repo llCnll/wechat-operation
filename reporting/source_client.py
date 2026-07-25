@@ -8,7 +8,7 @@ from collections.abc import Callable
 from typing import Any
 
 from config.cdp import CdpGameFrame, CdpTargetUnavailableError, CdpUnavailableError
-from jobs.adapters import PluginSessionExpiredError, SourceContractError, SourceTransportError
+from jobs.adapters import PluginSessionExpiredError, SourceAuthenticationRejectedError, SourceContractError, SourceTransportError
 
 
 class CdpGameCircleMetricClient:
@@ -76,6 +76,8 @@ class CdpGameCircleMetricClient:
             except CdpUnavailableError as exc:
                 raise SourceTransportError("指标接口 CDP 请求失败") from exc
             self._last_request_at = monotonic()
+            if isinstance(result, dict) and result.get("status") == 401:
+                raise SourceAuthenticationRejectedError("指标请求被认证拒绝")
             if not isinstance(result, dict) or result.get("status") != 200:
                 raise SourceTransportError("指标接口传输失败")
             payload = result.get("payload")

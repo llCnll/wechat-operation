@@ -21,7 +21,7 @@ from jobs.models import (
 )
 from jobs.scheduled_producers import delete_rule_configuration
 from posts.game_catalog import set_active_game
-from posts.models import ManagedGame, OriginalPost
+from posts.models import GameCircleLoginRuntimeState, ManagedGame, OriginalPost
 from reviews.adapters import AssessmentOutput
 from reviews.models import PolicyRule, PolicyVersion, RecommendedAction
 from reviews.services import persist_assessment
@@ -235,6 +235,7 @@ def test_runtime_overview_requires_a_fresh_frame_for_the_current_scope(admin_cli
         frame_state=GameCircleLoginRuntimeState.FrameState.READY,
         frame_scope_version=scope.scope_version,
         checked_at=timezone.now(),
+        outer_verified_at=timezone.now(),
     )
 
     overview = admin_console_overview(admin_client.get("/admin/").wsgi_request)["admin_console"]
@@ -296,6 +297,25 @@ def test_runtime_console_only_renders_fixed_csrf_protected_controls(admin_client
     assert 'name="csrfmiddlewaretoken"' in page
     assert "target_id" not in page
     assert "source_token" not in page
+
+
+@pytest.mark.django_db
+def test_runtime_console_hides_login_page_entry_when_the_outer_session_is_already_ready(admin_client):
+    GameCircleLoginRuntimeState.objects.create(
+        outer_state=GameCircleLoginRuntimeState.OuterState.OUTER_READY,
+        frame_state=GameCircleLoginRuntimeState.FrameState.READY,
+        available_actions=[
+            GameCircleLoginRuntimeState.Action.CHECK_LOGIN,
+            GameCircleLoginRuntimeState.Action.KEEPALIVE,
+        ],
+        checked_at=timezone.now(),
+        outer_verified_at=timezone.now(),
+    )
+
+    page = admin_client.get("/admin/").content.decode()
+    session_card = page.split('id="service-game-circle-session"', 1)[1].split("</article>", 1)[0]
+
+    assert 'action="/auth/open-login/"' not in session_card
 
 
 def test_system_configuration_uses_local_lucide_icons_without_emoji_assets():

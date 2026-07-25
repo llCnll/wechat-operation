@@ -189,3 +189,33 @@ Supervisor SHALL 是受控 Chrome 的唯一进程所有者；`game_circle_sessio
 - **WHEN** 已授权运营人员提交控制台目录同步操作且外层会话可用
 - **THEN** Web SHALL 请求固定 `LIST_MANAGED_GAMES` IPC 意图，并在同一请求内更新本地目录
 - **THEN** 响应 SHALL 报告同步数量，且不得要求第二次 Admin 操作
+
+### Requirement: 外层登录态验证与 Frame lease 边界
+
+系统 SHALL 仅在 service-owned HOME 的 `getappinfo` 返回 HTTP 200、`errcode=0` 且带非空 AppID 时投影外层会话有效，并记录独立的成功验证时间。URL token、页面可打开或 target 存在均不得单独证明登录有效。已验证的登录态过期 SHALL 投影为需要重新登录和 Frame 未就绪，并使同一 browser generation 的 ACTIVE lease 失去新 access 资格；未知或暂时错误不得误报扫码或废弃 lease。
+
+正常 outer token 刷新不得废弃已发布 Frame lease；新 lease 发布后，旧 lease 仅按访问计数和退役延迟关闭。外层仍有效时的来源身份拒绝或 Frame target 丢失 SHALL 只废弃对应 lease，不得反推外层登录态过期。
+
+#### Scenario: URL token 尚在但登录态过期
+
+- **WHEN** HOME URL 仍含 token，但 `getappinfo` 返回已验证认证拒绝
+- **THEN** 系统 SHALL 显示需要重新登录和当前 Frame 未就绪，并只提供人工打开登录页动作
+- **THEN** 同 generation 的新来源 access 不得使用旧 token 请求上游
+
+#### Scenario: 保活刷新 outer token
+
+- **WHEN** Keepalive 获得新的 outer token，且 `getappinfo` 持续成功
+- **THEN** 系统 MUST NOT 因 token 值变化拒绝旧 Frame lease
+- **THEN** 旧 lease SHALL 仅按既有退役规则关闭
+
+### Requirement: 外层会话探测与来源认证反馈
+
+存在 ACTIVE lease 时，游戏圈会话服务 SHALL 每五分钟复用 service-owned HOME 执行一次只读外层验证；手动检查复用同一验证。SessionRepair 的短间隔循环 SHALL 只检查 target 完整性，不得轮询平台接口。来源客户端 SHALL 区分明确来源身份拒绝、认证嫌疑和普通来源错误；认证嫌疑必须合并为一次 HOME 外层复核。
+
+来源 IPC 在登录态已确认过期、Frame 已确认失效或不存在可用 lease 时 SHALL 返回固定 `SESSION_UNAVAILABLE`，且不得发起上游请求。Scheduler 仍只按规则入队，入队成功不得表示来源读取成功。
+
+#### Scenario: 并发认证嫌疑
+
+- **WHEN** 多个来源请求在同一冷却窗口报告认证嫌疑
+- **THEN** 服务 SHALL 最多执行一次外层复核
+- **THEN** 外层有效时仅处理对应 Frame；外层过期时废弃该 generation 的全部 lease

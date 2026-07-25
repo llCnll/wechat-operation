@@ -12,6 +12,7 @@ from config.cdp import CdpGameFrame, CdpTargetUnavailableError, CdpUnavailableEr
 from jobs.adapters import (
     CandidatePostDTO,
     PluginSessionExpiredError,
+    SourceAuthenticationRejectedError,
     SourceBusinessDeletedError,
     SourceContractError,
     SourceTransportError,
@@ -101,6 +102,8 @@ class CdpGameCircleClient:
                 raise SourceContractError(
                     "来源 CDP 返回结构无效", safe_reason="INVALID_EVALUATION_RESULT"
                 )
+            if result.get("status") == 401:
+                raise SourceAuthenticationRejectedError("来源请求被认证拒绝")
             if not isinstance(result.get("payload"), dict):
                 raise SourceContractError(
                     "来源详情响应不是 JSON", safe_reason="NON_JSON_RESPONSE"

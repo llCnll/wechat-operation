@@ -20,13 +20,19 @@
     {% else %}
     <form method="post" action="{% url 'supervisor-control-service' service=node.service action='start' %}">{% csrf_token %}<input type="hidden" name="return_to" value="/admin/"><button type="submit">启动服务</button></form>
     {% endif %}
-    {% if node.running %}
+    {% if node.running and "OPEN_LOGIN" in node.session_actions %}
     <form method="post" action="{% url 'open-controlled-login' %}">{% csrf_token %}<input type="hidden" name="return_to" value="/admin/"><button class="is-quiet" type="submit">打开登录页</button></form>
-    <form method="post" action="{% url 'check-outer-session' %}">{% csrf_token %}<input type="hidden" name="return_to" value="/admin/"><button class="is-quiet" type="submit">检查外层会话</button></form>
-    <form method="post" action="{% url 'build-current-game-frame' %}">{% csrf_token %}<input type="hidden" name="return_to" value="/admin/"><button class="is-quiet" type="submit">建立当前游戏 Frame</button></form>
-    <form method="post" action="{% url 'enqueue-session-keepalive' %}">{% csrf_token %}<input type="hidden" name="return_to" value="/admin/"><button class="is-quiet" type="submit">保活当前游戏 Frame</button></form>
-    <details class="console-session-maintenance"><summary><span>可选自动维护</span><span class="console-lucide" aria-hidden="true">{% include "posts/includes/lucide_icon.html" with name="chevron-right" %}</span></summary><form method="post" action="{% url 'save-runtime-configuration' %}">{% csrf_token %}<input type="hidden" name="return_to" value="/admin/"><input type="hidden" name="config_scope" value="session_maintenance"><label><input name="SESSION_REPAIR_ENABLED" type="checkbox" value="true" {% if admin_console.runtime_config.session_repair_enabled == "true" %}checked{% endif %}><span><strong>自动修复当前游戏 Frame</strong><small>检测到已登记的 Home 或 Frame 损坏时，由会话服务尝试恢复。</small></span></label><button class="is-quiet" type="submit">保存自动维护</button></form></details>
     {% endif %}
+    {% if node.running %}
+    <form method="post" action="{% url 'check-outer-session' %}">{% csrf_token %}<input type="hidden" name="return_to" value="/admin/"><button class="is-quiet" type="submit">检查外层会话</button></form>
+    {% endif %}
+    {% if node.running %}
+    <form method="post" action="{% url 'build-current-game-frame' %}">{% csrf_token %}<input type="hidden" name="return_to" value="/admin/"><button class="is-quiet" type="submit">建立当前游戏 Frame</button></form>
+    {% endif %}
+    {% if node.running %}
+    <form method="post" action="{% url 'enqueue-session-keepalive' %}">{% csrf_token %}<input type="hidden" name="return_to" value="/admin/"><button class="is-quiet" type="submit">保活当前游戏 Frame</button></form>
+    {% endif %}
+    {% if node.running %}<details class="console-session-maintenance"><summary><span>可选自动维护</span><span class="console-lucide" aria-hidden="true">{% include "posts/includes/lucide_icon.html" with name="chevron-right" %}</span></summary><form method="post" action="{% url 'save-runtime-configuration' %}">{% csrf_token %}<input type="hidden" name="return_to" value="/admin/"><input type="hidden" name="config_scope" value="session_maintenance"><label><input name="SESSION_REPAIR_ENABLED" type="checkbox" value="true" {% if admin_console.runtime_config.session_repair_enabled == "true" %}checked{% endif %}><span><strong>自动修复当前游戏 Frame</strong><small>检测到已登记的 Home 或 Frame 损坏时，由会话服务尝试恢复。</small></span></label><button class="is-quiet" type="submit">保存自动维护</button></form></details>{% endif %}
     <button class="is-quiet" type="button" data-supervisor-logs="{% url 'supervisor-service-logs' service=node.service %}" data-supervisor-log-label="{{ node.label }}">日志</button>
   </div>
   {% elif node.key == "ingestion" %}

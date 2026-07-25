@@ -36,7 +36,7 @@ flowchart LR
 
 日常只启动 Supervisor。它托管一个受控 Chrome、一个 Web、一个自动调度器、一个游戏圈会话服务、一个实时采集 Worker、一个人工补采 Worker、一个指标快照 Worker、一个 AI 审核 Worker、一个可选视频提取 Worker 和一个默认停止的 AI 自动处置 Worker；各 Worker 职责严格分离。受控 Chrome 使用独立 profile 和 loopback CDP，Supervisor 是其唯一进程所有者。Supervisor 为固定本机 IPC 注入独立 capability，SQLite 部署不允许启动同一 Worker 职责的第二个实例。
 
-游戏圈会话服务是唯一的 CDP 所有者。它以 `SessionBootstrap` 统一建立 HOME、当前游戏确认/切换、Frame、身份绑定和最小只读验证；建立 Frame、检查外层会话、修复损坏 Frame 和保活候选是互斥的显式意图，健康 lease 会被复用而不会产生额外 HOME。只有全部成功才发布 ACTIVE lease。保活 Job 也只有在发布新 lease 后才成功；候选失败会清理未发布 HOME / Frame，并按类别有限重试或终态失败。新 lease 发布前旧 lease 持续可用，发布后旧 lease 等待已开始请求结束和最短退役期届满才关闭其自建 target；维护循环会独立执行该回收。每次来源请求由有截止时间、可取消的 SessionAccess 管理。session Worker 更换时 Supervisor 会先重启受控 Chrome；若新 generation 就绪超时，Supervisor 保留该 replacement Chrome 并由后续调和重试，不会反复关闭它。新 owner 不扫描、接管或关闭旧 generation 的 tab；运行态只保存固定状态和数量，不保存 target ID、token 或 URL。
+游戏圈会话服务是唯一的 CDP 所有者。它以 `SessionBootstrap` 统一建立 HOME、当前游戏确认/切换、Frame、身份绑定和最小只读验证；建立 Frame、检查外层会话、修复损坏 Frame 和保活候选是互斥的显式意图。外层会话只由 HOME 内以 `cache: 'no-store'` 调用的 `getappinfo` 成功业务响应证明，缓存响应或 URL token 本身不代表登录有效。保活或切换取得新的 outer token 时，已发布 Frame lease 继续按既有退役规则可用；只有 `getappinfo` 确认外层登录态过期时，同一 Chrome generation 的 Frame lease 才同时失效并要求人工重新扫码。Frame 来源身份也可在外层有效时独立失效，仅影响对应 lease。服务有 ACTIVE lease 时每五分钟只读验证一次外层会话；两秒 Repair 循环只检查 target 完整性，不轮询平台接口。来源请求遇到认证拒绝会由会话服务合并复核，确认无可用会话后固定返回未就绪而不再请求上游。新 lease 发布前旧 lease 持续可用，发布后旧 lease 等待已开始请求结束和最短退役期届满才关闭其自建 target；维护循环会独立执行该回收。每次来源请求由有截止时间、可取消的 SessionAccess 管理。session Worker 更换时 Supervisor 会先重启受控 Chrome；若新 generation 就绪超时，Supervisor 保留该 replacement Chrome 并由后续调和重试，不会反复关闭它。新 owner 不扫描、接管或关闭旧 generation 的 tab；运行态只保存固定状态和数量，不保存 target ID、token 或 URL。
 
 ```mermaid
 flowchart LR
@@ -174,7 +174,7 @@ flowchart LR
 4. 右侧为随页面滚动保持可见的悬浮处置卡。AI 建议只在对应操作上显示 `AI 推荐` 角标，不会自动操作原平台；回复建议同样仅保存在本系统，绝不调用原平台发布或评论接口。
 5. 使用上一条、下一条或 `J`、`K`、左右方向键在当前筛选结果中切换帖子；点击图片或视频在页内模态框预览，预览中可用左右方向键切换附件。
 6. “刷新数据”会回读管理详情、内容卡片、媒体、投票和可用互动指标。处置卡展示状态：`2` 正常、`4` 屏蔽、`8` 沉底、`16` 仅自己可见、`128` 原平台已删除；删除可与屏蔽、沉底组合且会禁用全部审核处置。仅自己可见可保留本地审核记录，但不会触发任何上游处置，避免覆盖未验证的原平台可见性状态。
-7. 顶部账户名左侧分开展示“外层会话”和“当前游戏 Frame”。外层有效不代表来源可用；只有 Frame 有效代表当前 scope 的 ACTIVE lease 已通过最小读取验证。Frame 未就绪时由运营人员明确建立当前游戏 Frame；检查登录态只检查外层，不切换游戏或建立 Frame。只有“需扫码登录”允许打开/复用唯一人工登录页；自动流程始终后台建页、不会聚焦、弹窗或跳转。来源调用无 lease 时只返回未就绪，恢复后人工写入必须重新确认，绝不自动重放。
+7. 顶部账户名左侧分开展示“外层会话”和“当前游戏 Frame”。外层有效不代表来源可用；只有 Frame 有效代表当前 scope 的 ACTIVE lease 已通过最小读取验证。外层登录态过期时会显示“需要重新登录 / Frame 未就绪”，运营人员可打开唯一登录页扫码；检查登录态只检查外层，不切换游戏或建立 Frame。自动流程始终后台建页、不会聚焦、弹窗或跳转。来源调用无 lease 时只返回未就绪，恢复后人工写入必须重新确认，绝不自动重放。
 
 游戏选择器读取本地缓存目录。管理员可在系统配置与追溯台的“同步可管理游戏”直接刷新名称；同步需要已登录的受控公众平台页面，失败时保留上次缓存且不影响工作台。
 

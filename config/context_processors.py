@@ -182,6 +182,9 @@ def _build_runtime_console(
     from posts.models import GameCircleLoginRuntimeState
 
     checked_at = timezone.now()
+    # A recent negative observation (for example LOGIN_REQUIRED) is still
+    # fresh state.  Successful verification time is intentionally separate
+    # and must not make the console conceal a confirmed scan requirement.
     session_fresh = bool(
         login_state
         and login_state.checked_at
@@ -313,6 +316,7 @@ def _build_runtime_console(
             {"label": "外层会话", "ready": snapshot.outer_session_ready, "reason": _session_reason(snapshot)},
             {"label": "当前游戏 Frame", "ready": snapshot.frame_ready, "reason": _frame_reason(snapshot)},
         ),
+        session_actions=tuple(login_state.available_actions or []) if login_state else (),
     )
     scheduler_card = _service_card(
         snapshot,
