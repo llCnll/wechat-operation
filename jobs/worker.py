@@ -87,7 +87,9 @@ def consume_jobs(
             return
         recovery_complete = False
         while True:
-            write_worker_heartbeat()
+            if not write_worker_heartbeat():
+                command.stdout.write("Supervisor 租约已失效，Worker 将退出。")
+                return
             try:
                 if not recovery_complete:
                     recovered = recover_interrupted_jobs(task_types=task_types)

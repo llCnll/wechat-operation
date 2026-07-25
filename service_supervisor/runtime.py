@@ -5,7 +5,11 @@ from __future__ import annotations
 import json
 import os
 import secrets
+import signal
+import threading
+import time
 from contextlib import contextmanager
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from tempfile import NamedTemporaryFile
@@ -21,6 +25,12 @@ else:
 
 def utc_now() -> str:
     return datetime.now(UTC).isoformat()
+
+
+SUPERVISOR_LEASE_VERSION = 1
+SUPERVISOR_LEASE_SECONDS = 30.0
+SUPERVISOR_LEASE_POLL_SECONDS = 5.0
+SUPERVISOR_LEASE_READ_FAILURE_LIMIT = 2
 
 
 class SupervisorLockedError(RuntimeError):
@@ -103,6 +113,10 @@ class RuntimeStore:
     def endpoint_path(self) -> Path:
         return self.root / "endpoint.json"
 
+    @property
+    def instance_lease_path(self) -> Path:
+        return self.root / "instance-lease.json"
+
     def service_path(self, service: str) -> Path:
         return self.services_dir / f"{service}.json"
 
@@ -150,31 +164,114 @@ class RuntimeStore:
                 pass
             return token
 
-    def write_heartbeat(self, service: str) -> None:
-        self.write_json(self.heartbeat_path(service), {"service": service, "at": utc_now()})
+    def write_instance_lease(
+        self, instance_id: str, *, ttl_seconds: float = SUPERVISOR_LEASE_SECONDS
+    ) -> None:
+        if not instance_id or ttl_seconds <= 0:
+            raise ValueError("Supervisor 租约参数无效")
+        now = time.time()
+        self.write_json(
+            self.instance_lease_path,
+            {
+                "version": SUPERVISOR_LEASE_VERSION,
+                "instance_id": instance_id,
+                "renewed_at": utc_now(),
+                "expires_at_epoch": now + ttl_seconds,
+            },
+        )
+
+    def read_instance_lease(self) -> dict:
+        value = self.read_json(self.instance_lease_path, {})
+        return value if isinstance(value, dict) else {}
+
+    def write_heartbeat(self, service: str, *, instance_id: str | None = None) -> None:
+        payload = {"service": service, "at": utc_now()}
+        if instance_id:
+            payload["instance_id"] = instance_id
+        self.write_json(self.heartbeat_path(service), payload)
 
 
-def write_worker_heartbeat() -> None:
-    """Update the optional heartbeat only for processes started by Supervisor."""
-    service = os.getenv("OPERATION_SUPERVISOR_SERVICE", "")
-    runtime_dir = os.getenv("OPERATION_RUNTIME_DIR", "")
-    if (
-        service
-        not in {
-            "scheduler",
-            "game_circle_session",
-            "ingestion",
-            "backfill_ingestion",
-            "metric_sync",
-            "review",
-            "video_extraction",
-            "ai_moderation",
-            "mute_maintenance",
-        }
-        or not runtime_dir
-    ):
+@dataclass
+class SupervisorLeaseGuard:
+    """Cooperatively stop a Supervisor-managed Python process after lease loss."""
+
+    store: RuntimeStore
+    service: str
+    instance_id: str
+    consecutive_read_failures: int = 0
+
+    @classmethod
+    def from_environment(cls) -> SupervisorLeaseGuard | None:
+        service = os.getenv("OPERATION_SUPERVISOR_SERVICE", "")
+        runtime_dir = os.getenv("OPERATION_RUNTIME_DIR", "")
+        instance_id = os.getenv("OPERATION_SUPERVISOR_INSTANCE", "")
+        if not service or not runtime_dir or not instance_id:
+            return None
+        return cls(RuntimeStore(Path(runtime_dir)), service, instance_id)
+
+    def check_and_heartbeat(self) -> bool:
+        try:
+            lease = self.store.read_instance_lease()
+        except OSError:
+            self.consecutive_read_failures += 1
+            return self.consecutive_read_failures < SUPERVISOR_LEASE_READ_FAILURE_LIMIT
+
+        expires_at = lease.get("expires_at_epoch")
+        if (
+            lease.get("version") == SUPERVISOR_LEASE_VERSION
+            and isinstance(expires_at, int | float)
+        ):
+            if lease.get("instance_id") != self.instance_id or float(expires_at) <= time.time():
+                return False
+            try:
+                self.store.write_heartbeat(self.service, instance_id=self.instance_id)
+            except OSError:
+                self.consecutive_read_failures += 1
+                return self.consecutive_read_failures < SUPERVISOR_LEASE_READ_FAILURE_LIMIT
+            self.consecutive_read_failures = 0
+            return True
+
+        self.consecutive_read_failures += 1
+        return self.consecutive_read_failures < SUPERVISOR_LEASE_READ_FAILURE_LIMIT
+
+
+_worker_lease_guard: SupervisorLeaseGuard | None = None
+_worker_lease_guard_key: tuple[str, str, str] | None = None
+
+
+def check_supervisor_lease_and_heartbeat() -> bool:
+    """Return whether a managed Worker may begin another loop iteration."""
+    global _worker_lease_guard, _worker_lease_guard_key
+    key = (
+        os.getenv("OPERATION_SUPERVISOR_SERVICE", ""),
+        os.getenv("OPERATION_RUNTIME_DIR", ""),
+        os.getenv("OPERATION_SUPERVISOR_INSTANCE", ""),
+    )
+    if _worker_lease_guard is None or _worker_lease_guard_key != key:
+        _worker_lease_guard = SupervisorLeaseGuard.from_environment()
+        _worker_lease_guard_key = key
+    return _worker_lease_guard is None or _worker_lease_guard.check_and_heartbeat()
+
+
+def write_worker_heartbeat() -> bool:
+    """Backward-compatible Worker heartbeat entry point with lease checking."""
+    return check_supervisor_lease_and_heartbeat()
+
+
+def start_web_lease_guard() -> None:
+    """Stop the Supervisor-managed WSGI process when its lease becomes invalid."""
+    guard = SupervisorLeaseGuard.from_environment()
+    if guard is None or guard.service != "web":
         return
-    RuntimeStore(Path(runtime_dir)).write_heartbeat(service)
+
+    def monitor() -> None:
+        while guard.check_and_heartbeat():
+            time.sleep(SUPERVISOR_LEASE_POLL_SECONDS)
+        if os.name == "nt":  # Windows cannot deliver SIGTERM as a graceful self-signal.
+            os._exit(0)
+        os.kill(os.getpid(), signal.SIGTERM)
+
+    threading.Thread(target=monitor, name="supervisor-web-lease", daemon=True).start()
 
 
 @contextmanager

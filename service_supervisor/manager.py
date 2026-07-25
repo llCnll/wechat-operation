@@ -5,7 +5,9 @@ from __future__ import annotations
 import hmac
 import json
 import os
+import secrets
 import shutil
+import socket
 import subprocess
 import sys
 import threading
@@ -27,7 +29,11 @@ from config.settings import (
     CONTROLLED_CHROME_USER_DATA_DIR,
 )
 
-from .runtime import RuntimeStore, SupervisorLockedError, utc_now
+from .runtime import (
+    RuntimeStore,
+    SupervisorLockedError,
+    utc_now,
+)
 
 SERVICE_NAMES = (
     "controlled_chrome",
@@ -58,6 +64,22 @@ CONTROL_VERSION = "v1"
 WEB_PORT = 8000
 MAX_LOG_BYTES = 1_000_000
 SESSION_REPLACEMENT_WAITING_FOR_CHROME = "WAITING_FOR_CHROME"
+SESSION_REPLACEMENT_CIRCUIT_OPEN = "CIRCUIT_OPEN"
+CHROME_RECOVERY_FAILURE_LIMIT = 3
+PREVIOUS_SERVICE_WAIT_SECONDS = 10
+SERVICE_SHUTDOWN_ORDER = (
+    "ai_moderation",
+    "video_extraction",
+    "review",
+    "metric_sync",
+    "backfill_ingestion",
+    "ingestion",
+    "mute_maintenance",
+    "scheduler",
+    "game_circle_session",
+    "controlled_chrome",
+    "web",
+)
 
 
 class SupervisorError(RuntimeError):
@@ -93,6 +115,7 @@ class Supervisor:
         self._scheduled_restarts: set[str] = set()
         self._stopping = threading.Event()
         self._log_handles: dict[str, Any] = {}
+        self._instance_id = ""
 
     def definitions(self) -> dict[str, ServiceDefinition]:
         python = sys.executable
@@ -202,8 +225,11 @@ class Supervisor:
         from .runtime import ExclusiveFileLock
 
         self.store.ensure()
-        self._lock = ExclusiveFileLock(self.store.lock_path)
-        self._lock.acquire()
+        lock = ExclusiveFileLock(self.store.lock_path)
+        lock.acquire()
+        self._lock = lock
+        self._instance_id = secrets.token_urlsafe(24)
+        self.store.write_instance_lease(self._instance_id)
 
     def release(self) -> None:
         if self._server is not None:
@@ -306,8 +332,10 @@ class Supervisor:
     def bootstrap(self) -> None:
         self.acquire()
         try:
+            self._wait_for_previous_services()
             self.start_controller()
             self.preflight()
+            self._cleanup_chrome_port()
             for service in ("controlled_chrome", "web", "mute_maintenance"):
                 state = self._read_state(service)
                 state["desired"] = True
@@ -319,7 +347,6 @@ class Supervisor:
                 raise SupervisorError("Web 服务未在 20 秒内通过健康检查")
         except Exception:
             state = self._read_state("web")
-            state["desired"] = False
             self._terminate("web", state)
             self._write_state("web", state)
             self.release()
@@ -327,10 +354,19 @@ class Supervisor:
 
     def run_forever(self) -> None:
         while not self._stopping.wait(2):
+            self._renew_lease()
             self.reconcile()
 
     def shutdown(self) -> None:
         self._stopping.set()
+        if self._lock is not None:
+            with self._state_lock:
+                for service in SERVICE_SHUTDOWN_ORDER:
+                    state = self._read_state(service)
+                    if state.get("instance_id") != self._instance_id:
+                        continue
+                    self._terminate(service, state)
+                    self._write_state(service, state)
         self.release()
 
     def reconcile(self) -> None:
@@ -338,8 +374,11 @@ class Supervisor:
             session_owner_reconciled = False
             for service in SERVICE_NAMES:
                 state = self._read_state(service)
-                if state.get("desired") and not self._is_process_current(service, state):
-                    if service == "controlled_chrome" and self._read_state("game_circle_session").get("desired"):
+                running = self._is_process_current(service, state)
+                if state.get("desired") and not running:
+                    if service == "controlled_chrome" and self._read_state(
+                        "game_circle_session"
+                    ).get("desired"):
                         # A new browser generation invalidates every in-memory lease
                         # owned by the still-running session Worker.  Replacing only
                         # Chrome would leave that owner unable to publish a new Frame.
@@ -350,10 +389,6 @@ class Supervisor:
                     else:
                         self._terminate(service, state)
                         self._launch(service, state)
-                if service == "web" and self._is_process_current(
-                    service, self._read_state(service)
-                ):
-                    self.store.write_heartbeat(service)
 
     def status(self) -> dict[str, dict]:
         with self._state_lock:
@@ -430,9 +465,19 @@ class Supervisor:
             state = self._read_state(service)
             state["desired"] = True
             if service == "game_circle_session" or (
-                service == "controlled_chrome" and self._read_state("game_circle_session").get("desired")
+                service == "controlled_chrome"
+                and self._read_state("game_circle_session").get("desired")
             ):
-                session_state = state if service == "game_circle_session" else self._read_state("game_circle_session")
+                session_state = (
+                    state
+                    if service == "game_circle_session"
+                    else self._read_state("game_circle_session")
+                )
+                session_state.pop("replacement_phase", None)
+                session_state.pop("failure_reason", None)
+                chrome_state = self._read_state("controlled_chrome")
+                chrome_state["recovery_failures"] = 0
+                self._write_state("controlled_chrome", chrome_state)
                 self._replace_game_circle_session(session_state)
             else:
                 self._terminate(service, state)
@@ -460,6 +505,8 @@ class Supervisor:
         session_state["desired"] = True
         chrome_state = self._read_state("controlled_chrome")
         chrome_state["desired"] = True
+        if session_state.get("replacement_phase") == SESSION_REPLACEMENT_CIRCUIT_OPEN:
+            return False
         if session_state.get("replacement_phase") != SESSION_REPLACEMENT_WAITING_FOR_CHROME:
             # A new owner must never inherit a Chrome generation.  This is the
             # one destructive transition; later retries only wait for the same
@@ -474,13 +521,24 @@ class Supervisor:
         elif not self._is_process_current("controlled_chrome", chrome_state):
             self._launch("controlled_chrome", chrome_state)
         try:
-            self._wait_for_chrome_generation()
+            generation = self._wait_for_chrome_generation()
         except SupervisorError:
-            session_state["failure_reason"] = "CHROME_START_TIMEOUT"
+            failures = int(chrome_state.get("recovery_failures", 0)) + 1
+            chrome_state["recovery_failures"] = failures
+            self._write_state("controlled_chrome", chrome_state)
+            if failures >= CHROME_RECOVERY_FAILURE_LIMIT:
+                session_state["replacement_phase"] = SESSION_REPLACEMENT_CIRCUIT_OPEN
+                session_state["failure_reason"] = "CHROME_RECOVERY_CIRCUIT_OPEN"
+            else:
+                session_state["failure_reason"] = "CHROME_START_TIMEOUT"
             self._write_state("game_circle_session", session_state)
             return False
 
+        chrome_state["browser_generation"] = generation
+        chrome_state["recovery_failures"] = 0
+        self._write_state("controlled_chrome", chrome_state)
         session_state.pop("replacement_phase", None)
+        session_state.pop("failure_reason", None)
         self._launch("game_circle_session", session_state)
         return True
 
@@ -529,6 +587,7 @@ class Supervisor:
             **os.environ,
             "OPERATION_SUPERVISOR_SERVICE": service,
             "OPERATION_RUNTIME_DIR": str(self.runtime_dir),
+            "OPERATION_SUPERVISOR_INSTANCE": self._instance_id,
             "OPERATION_GAME_CIRCLE_IPC_CAPABILITY": self.store.game_circle_ipc_token(),
         }
         process = subprocess.Popen(
@@ -549,12 +608,22 @@ class Supervisor:
                 "command": list(definition.command),
                 "exit_code": None,
                 "restart_count": int(state.get("restart_count", 0)) + 1,
+                "instance_id": self._instance_id,
             }
         )
         state.pop("failure_reason", None)
+        if service == "controlled_chrome":
+            state.pop("browser_generation", None)
+            try:
+                state["browser_generation"] = self._wait_for_chrome_generation()
+            except SupervisorError:
+                state["failure_reason"] = "CHROME_START_TIMEOUT"
         self._write_state(service, state)
 
     def _terminate(self, service: str, state: dict) -> None:
+        if service == "controlled_chrome":
+            self._cleanup_chrome_port()
+            state.pop("browser_generation", None)
         if not self._is_recorded_process(state):
             return
         process = psutil.Process(state["pid"])
@@ -569,6 +638,8 @@ class Supervisor:
         state["created_at"] = None
 
     def _is_process_current(self, service: str, state: dict) -> bool:
+        if service == "controlled_chrome":
+            return self._is_chrome_current(state)
         if not self._is_recorded_process(state):
             return False
         expected = self.definitions()[service].command
@@ -577,6 +648,101 @@ class Supervisor:
         except (psutil.Error, KeyError, TypeError, ValueError):
             return False
         return all(part in commandline for part in expected[1:3])
+
+    def _is_chrome_current(self, state: dict) -> bool:
+        generation = state.get("browser_generation")
+        if not isinstance(generation, str) or not generation:
+            return self._is_recorded_process(state)
+        try:
+            return CdpBrowser(timeout=1).browser_generation() == generation
+        except CdpUnavailableError:
+            return False
+
+    def _renew_lease(self) -> None:
+        if self._instance_id:
+            self.store.write_instance_lease(self._instance_id)
+
+    def _wait_for_previous_services(self) -> None:
+        self._terminate_previous_services()
+        deadline = time.monotonic() + PREVIOUS_SERVICE_WAIT_SECONDS
+        while True:
+            pending = []
+            for service in SERVICE_NAMES:
+                if service == "controlled_chrome":
+                    continue
+                state = self._read_state(service)
+                if (
+                    state.get("instance_id") != self._instance_id
+                    and self._is_recorded_process(state)
+                ):
+                    pending.append(service)
+            if not pending:
+                return
+            if time.monotonic() >= deadline:
+                raise SupervisorError("上一实例服务未在限定时间内退出")
+            time.sleep(0.2)
+
+    def _terminate_previous_services(self) -> None:
+        """Stop every identifiable prior Web/Worker before bootstrap preflight."""
+        for service in SERVICE_SHUTDOWN_ORDER:
+            if service == "controlled_chrome":
+                continue
+            state = self._read_state(service)
+            if (
+                state.get("instance_id") == self._instance_id
+                or not self._is_recorded_process(state)
+            ):
+                continue
+            self._terminate(service, state)
+            self._write_state(service, state)
+
+    def _chrome_listener_pid(self) -> int | None:
+        try:
+            connections = psutil.net_connections(kind="tcp")
+        except psutil.Error as exc:
+            raise SupervisorError("无法定位受控 Chrome 监听进程") from exc
+        for connection in connections:
+            address = connection.laddr
+            if not address or address.port != CONTROLLED_CHROME_DEBUG_PORT:
+                continue
+            if address.ip not in {"127.0.0.1", "::1"}:
+                continue
+            if connection.pid is None:
+                raise SupervisorError("无法定位受控 Chrome 监听进程")
+            return connection.pid
+        return None
+
+    @staticmethod
+    def _chrome_port_listening() -> bool:
+        try:
+            with socket.create_connection(("127.0.0.1", CONTROLLED_CHROME_DEBUG_PORT), timeout=0.2):
+                return True
+        except OSError:
+            return False
+
+    def _cleanup_chrome_port(self) -> None:
+        try:
+            CdpBrowser(timeout=1).close_browser()
+        except CdpUnavailableError:
+            pass
+        deadline = time.monotonic() + 4
+        while time.monotonic() < deadline:
+            if not self._chrome_port_listening():
+                return
+            time.sleep(0.1)
+        if not self._chrome_port_listening():
+            return
+        pid = self._chrome_listener_pid()
+        if pid is None:
+            raise SupervisorError("无法定位受控 Chrome 监听进程")
+        try:
+            process = psutil.Process(pid)
+            process.terminate()
+            process.wait(timeout=4)
+        except (psutil.Error, psutil.TimeoutExpired) as exc:
+            raise SupervisorError("受控 Chrome 端口未能释放") from exc
+        if self._chrome_port_listening():
+            raise SupervisorError("受控 Chrome 端口未能释放")
 
     @staticmethod
     def _is_recorded_process(state: dict) -> bool:

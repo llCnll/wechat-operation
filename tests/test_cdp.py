@@ -80,6 +80,18 @@ def test_browser_target_lifecycle_uses_only_returned_target_id(mock_client, mock
     assert commands[1]["params"] == {"targetId": "owned-target"}
 
 
+def test_browser_close_uses_the_fixed_browser_command(monkeypatch):
+    browser = CdpBrowser()
+    calls = []
+    monkeypatch.setattr(
+        browser, "_browser_command", lambda method, params: calls.append((method, params)) or {}
+    )
+
+    browser.close_browser()
+
+    assert calls == [("Browser.close", {})]
+
+
 @patch("config.cdp.connect")
 @patch("config.cdp.httpx.Client")
 def test_close_target_requires_an_explicit_success_response(mock_client, mock_connect):

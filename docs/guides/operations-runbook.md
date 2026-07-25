@@ -3,8 +3,8 @@
 ## 部署边界
 
 - 日常只启动一个 `uv run python -m service_supervisor`。Supervisor 是受控 Chrome、Web、Scheduler、游戏圈会话续接 Worker、实时采集 Worker、人工补采 Worker、指标快照 Worker、AI Worker 与禁言维护 Worker 的唯一进程所有者；它使用独占文件锁防止第二个实例接管同一运行态。
-- 停止整套服务时，在启动 Supervisor 的终端按 `Ctrl+C` 并等待命令退出；不要只终止外层 `uv` 或直接关闭受控 Chrome。Supervisor 会将终止信号转换为受管服务的优雅退出。若系统强制终止了进程，下一次启动会仅回收带项目专属命令、资料目录和调试端口标识的遗留进程，再创建一组新进程；受控 Chrome 连续异常退出三次会停止自动重试，避免反复弹窗，需查看脱敏日志后在页面手动重启。
-- 所有可变运行态均位于 `runtime/`：`runtime/.env`、`runtime/operations.sqlite3`、收集后的 `runtime/static/`、`runtime/worker-locks/`、`runtime/supervisor/` 与日志。`runtime/supervisor/` 包含控制令牌、服务状态、心跳和日志，代码包和版本控制均应排除整个目录。
+- 停止整套服务时，在启动 Supervisor 的终端按 `Ctrl+C` 并等待命令退出；不要只终止外层 `uv` 或直接关闭受控 Chrome。Supervisor 会按业务 Worker、会话、受控 Chrome、Web 的顺序停止当前服务。若 Supervisor 被强制终止，Web 和 Worker 会在本机实例租约过期后自行退出，`desired` 运行意图保持不变；遗留 Chrome 可以保留，下一次 Supervisor 启动会先清理专用 `127.0.0.1:9222` 再创建全新会话 owner。该端口只能用于本项目受控 Chrome。受控 Chrome 连续异常恢复三次失败后会停止自动重试，需查看脱敏日志后在页面手动重启。
+- 所有可变运行态均位于 `runtime/`：`runtime/.env`、`runtime/operations.sqlite3`、收集后的 `runtime/static/`、`runtime/worker-locks/`、`runtime/supervisor/` 与日志。`runtime/supervisor/` 包含控制令牌、服务状态、实例租约、心跳和日志，代码包和版本控制均应排除整个目录。
 - 数据库位于 `runtime/operations.sqlite3`。离线文件备份前必须停止整个 Supervisor，再复制数据库文件及可能存在的 `-wal`、`-shm` 文件；只停止部分 Worker 不能保证没有 Web 或其他受管服务写入。
 - 首次部署在启动 Supervisor 前，执行 Agent 必须手工运行 `uv run python manage.py migrate` 和 `uv run python manage.py createsuperuser`；不得记录管理员密码。后续迁移、静态资源收集和默认策略检查由 Supervisor 幂等执行。
 
@@ -41,7 +41,7 @@ Compress-Archive -Path $items.FullName -DestinationPath ../wechat-operation.zip 
 
 ## 会话与密钥
 
-- Chrome CDP 仅由 Supervisor 启动的受控 Chrome 使用；它采用独立 profile 且只监听 loopback，不保存 Cookie、令牌或运营者身份标识。管理详情中的发帖作者用户 ID仅可按产品定义保存到原创帖和作者禁言状态，用于禁言管理与历史关联，不得写入日志或导出。
+- Chrome CDP 仅由 Supervisor 启动的受控 Chrome 使用；它采用独立 profile 且只监听固定的 `127.0.0.1:9222`，不保存 Cookie、令牌或运营者身份标识。Supervisor 以 CDP browser generation 判断 Chrome 健康，不能以启动器 PID 变化判定浏览器死亡；启动时优先请求 CDP 关闭旧浏览器，端口仍占用才终止监听进程。不得将其他浏览器或本机程序绑定到该端口。管理详情中的发帖作者用户 ID仅可按产品定义保存到原创帖和作者禁言状态，用于禁言管理与历史关联，不得写入日志或导出。
 - `game_circle_session` 是唯一持有 CDP、outer token、来源身份 token 与系统自建 target 的常驻服务。Web、采集、指标、AI、回填与一次性任务只通过固定、仅监听 `127.0.0.1`、且由 Supervisor 注入独立 capability 的 IPC 提交 scope 和已批准的业务参数；IPC 不接受 CDP 命令、JavaScript、URL、target ID、路径或认证材料。无 capability 的连接在业务解析前拒绝；不得复制或记录 capability。它阻止没有运行时进程权限的本机调用方，但不能替代操作系统账户隔离。
 - 会话服务按 AppID 维护一个 ACTIVE 及零到多个 RETIRING lease。新 lease 完整验证后才发布；旧 lease 仅在退役等待结束且请求访问归零后关闭它自己的 HOME/PLUGIN tab。因为 Chrome 已由 Supervisor 管理，受控 target 可以回收至零 tab；手动打开的未知 tab 永不接管、使用或关闭。
 - 首次部署执行 `mkdir -p runtime && cp .env.example runtime/.env`。日常 AI/OCR 和人工处置授权均从系统配置首页的“按服务管理”保存；`runtime/.env` 仅用于后台不可用时的运维恢复。
@@ -86,7 +86,7 @@ uv run python manage.py enqueue_author_mute_status_backfill
 
 ## 任务恢复
 
-- Job 类型、生产者、消费者与调度时间表见[系统总览](system-overview.md)。所有 Worker 均由 Supervisor 启停；不要手工运行会话服务绕过 capability 注入。`run_ingestion_worker` 保留为实时命令的兼容别名。
+- Job 类型、生产者、消费者与调度时间表见[系统总览](system-overview.md)。所有 Worker 均由 Supervisor 启停；不要手工运行会话服务绕过 capability 注入。Supervisor 重启会先停止运行态中可确认身份的既有 Web/Worker，再按持久化 `desired` 恢复；不要在此期间手工拉起同职责进程。`run_ingestion_worker` 保留为实时命令的兼容别名。
 - 视频 Worker 默认关闭。工具安装、受控样本预检、ASR 降级和停止/回滚步骤见[视频审核手册](video-review-runbook.md)。失败时保持关闭，视频任务记录脱敏状态；仅空文字输入且媒体证据不足时进入重点人工核验。
 - SQLite 中每个 Worker 职责都只能运行一个实例。实时采集和人工补采分别串行处理所属任务：长时间历史补采或范围互动刷新不会使后续 15 分钟采集、状态巡检积压。AI 审核 Worker 独立消费 OCR/AI 队列，不会被任一采集队列阻塞。
 - 契约变更或会话失效会保留已脱敏错误摘要。修复后重新排队，不应修改数据库中的会话字段。

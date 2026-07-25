@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import json
-from hashlib import sha256
 from dataclasses import dataclass
+from hashlib import sha256
 from time import monotonic, sleep
 from typing import Any
 from urllib.parse import urlsplit
@@ -57,6 +57,10 @@ class CdpBrowser:
             raise CdpBrowserUnavailableError("受控 Chrome CDP 未返回浏览器标识")
         return sha256(websocket_url.encode()).hexdigest()[:24]
 
+    def close_browser(self) -> None:
+        """Request graceful shutdown of the fixed controlled browser endpoint."""
+        self._browser_command("Browser.close", {})
+
     def create_target(self, url: str, *, background: bool = False) -> str:
         if not isinstance(url, str) or not url.startswith("https://mp.weixin.qq.com/"):
             raise CdpTargetUnavailableError("不允许创建非受控公众平台 target")
@@ -100,7 +104,9 @@ class CdpBrowser:
                 response = client.get(f"{self.cdp_url}/json/version")
                 response.raise_for_status()
                 metadata = response.json()
-            websocket_url = metadata.get("webSocketDebuggerUrl") if isinstance(metadata, dict) else None
+            websocket_url = (
+                metadata.get("webSocketDebuggerUrl") if isinstance(metadata, dict) else None
+            )
             if not isinstance(websocket_url, str) or not websocket_url:
                 raise ValueError("missing browser websocket")
             websocket = connect(websocket_url, proxy=None, close_timeout=self.timeout)
