@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import os
 import subprocess
+from types import SimpleNamespace
 
 import httpx
 import pytest
@@ -35,7 +36,9 @@ from reviews.video import (
     extract_frame,
     media_fingerprint,
     media_tool_path,
+    probe_video,
     safe_error,
+    sampling_intervals,
     video_workdir,
 )
 from reviews.video_tasks import (
@@ -284,6 +287,43 @@ def test_dense_candidate_times_have_explicit_boundaries():
     assert candidate_times(1_000) == [0, 250, 500, 750]
 
 
+def test_sampling_intervals_merge_when_the_budget_covers_the_video():
+    assert sampling_intervals(30_000, 60_000) == [(0, 30_000)]
+    assert sampling_intervals(60_000, 60_000) == [(0, 60_000)]
+
+
+def test_sampling_intervals_distribute_a_long_video_with_a_fixed_frame_budget():
+    intervals = sampling_intervals(90_000, 60_000)
+
+    assert intervals == [(0, 20_000), (35_000, 55_000), (70_000, 90_000)]
+    timestamps = candidate_times(90_000, intervals)
+    assert len(timestamps) == 78
+    assert all(
+        any(start <= timestamp < end for start, end in intervals) for timestamp in timestamps
+    )
+
+
+def test_sampling_intervals_treat_fractional_overage_as_distributed_sampling():
+    intervals = sampling_intervals(60_001, 60_000)
+
+    assert len(intervals) == 2
+    assert intervals[0] == (0, 40_000)
+    assert intervals[1] == (40_001, 60_001)
+    assert len(candidate_times(60_001, intervals)) == 78
+
+
+def test_probe_duration_rounds_fractional_milliseconds_up(monkeypatch, tmp_path):
+    monkeypatch.setattr("reviews.video.media_tool_path", lambda _name: "ffprobe")
+    monkeypatch.setattr(
+        "reviews.video._run",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            stdout=b'{"format":{"duration":"60.0001"},"streams":[]}'
+        ),
+    )
+
+    assert probe_video(tmp_path / "input.bin") == VideoProbe(60_001, False)
+
+
 def test_extract_frame_requires_a_nonempty_output_file(monkeypatch, tmp_path):
     monkeypatch.setattr("reviews.video.media_tool_path", lambda _name: "ffmpeg")
     monkeypatch.setattr("reviews.video._run", lambda *_args, **_kwargs: None)
@@ -367,7 +407,9 @@ def test_video_worker_keeps_qr_when_detector_and_ocr_are_partially_unavailable(m
     )
     monkeypatch.setattr("reviews.video_tasks.VideoMediaReader.download", lambda *_args: None)
     monkeypatch.setattr("reviews.video_tasks.probe_video", lambda _path: VideoProbe(500, False))
-    monkeypatch.setattr("reviews.video_tasks.candidate_times", lambda _duration: [0, 250])
+    monkeypatch.setattr(
+        "reviews.video_tasks.candidate_times", lambda _duration, _intervals: [0, 250]
+    )
     monkeypatch.setattr("reviews.video_tasks.extract_frame", lambda *_args: None)
     monkeypatch.setattr(
         "reviews.video_tasks.qr_present",
@@ -394,6 +436,7 @@ def test_failed_video_extraction_marks_its_job_failed_and_logs_safe_stage(monkey
         media=media,
         media_fingerprint=media_fingerprint(media.url),
         extractor_version=VIDEO_EXTRACTOR_VERSION,
+        sampled_intervals_ms=[[0, 500]],
     )
     job = BackgroundJob.objects.create(
         task_type=VIDEO_EXTRACT_TASK,
@@ -402,7 +445,7 @@ def test_failed_video_extraction_marks_its_job_failed_and_logs_safe_stage(monkey
     )
     monkeypatch.setattr("reviews.video_tasks.VideoMediaReader.download", lambda *_args: None)
     monkeypatch.setattr("reviews.video_tasks.probe_video", lambda _path: VideoProbe(500, False))
-    monkeypatch.setattr("reviews.video_tasks.candidate_times", lambda _duration: [0])
+    monkeypatch.setattr("reviews.video_tasks.candidate_times", lambda _duration, _intervals: [0])
     monkeypatch.setattr(
         "reviews.video_tasks.extract_frame",
         lambda *_args: (_ for _ in ()).throw(
@@ -418,6 +461,7 @@ def test_failed_video_extraction_marks_its_job_failed_and_logs_safe_stage(monkey
     job.refresh_from_db()
     assert extraction.status == VideoExtractionStatus.FAILED
     assert extraction.error_summary == "video_frame_extract_command_failed:exit_9"
+    assert extraction.sampled_intervals_ms == []
     assert job.status == JobStatus.FAILED
     assert job.error_summary == extraction.error_summary
     record = next(record for record in caplog.records if record.message == "视频提取失败")
@@ -446,7 +490,9 @@ def test_video_worker_prioritizes_qr_frames_before_the_ocr_budget(monkeypatch):
     )
     monkeypatch.setattr("reviews.video_tasks.VideoMediaReader.download", lambda *_args: None)
     monkeypatch.setattr("reviews.video_tasks.probe_video", lambda _path: VideoProbe(750, False))
-    monkeypatch.setattr("reviews.video_tasks.candidate_times", lambda _duration: [0, 250, 500])
+    monkeypatch.setattr(
+        "reviews.video_tasks.candidate_times", lambda _duration, _intervals: [0, 250, 500]
+    )
     monkeypatch.setattr("reviews.video_tasks.extract_frame", lambda *_args: None)
     monkeypatch.setattr(
         "reviews.video_tasks.qr_present",
@@ -487,7 +533,9 @@ def test_video_worker_continues_after_a_single_frame_ocr_failure(monkeypatch):
     )
     monkeypatch.setattr("reviews.video_tasks.VideoMediaReader.download", lambda *_args: None)
     monkeypatch.setattr("reviews.video_tasks.probe_video", lambda _path: VideoProbe(500, False))
-    monkeypatch.setattr("reviews.video_tasks.candidate_times", lambda _duration: [0, 250])
+    monkeypatch.setattr(
+        "reviews.video_tasks.candidate_times", lambda _duration, _intervals: [0, 250]
+    )
     monkeypatch.setattr("reviews.video_tasks.extract_frame", lambda *_args: None)
     monkeypatch.setattr("reviews.video_tasks.qr_present", lambda _frame: False)
     monkeypatch.setattr(
@@ -533,7 +581,9 @@ def test_video_worker_skips_a_single_unavailable_frame_and_keeps_prior_evidence(
     )
     monkeypatch.setattr("reviews.video_tasks.VideoMediaReader.download", lambda *_args: None)
     monkeypatch.setattr("reviews.video_tasks.probe_video", lambda _path: VideoProbe(500, False))
-    monkeypatch.setattr("reviews.video_tasks.candidate_times", lambda _duration: [0, 250])
+    monkeypatch.setattr(
+        "reviews.video_tasks.candidate_times", lambda _duration, _intervals: [0, 250]
+    )
 
     def extract_with_missing_tail(_video, timestamp, _destination):
         if timestamp == 250:
@@ -888,7 +938,7 @@ def test_ai_job_waits_for_video_without_consuming_its_retry_budget():
 
 
 @pytest.mark.django_db
-def test_duration_limit_uses_extraction_snapshot_and_persists_actual_duration(monkeypatch):
+def test_duration_budget_uses_snapshot_and_skips_asr_for_distributed_sampling(monkeypatch):
     post = OriginalPost.objects.create(topic_id=319, content_id="duration-snapshot")
     media = PostMedia.objects.create(
         post=post, url="https://media.example/too-long.mp4", media_type=MediaType.VIDEO
@@ -902,20 +952,67 @@ def test_duration_limit_uses_extraction_snapshot_and_persists_actual_duration(mo
     )
     job = BackgroundJob.objects.create(
         task_type="VIDEO_EXTRACT",
-        idempotency_key="duration-snapshot",
+        idempotency_key="duration-budget-snapshot",
         parameter_summary={"video_extraction_id": extraction.pk},
     )
     monkeypatch.setattr("reviews.video_tasks.runtime.video_max_duration_seconds", 60)
     monkeypatch.setattr("reviews.video_tasks.VideoMediaReader.download", lambda *_args: None)
-    monkeypatch.setattr("reviews.video_tasks.probe_video", lambda _path: VideoProbe(31_000, False))
+    monkeypatch.setattr("reviews.video_tasks.probe_video", lambda _path: VideoProbe(90_000, True))
+    captured = {}
+    monkeypatch.setattr(
+        "reviews.video_tasks.candidate_times",
+        lambda duration, intervals: captured.update(duration=duration, intervals=intervals) or [],
+    )
+    monkeypatch.setattr("reviews.video_tasks.OpenAiCompatibleOcrClient", lambda: object())
+    monkeypatch.setattr(
+        "reviews.video_tasks.SpeechTranscriptionClient",
+        lambda: (_ for _ in ()).throw(AssertionError("ASR must not run for distributed sampling")),
+    )
 
     extract_video_handler(job)
     extraction.refresh_from_db()
 
-    assert extraction.status == VideoExtractionStatus.SKIPPED_LIMIT
-    assert extraction.error_summary == "video_duration_limit_exceeded"
-    assert extraction.duration_ms == 31_000
+    assert extraction.status == VideoExtractionStatus.PARTIAL
+    assert extraction.error_summary == "video_duration_distributed_sampling"
+    assert extraction.duration_ms == 90_000
     assert extraction.duration_limit_seconds == 30
+    assert extraction.sampled_intervals_ms == [[0, 10_000], [40_000, 50_000], [80_000, 90_000]]
+    assert captured == {
+        "duration": 90_000,
+        "intervals": [(0, 10_000), (40_000, 50_000), (80_000, 90_000)],
+    }
+
+
+@pytest.mark.django_db
+def test_ai_input_discloses_distributed_video_sampling():
+    post = OriginalPost.objects.create(
+        topic_id=3191, content_id="distributed-video", content_text="正文"
+    )
+    media = PostMedia.objects.create(
+        post=post, url="https://media.example/distributed.mp4", media_type=MediaType.VIDEO
+    )
+    extraction = VideoExtraction.objects.create(
+        post=post,
+        media=media,
+        media_fingerprint=media_fingerprint(media.url),
+        extractor_version=VIDEO_EXTRACTOR_VERSION,
+        status=VideoExtractionStatus.PARTIAL,
+        error_summary="video_duration_distributed_sampling",
+        duration_ms=90_000,
+        duration_limit_seconds=60,
+        sampled_intervals_ms=[[0, 20_000], [35_000, 55_000], [70_000, 90_000]],
+    )
+    VideoEvidence.objects.create(
+        extraction=extraction,
+        kind=VideoEvidenceKind.FRAME_OCR,
+        start_ms=70_000,
+        text="扫码联系客服",
+    )
+
+    _, input_text, _ = build_evaluation_input(post)
+
+    assert "已覆盖 0:00–0:20、0:35–0:55、1:10–1:30，未覆盖其他时间，未执行 ASR" in input_text
+    assert "扫码联系客服" in input_text
 
 
 @pytest.mark.django_db

@@ -28,7 +28,8 @@
         <summary><span>视频审核证据</span><small>聚合时间证据 · 点击展开</small></summary>
         <div>
           {% for extraction in selected_post.current_video_extractions %}
-          <p>视频 {{ extraction.media_index }} · {{ extraction.get_status_display }}{% if extraction.error_summary %} · {{ extraction.error_summary }}{% endif %}</p>
+          <p>视频 {{ extraction.media_index }} · {{ extraction.get_status_display }}{% if extraction.error_detail %} · {{ extraction.error_detail }}{% endif %}</p>
+          {% if extraction.sampling_explanation %}<p>{{ extraction.sampling_explanation }}</p>{% endif %}
           <ul>
             {% for summary in extraction.evidence_summaries %}
             {% if summary.kind == "FRAME_OCR_SUMMARY" %}

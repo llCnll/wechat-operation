@@ -630,6 +630,64 @@ def test_dashboard_explains_duration_limited_video_with_historical_snapshot():
 
 
 @pytest.mark.django_db
+def test_dashboard_explains_distributed_video_sampling_with_historical_budget():
+    user = get_user_model().objects.create_user(
+        username="distributed-sampling", password="test-password"
+    )
+    post = OriginalPost.objects.create(topic_id=1012, content_id="distributed-video")
+    media = post.media.create(url="https://example.test/distributed.mp4", media_type="VIDEO")
+    VideoExtraction.objects.create(
+        post=post,
+        media=media,
+        media_fingerprint=media_fingerprint(media.url),
+        extractor_version=VIDEO_EXTRACTOR_VERSION,
+        status="PARTIAL",
+        error_summary="video_duration_distributed_sampling;frame_decode_failed",
+        duration_ms=90_000,
+        duration_limit_seconds=60,
+        sampled_intervals_ms=[[0, 20_000], [35_000, 55_000], [70_000, 90_000]],
+    )
+    client = Client()
+    client.force_login(user)
+
+    page = client.get("/", {"topic": post.topic_id}).content.decode()
+
+    explanation = (
+        "视频时长 90 秒，提取时采样预算 60 秒；已覆盖 "
+        "0:00–0:20、0:35–0:55、1:10–1:30，未覆盖其他时间，未执行 ASR。"
+    )
+    assert explanation in page
+    assert "video_duration_distributed_sampling" not in page
+    assert "frame_decode_failed" in page
+
+
+@pytest.mark.django_db
+def test_dashboard_keeps_distributed_sampling_code_when_its_range_is_missing():
+    user = get_user_model().objects.create_user(
+        username="missing-sampling-range", password="test-password"
+    )
+    post = OriginalPost.objects.create(topic_id=1013, content_id="missing-sampling-range")
+    media = post.media.create(url="https://example.test/missing-range.mp4", media_type="VIDEO")
+    VideoExtraction.objects.create(
+        post=post,
+        media=media,
+        media_fingerprint=media_fingerprint(media.url),
+        extractor_version=VIDEO_EXTRACTOR_VERSION,
+        status="PARTIAL",
+        error_summary="video_duration_distributed_sampling",
+        duration_ms=90_000,
+        duration_limit_seconds=60,
+    )
+    client = Client()
+    client.force_login(user)
+
+    page = client.get("/", {"topic": post.topic_id}).content.decode()
+
+    assert "video_duration_distributed_sampling" in page
+    assert "未覆盖其他时间，未执行 ASR。" not in page
+
+
+@pytest.mark.django_db
 def test_operations_dashboard_shows_sink_status_and_only_restore_transition():
     user = get_user_model().objects.create_user(username="sink-status", password="test-password")
     OriginalPost.objects.create(topic_id=1003, content_id="sunk-content", status=8)

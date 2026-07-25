@@ -327,6 +327,67 @@ def _video_timestamp(start_ms: int, end_ms: int | None = None) -> str:
     return f"{start}–{end}"
 
 
+def _video_sampling_timestamp(timestamp_ms: int) -> str:
+    if timestamp_ms % 1000:
+        return _video_timestamp(timestamp_ms)
+    return f"{timestamp_ms // 60000}:{(timestamp_ms // 1000) % 60:02d}"
+
+
+def video_sampling_intervals(extraction: VideoExtraction) -> list[tuple[int, int]]:
+    """Return the persisted sampling plan only when its stored shape is trustworthy."""
+    if extraction.duration_ms is None or extraction.duration_ms <= 0:
+        return []
+    raw_intervals = extraction.sampled_intervals_ms
+    if not isinstance(raw_intervals, list):
+        return []
+    intervals: list[tuple[int, int]] = []
+    previous_end = 0
+    for interval in raw_intervals:
+        if (
+            not isinstance(interval, list)
+            or len(interval) != 2
+            or any(isinstance(value, bool) or not isinstance(value, int) for value in interval)
+        ):
+            return []
+        start_ms, end_ms = interval
+        if start_ms < previous_end or start_ms < 0 or end_ms <= start_ms:
+            return []
+        if end_ms > extraction.duration_ms:
+            return []
+        intervals.append((start_ms, end_ms))
+        previous_end = end_ms
+    return intervals
+
+
+def video_sampling_notice(extraction: VideoExtraction) -> str:
+    """Describe distributed sampling without exposing media locations or tool details."""
+    intervals = video_sampling_intervals(extraction)
+    if len(intervals) < 2 or extraction.duration_ms is None:
+        return ""
+    if extraction.duration_limit_seconds is None:
+        return ""
+    coverage = "、".join(
+        f"{_video_sampling_timestamp(start_ms)}–{_video_sampling_timestamp(end_ms)}"
+        for start_ms, end_ms in intervals
+    )
+    return (
+        f"视频时长 {extraction.duration_ms / 1000:g} 秒，提取时采样预算 "
+        f"{extraction.duration_limit_seconds:g} 秒；已覆盖 {coverage}，未覆盖其他时间，未执行 ASR。"
+    )
+
+
+def video_extraction_error_detail(extraction: VideoExtraction) -> str:
+    """Keep additional safe failures visible after the sampling notice explains its code."""
+    if not video_sampling_notice(extraction):
+        return extraction.error_summary
+    errors = [
+        error
+        for error in extraction.error_summary.split(";")
+        if error and error != "video_duration_distributed_sampling"
+    ]
+    return ";".join(errors)
+
+
 def _bounded_text(value: str, limit: int) -> str:
     """Keep model context bounded without splitting a marker or exposing source URLs."""
     if len(value) <= limit:
@@ -579,6 +640,8 @@ def _focus_reasons(post: OriginalPost) -> list[str]:
 def _video_evidence_input_lines(extraction: VideoExtraction, media_index: int) -> list[str]:
     """Compress repeated dense-frame OCR before it becomes model context."""
     lines: list[str] = []
+    if notice := video_sampling_notice(extraction):
+        lines.append(f"[视频 {media_index} 采样范围] {notice}")
     for summary in video_evidence_summaries(extraction):
         if summary["kind"] == "FRAME_OCR_SUMMARY":
             label = "视频帧文字" if summary["frame_count"] == 1 else "视频帧文字汇总"

@@ -57,6 +57,8 @@ from reviews.services import (
     operation_result_reaches_target,
     save_reply_draft,
     video_evidence_summaries,
+    video_extraction_error_detail,
+    video_sampling_notice,
 )
 
 from .game_catalog import active_game_appid, current_execution_scope, managed_game_options
@@ -538,6 +540,8 @@ def operations_dashboard(request):
         for extraction in current_extractions:
             extraction.media_index = media_indexes.get(extraction.media_id, "已移除媒体")
             extraction.evidence_summaries = video_evidence_summaries(extraction)
+            extraction.sampling_explanation = video_sampling_notice(extraction)
+            extraction.error_detail = video_extraction_error_detail(extraction)
             if (
                 extraction.status == "SKIPPED_LIMIT"
                 and extraction.error_summary == "video_duration_limit_exceeded"

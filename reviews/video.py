@@ -9,6 +9,7 @@ import socket
 import subprocess
 from contextlib import contextmanager
 from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation, ROUND_CEILING
 from hashlib import sha256
 from pathlib import Path
 from shutil import which
@@ -231,27 +232,76 @@ def probe_video(path: Path) -> VideoProbe:
 
     try:
         payload = json.loads(result.stdout)
-        duration_ms = int(float(payload["format"]["duration"]) * 1000)
+        duration_seconds = Decimal(str(payload["format"]["duration"]))
+        if not duration_seconds.is_finite():
+            raise ValueError("duration must be finite")
+        duration_ms = int(
+            (duration_seconds * 1000).to_integral_value(rounding=ROUND_CEILING)
+        )
         has_audio = any(
             stream.get("codec_type") == "audio" for stream in payload.get("streams", [])
         )
-    except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+    except (InvalidOperation, KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
         raise VideoExtractionError("video_probe_invalid") from exc
     if duration_ms <= 0:
         raise VideoExtractionError("video_duration_invalid")
     return VideoProbe(duration_ms=duration_ms, has_audio=has_audio)
 
 
-def candidate_times(duration_ms: int) -> list[int]:
-    """Return left-closed, right-open candidate positions in milliseconds."""
-    duration = duration_ms / 1000
-    if duration <= 6:
-        return list(range(0, duration_ms, 250))
-    start = list(range(0, min(3000, duration_ms), 250))
-    middle_end = max(3000, duration_ms - 3000)
-    middle = list(range(3000, middle_end, 1000))
-    end = list(range(max(3000, duration_ms - 3000), duration_ms, 250))
-    return sorted(set(start + middle + end))
+def _merge_intervals(intervals: list[tuple[int, int]]) -> list[tuple[int, int]]:
+    """Normalize sorted half-open millisecond intervals without widening coverage."""
+    merged: list[tuple[int, int]] = []
+    for start_ms, end_ms in sorted(intervals):
+        if start_ms >= end_ms:
+            continue
+        if merged and start_ms <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end_ms))
+        else:
+            merged.append((start_ms, end_ms))
+    return merged
+
+
+def sampling_intervals(duration_ms: int, budget_ms: int) -> list[tuple[int, int]]:
+    """Plan bounded beginning, middle, and ending windows for one video."""
+    if duration_ms <= 0 or budget_ms <= 0:
+        raise ValueError("duration and budget must be positive")
+    sampled_ms = min(duration_ms, budget_ms)
+    first_ms = sampled_ms // 3
+    middle_ms = sampled_ms // 3
+    last_ms = sampled_ms - first_ms - middle_ms
+    middle_start_ms = (duration_ms - middle_ms) // 2
+    return _merge_intervals(
+        [
+            (0, first_ms),
+            (middle_start_ms, middle_start_ms + middle_ms),
+            (duration_ms - last_ms, duration_ms),
+        ]
+    )
+
+
+def candidate_times(
+    duration_ms: int, intervals: list[tuple[int, int]] | None = None
+) -> list[int]:
+    """Return bounded candidate positions for complete or distributed video sampling."""
+    planned = _merge_intervals(intervals or [(0, duration_ms)])
+    if duration_ms <= 0 or not planned:
+        return []
+    dense_ranges = ((0, min(3000, duration_ms)), (max(0, duration_ms - 3000), duration_ms))
+
+    def in_dense_range(timestamp_ms: int) -> bool:
+        return any(start_ms <= timestamp_ms < end_ms for start_ms, end_ms in dense_ranges)
+
+    candidates: set[int] = set()
+    for start_ms, end_ms in planned:
+        first_second = ((start_ms + 999) // 1000) * 1000
+        for timestamp_ms in range(first_second, end_ms, 1000):
+            if not in_dense_range(timestamp_ms):
+                candidates.add(timestamp_ms)
+        for dense_start_ms, dense_end_ms in dense_ranges:
+            for timestamp_ms in range(dense_start_ms, dense_end_ms, 250):
+                if start_ms <= timestamp_ms < end_ms:
+                    candidates.add(timestamp_ms)
+    return sorted(candidates)
 
 
 def extract_frame(video: Path, timestamp_ms: int, destination: Path) -> None:
