@@ -174,9 +174,7 @@ Supervisor SHALL 是受控 Chrome 的唯一进程所有者；`game_circle_sessio
 
 旧 `GAME_CIRCLE_LOGIN_PROBE` 与 `GAME_CIRCLE_SESSION_REFRESH` SHALL 仅在发布终态化工具的兼容识别中出现。运行时任务类型表、Scheduler、Worker consumer、Web 路由、工作台文案和普通测试 SHALL NOT 生产、消费或展示这两个任务为可执行能力。
 
-系统配置台 SHALL 将当前游戏操作映射到新版固定能力：切换游戏后请求建立该游戏 Frame；检查外层会话不建立 Frame；手动保活只创建 `GAME_CIRCLE_SESSION_KEEPALIVE`。目录同步 SHALL 以经 CSRF 保护的 POST 通过游戏圈会话 IPC 同步本地可管理游戏目录；失败 SHALL 保留既有目录并显示固定失败结果。
-
-当前操作游戏节点 SHALL 只表达并修改全局业务范围：已选择游戏、选择器、切换并建立 Frame，以及用于刷新选择器选项的目录同步。会话检查、手动保活与自动维护配置 SHALL 分别归属受控 Chrome 会话或游戏圈会话服务节点；系统 MUST NOT 删除这些后端能力，仅移除当前操作游戏节点中的重复入口。范围版本与页面诊断检查时间不得作为该节点的日常主信息。
+运行控制台的页面入口与去重规则 SHALL 遵守 `runtime-console-orchestration`。会话语义保持固定：切换游戏后请求建立目标 Frame；检查外层会话不建立 Frame；手动保活只创建 `GAME_CIRCLE_SESSION_KEEPALIVE`。目录同步 SHALL 以经 CSRF 保护的 POST 通过游戏圈会话 IPC 更新本地可管理游戏目录；失败 SHALL 保留既有目录并显示固定失败结果。
 
 #### Scenario: 部分重启不会创建已废弃任务
 
