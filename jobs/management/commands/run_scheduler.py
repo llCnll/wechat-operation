@@ -30,7 +30,9 @@ class Command(BaseCommand):
             if not acquired:
                 raise CommandError("自动调度器已在当前 runtime 运行")
             while True:
-                write_worker_heartbeat()
+                if not write_worker_heartbeat():
+                    self.stdout.write("Supervisor 租约已失效，自动调度器将退出。")
+                    return
                 try:
                     outcomes = reconcile_scheduled_producers(timezone.now())
                 except OperationalError as exc:

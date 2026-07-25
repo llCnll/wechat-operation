@@ -38,7 +38,12 @@ def admin_client():
 
 
 @pytest.mark.django_db
-def test_admin_home_is_configuration_and_traceability_console(admin_client):
+def test_admin_home_is_configuration_and_traceability_console(admin_client, monkeypatch):
+    monkeypatch.setattr(
+        "config.context_processors.SupervisorClient.status",
+        lambda _self: {name: {"running": True, "desired": True} for name in MANAGED_SERVICE_NAMES},
+    )
+
     response = admin_client.get("/admin/")
 
     assert response.status_code == 200
@@ -287,7 +292,12 @@ def test_runtime_console_groups_fixed_services_and_keeps_lifecycle_separate_from
 
 
 @pytest.mark.django_db
-def test_runtime_console_only_renders_fixed_csrf_protected_controls(admin_client):
+def test_runtime_console_only_renders_fixed_csrf_protected_controls(admin_client, monkeypatch):
+    monkeypatch.setattr(
+        "config.context_processors.SupervisorClient.status",
+        lambda _self: {name: {"running": True, "desired": True} for name in MANAGED_SERVICE_NAMES},
+    )
+
     page = admin_client.get("/admin/").content.decode()
 
     assert 'id="runtime-flow-tab"' in page
