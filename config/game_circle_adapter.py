@@ -11,8 +11,11 @@ from time import monotonic, sleep
 from urllib.parse import urlencode
 from typing import Any
 
-from config.cdp import CdpMpPage
+from config.cdp import CdpMpPage, CdpTargetUnavailableError
 from config.settings import CONTROLLED_CHROME_CDP_URL
+
+
+SCAN_PAGE_MARKERS = ("扫码登录", "请使用微信扫描", "微信扫一扫")
 
 
 class GameCircleContractError(RuntimeError):
@@ -25,6 +28,10 @@ class GameCircleContractError(RuntimeError):
 
 class OuterSessionUnreadyError(GameCircleContractError):
     """A fresh HOME exists but does not expose a usable outer session token."""
+
+
+class OuterLoginExpiredError(GameCircleContractError):
+    """The HOME proves that the outer WeChat login is no longer authenticated."""
 
 
 class GameSelectionError(GameCircleContractError):
@@ -64,7 +71,32 @@ class GameCircleOuterAdapter:
 
     def scan_required(self) -> bool:
         text = self.page.body_text()
-        return any(marker in text for marker in ("扫码登录", "请使用微信扫描"))
+        return any(marker in text for marker in SCAN_PAGE_MARKERS)
+
+    def wait_for_login_diagnosis(self, *, timeout_seconds: float = 10) -> str | None:
+        """Wait for one stable outer-page authentication conclusion.
+
+        A newly opened HOME can first expose a usable root document and then
+        navigate to the public-platform scan page.  A destroyed CDP execution
+        context in that short window is not an authentication conclusion, so
+        retry it until the bounded page-settle window expires.  Returning
+        ``None`` is the only positive scan-page result; ordinary protocol
+        failures retain their original classification.
+        """
+        deadline = monotonic() + timeout_seconds
+        last_transient: CdpTargetUnavailableError | None = None
+        while True:
+            try:
+                if self.scan_required():
+                    return None
+                return self.read_current_game()
+            except CdpTargetUnavailableError as exc:
+                last_transient = exc
+            if monotonic() >= deadline:
+                if last_transient is not None:
+                    raise last_transient
+                raise CdpTargetUnavailableError("受控 HOME 未在限定时间内完成认证状态检查")
+            sleep(min(0.2, max(0.0, deadline - monotonic())))
 
     def _wxa_list_response(self) -> dict[str, Any]:
         value = self.page.evaluate(
@@ -113,7 +145,9 @@ class GameCircleOuterAdapter:
         """Read the current game from the verified outer-page contract."""
         value = self.page.evaluate(
             """(async () => {
-              const response = await fetch('https://gamemp.weixin.qq.com/cgi-bin/gamewxagsettingwap/getappinfo', {credentials: 'include'});
+              const response = await fetch('https://gamemp.weixin.qq.com/cgi-bin/gamewxagsettingwap/getappinfo', {
+                credentials: 'include', cache: 'no-store'
+              });
               const text = await response.text();
               try { const payload = JSON.parse(text); return {status: response.status, errcode: payload.errcode,
                 appid: payload.data && payload.data.app_info && payload.data.app_info.appid}; }
@@ -129,6 +163,8 @@ class GameCircleOuterAdapter:
             raise GameCircleContractError(
                 "当前游戏回读失败：来源 HTTP 状态异常", safe_reason="HTTP_STATUS"
             )
+        if status == 401 and value.get("errcode") in {40001, 40042}:
+            raise OuterLoginExpiredError("外层登录态已过期", safe_reason="LOGIN_EXPIRED")
         if status != 200:
             raise GameCircleContractError(
                 f"当前游戏回读失败：来源 HTTP {status}", safe_reason="HTTP_STATUS"

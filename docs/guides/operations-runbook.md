@@ -44,8 +44,8 @@ Compress-Archive -Path $items.FullName -DestinationPath ../wechat-operation.zip 
 - Chrome CDP 仅由 Supervisor 启动的受控 Chrome 使用；它采用独立 profile 且只监听 loopback，不保存 Cookie、令牌或运营者身份标识。管理详情中的发帖作者用户 ID仅可按产品定义保存到原创帖和作者禁言状态，用于禁言管理与历史关联，不得写入日志或导出。
 - `game_circle_session` 是唯一持有 CDP、outer token、来源身份 token 与系统自建 target 的常驻服务。Web、采集、指标、AI、回填与一次性任务只通过固定、仅监听 `127.0.0.1`、且由 Supervisor 注入独立 capability 的 IPC 提交 scope 和已批准的业务参数；IPC 不接受 CDP 命令、JavaScript、URL、target ID、路径或认证材料。无 capability 的连接在业务解析前拒绝；不得复制或记录 capability。它阻止没有运行时进程权限的本机调用方，但不能替代操作系统账户隔离。
 - 会话服务按 AppID 维护一个 ACTIVE 及零到多个 RETIRING lease。新 lease 完整验证后才发布；旧 lease 仅在退役等待结束且请求访问归零后关闭它自己的 HOME/PLUGIN tab。因为 Chrome 已由 Supervisor 管理，受控 target 可以回收至零 tab；手动打开的未知 tab 永不接管、使用或关闭。
-- 首次部署执行 `mkdir -p runtime && cp .env.example runtime/.env`。日常 AI/OCR 和人工处置授权均从系统配置首页的 Pipeline 保存；`runtime/.env` 仅用于后台不可用时的运维恢复。
-- AI/OCR 凭据只通过 `AI_*`、`OCR_*` 运行时配置注入。系统配置首页保存时已有密钥不会回显；轮换后由 Pipeline 重启 AI Worker。
+- 首次部署执行 `mkdir -p runtime && cp .env.example runtime/.env`。日常 AI/OCR 和人工处置授权均从系统配置首页的“按服务管理”保存；`runtime/.env` 仅用于后台不可用时的运维恢复。
+- AI/OCR 凭据只通过 `AI_*`、`OCR_*` 运行时配置注入。系统配置首页保存时已有密钥不会回显；轮换后由服务卡重启 AI Worker。
 - 运行配置保存后的重启提示使用与 Pipeline 一致的中文服务名；按提示定位对应节点并点击“重启”，无需识别内部 service key。
 - `SESSION_REPAIR_ENABLED` 只需重启“游戏圈会话服务”和“自动调度器”；会话保活的启停和节奏在“自动任务生产者”保存后由下一轮 Scheduler 自动加载，无需重启。
 - 启用自动修复后，当前 scope 的 HOME 或 Frame 丢失会触发候选 lease 替换；候选验证成功才发布新 Frame。损坏 lease 不会阻止重建，也不会在重复检查中积累未发布 HOME。
@@ -59,9 +59,9 @@ Compress-Archive -Path $items.FullName -DestinationPath ../wechat-operation.zip 
 | 触发条件 | 系统操作者 | 运营人员动作 | 预期结果 |
 | --- | --- | --- | --- |
 | 受控 Chrome 被关闭或 session Worker 被替换 | Supervisor 将其视为 session owner 更换：重新启动受控 Chrome，再启动游戏圈会话服务；服务自动建立 HOME 与当前游戏 Frame。 | 无；等待状态从“建立中”收敛。 | 外层会话与 Frame 均有效时，来源任务可继续使用新 lease。 |
-| 外层会话失效、显示“需扫码登录” | 会话服务登记唯一登录等待，不自动创建或聚焦登录页。 | 在“受控 Chrome 会话”点击“打开登录页”，完成扫码。 | 会话服务复用该 HOME 建立 Frame；成功前不会发布 lease。 |
+| 外层会话失效、显示“需扫码登录” | 会话服务登记唯一登录等待，不自动创建或聚焦登录页；扫码后复用同一 HOME 建立 Frame。 | 仅点击一次“打开登录页”并完成扫码，等待状态收敛；恢复中不重复点击。 | 成功前不会发布 lease；晚到的重复打开请求不会创建额外 HOME。 |
 | 外层有效但 Frame 未就绪 | 会话服务仅投影未就绪，不隐式恢复。 | 点击顶部 Frame 状态或“建立当前游戏 Frame”。 | 建立并最小只读验证成功后，Frame 显示有效。 |
-| 需要确认外层会话 | 会话服务只检查 HOME，不切换游戏、不建立候选 Frame。 | 在“受控 Chrome 会话”点击“检查外层会话”。 | 保留既有 Frame 状态；Frame 已有效时仍提供保活入口。 |
+| 需要确认外层会话 | 会话服务只检查 HOME，不切换游戏、不建立候选 Frame。 | 在“按服务管理 → 游戏圈访问”点击“检查外层会话”。 | 保留既有 Frame 状态；Frame 已有效时仍提供保活入口。 |
 | 需要主动刷新来源身份 | 游戏圈会话服务消费手动保活 Job，以候选会话执行刷新。 | 在“游戏圈会话服务”点击“保活当前游戏 Frame”。 | 只有新 lease 发布才成功；失败按有限重试记录 Job，旧 lease 继续可用。 |
 | 需要更换业务游戏 | 当前操作游戏节点更新全局 scope，并请求对应 Frame 建立。 | 在“当前操作游戏”选择游戏并点击“切换并建立 Frame”。 | 后续任务使用新 scope；已经开始的 Job 保持其冻结 scope。 |
 

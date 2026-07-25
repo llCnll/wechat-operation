@@ -3,7 +3,7 @@
 
 {% block title %}{% if subtitle %}{{ subtitle }} | {% endif %}{{ title }} | 系统配置{% endblock %}
 
-{% block extrastyle %}{{ block.super }}<link rel="stylesheet" href="{% static 'posts/operations.css' %}"><link rel="stylesheet" href="{% static 'posts/admin_console.css' %}">{% endblock %}
+{% block extrastyle %}{{ block.super }}<link rel="stylesheet" href="{% static 'posts/operations.css' %}"><link rel="stylesheet" href="{% static 'posts/operations_theme.css' %}"><link rel="stylesheet" href="{% static 'posts/admin_console.css' %}">{% endblock %}
 
 {% block header %}
 {% include "posts/includes/topbar.html" %}
@@ -14,7 +14,7 @@
 <ul class="console-feedback" aria-label="操作反馈" aria-live="polite">
   {% for message in messages %}
   <li class="console-feedback-item {{ message.tags|default:'info' }}">
-    <span>{{ message|capfirst }}</span>
+    <span class="console-feedback-icon" aria-hidden="true">{% include "posts/includes/lucide_icon.html" with name="shield-check" %}</span><span>{{ message|capfirst }}</span>
     <button type="button" class="console-feedback-dismiss" data-console-feedback-dismiss aria-label="关闭提示">关闭</button>
   </li>
   {% endfor %}
@@ -24,6 +24,7 @@
 
 {% block extrabody %}
 {% include "posts/includes/cdp_login_status_script.html" %}
+{% include "posts/includes/operations_theme_script.html" %}
 <script>
   (() => {
     const logDialog = document.querySelector("[data-supervisor-log-dialog]");
@@ -57,6 +58,50 @@
     });
     document.querySelectorAll("[data-console-feedback-dismiss]").forEach((button) => {
       button.addEventListener("click", () => button.closest(".console-feedback-item")?.remove());
+    });
+    const runtimeViewStorageKey = "operations-console-runtime-view";
+    const runtimeViewInputs = document.querySelectorAll(".console-runtime-tab-input");
+    const activateRuntimeView = (view, persist = false) => {
+      const input = document.getElementById(`runtime-${view}-tab`);
+      if (!input) return false;
+      input.checked = true;
+      if (persist) {
+        try { localStorage.setItem(runtimeViewStorageKey, view); } catch (_) { /* Local preference is optional. */ }
+      }
+      return true;
+    };
+    try {
+      if (localStorage.getItem(runtimeViewStorageKey) === "services") activateRuntimeView("services");
+    } catch (_) { /* Flow remains the server-rendered default. */ }
+    runtimeViewInputs.forEach((input) => {
+      input.addEventListener("change", () => {
+        if (input.checked) activateRuntimeView(input.id === "runtime-services-tab" ? "services" : "flow", true);
+      });
+    });
+    const runtimeScrollStorageKey = "operations-console-runtime-scroll";
+    const runtimeServicePanel = document.getElementById("runtime-services-panel");
+    runtimeServicePanel?.querySelectorAll("form").forEach((form) => {
+      form.addEventListener("submit", () => {
+        try { sessionStorage.setItem(runtimeScrollStorageKey, String(window.scrollY)); } catch (_) { /* Scroll restoration is optional. */ }
+      });
+    });
+    try {
+      const savedScroll = sessionStorage.getItem(runtimeScrollStorageKey);
+      if (savedScroll !== null) {
+        sessionStorage.removeItem(runtimeScrollStorageKey);
+        const scrollTop = Number(savedScroll);
+        if (Number.isFinite(scrollTop) && scrollTop >= 0) {
+          window.requestAnimationFrame(() => window.scrollTo(0, scrollTop));
+        }
+      }
+    } catch (_) { /* The page remains usable when session storage is unavailable. */ }
+    document.querySelectorAll("[data-runtime-service-link]").forEach((link) => {
+      link.addEventListener("click", (event) => {
+        const target = document.querySelector(link.hash);
+        if (!target || !activateRuntimeView("services", true)) return;
+        event.preventDefault();
+        window.requestAnimationFrame(() => target.scrollIntoView({block: "start", behavior: "smooth"}));
+      });
     });
     document.querySelectorAll(".console-config-dialog").forEach((dialog) => {
       dialog.addEventListener("click", (event) => {

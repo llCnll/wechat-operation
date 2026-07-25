@@ -23,6 +23,10 @@ class PluginSessionExpiredError(SourceTransportError):
     """A verified source-identity rejection requires a fresh plugin session."""
 
 
+class SourceAuthenticationRejectedError(SourceTransportError):
+    """The source returned an authentication rejection that needs outer verification."""
+
+
 class SourceBusinessDeletedError(SourceTransportError):
     """The management API confirms that a post is no longer operable."""
 

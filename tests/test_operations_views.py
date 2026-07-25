@@ -109,8 +109,9 @@ def test_browser_login_status_only_allows_opening_login_page_when_scan_is_requir
         outer_state=GameCircleLoginRuntimeState.OuterState.LOGIN_PENDING,
         frame_state=GameCircleLoginRuntimeState.FrameState.UNREADY,
         available_actions=[GameCircleLoginRuntimeState.Action.OPEN_LOGIN],
-        error_category=GameCircleLoginRuntimeState.ErrorCategory.SCAN_REQUIRED,
-        checked_at=timezone.now(),
+            error_category=GameCircleLoginRuntimeState.ErrorCategory.SCAN_REQUIRED,
+            checked_at=timezone.now(),
+            outer_verified_at=timezone.now(),
     )
 
     scan_required = Client().get("/auth/status").json()
@@ -132,12 +133,31 @@ def test_browser_login_status_only_allows_opening_login_page_when_scan_is_requir
 
 
 @pytest.mark.django_db
+def test_browser_login_status_keeps_a_fresh_login_required_state_visible_without_success_timestamp():
+    GameCircleLoginRuntimeState.objects.create(
+        outer_state=GameCircleLoginRuntimeState.OuterState.LOGIN_REQUIRED,
+        frame_state=GameCircleLoginRuntimeState.FrameState.UNREADY,
+        available_actions=[GameCircleLoginRuntimeState.Action.OPEN_LOGIN],
+        error_category=GameCircleLoginRuntimeState.ErrorCategory.SCAN_REQUIRED,
+        checked_at=timezone.now(),
+        outer_verified_at=None,
+    )
+
+    status = Client().get("/auth/status").json()
+
+    assert status["state"] == GameCircleLoginRuntimeState.OuterState.LOGIN_REQUIRED
+    assert status["can_open_login"] is True
+    assert status["reason"] == "微信登录态已失效，请重新扫码"
+
+
+@pytest.mark.django_db
 def test_browser_login_status_reports_outer_session_and_current_game_frame_separately():
     GameCircleLoginRuntimeState.objects.create(
         outer_state=GameCircleLoginRuntimeState.OuterState.OUTER_READY,
         frame_state=GameCircleLoginRuntimeState.FrameState.READY,
-        error_category=GameCircleLoginRuntimeState.ErrorCategory.NONE,
-        checked_at=timezone.now(),
+            error_category=GameCircleLoginRuntimeState.ErrorCategory.NONE,
+            checked_at=timezone.now(),
+            outer_verified_at=timezone.now(),
     )
     status = Client().get("/auth/status").json()
 
@@ -327,6 +347,20 @@ def test_invalid_cdp_login_control_only_opens_controlled_chrome(mock_call):
 
     assert response.status_code == 302
     assert response.url == "/reports/"
+    mock_call.assert_called_once_with("OPEN_CONTROLLED_LOGIN")
+
+
+@pytest.mark.django_db
+@patch("posts.views.GameCircleIpcClient.call", return_value={"status": "LOGIN_NOT_REQUIRED"})
+def test_login_control_reports_a_recovered_session_without_claiming_it_opened_a_page(mock_call):
+    user = get_user_model().objects.create_user(username="cdp-login-ready", password="test-password")
+    client = Client()
+    client.force_login(user)
+
+    response = client.post("/auth/open-login/", {"return_to": "/admin/"}, follow=True)
+
+    assert response.status_code == 200
+    assert "外层会话已恢复，当前游戏 Frame 正在建立或已可用。" in response.content.decode()
     mock_call.assert_called_once_with("OPEN_CONTROLLED_LOGIN")
 
 

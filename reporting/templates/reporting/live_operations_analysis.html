@@ -8,9 +8,9 @@
 {% endblock %}
 
 {% block content %}
-  <section class="masthead report-head metric-workspace-head">
-    <h1>运营指标工作台</h1>
-    <div class="metric-freshness"><span>完整业务日</span><b>{% if metric_workspace.complete_business_day %}{{ metric_workspace.complete_business_day|date:"Y-m-d" }}{% else %}不完整{% endif %}</b></div>
+  <section class="masthead compact-head report-head metric-workspace-head">
+    <div><p class="eyebrow">LIVE OPERATIONS ANALYTICS</p><h1>运营指标工作台</h1></div>
+    <div class="head-context"><div class="metric-freshness"><span>完整业务日</span><b>{% if metric_workspace.complete_business_day %}{{ metric_workspace.complete_business_day|date:"Y-m-d" }}{% else %}不完整{% endif %}</b></div></div>
   </section>
 
   <section class="period-toolbar" aria-label="统计周期">

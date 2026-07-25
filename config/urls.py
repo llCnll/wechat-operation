@@ -22,7 +22,12 @@ def health_check(request):
 
 def browser_login_status(request):
     state = GameCircleLoginRuntimeState.objects.filter(pk=1).first()
-    stale = state is None or state.checked_at is None or state.checked_at < timezone.now() - timedelta(minutes=10)
+    # Freshness means that the session service has recently observed the outer
+    # page, regardless of whether that observation proved a valid login or a
+    # required scan.  ``outer_verified_at`` deliberately records only a
+    # successful getappinfo verification, so using it here would hide a fresh,
+    # confirmed LOGIN_REQUIRED state as an indeterminate one.
+    stale = state is None or state.checked_at < timezone.now() - timedelta(minutes=10)
     if stale:
         return JsonResponse(
             {
@@ -40,6 +45,7 @@ def browser_login_status(request):
     reasons = {
         GameCircleLoginRuntimeState.OuterState.OUTER_READY: "已检测到有效的受控微信外层会话",
         GameCircleLoginRuntimeState.OuterState.LOGIN_PENDING: "微信页面等待扫码登录",
+        GameCircleLoginRuntimeState.OuterState.LOGIN_REQUIRED: "微信登录态已失效，请重新扫码",
         GameCircleLoginRuntimeState.OuterState.BROWSER_UNAVAILABLE: "受控 Chrome 未启动",
     }
     return JsonResponse(

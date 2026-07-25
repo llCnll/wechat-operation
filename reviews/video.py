@@ -28,6 +28,15 @@ class VideoLimitError(VideoExtractionError):
     pass
 
 
+class VideoToolCommandError(VideoExtractionError):
+    """A media-tool failure with a safe stage and process exit code only."""
+
+    def __init__(self, *, stage: str, return_code: int):
+        self.stage = stage
+        self.return_code = return_code
+        super().__init__(f"video_{stage}_command_failed:exit_{return_code}")
+
+
 _LOCAL_MEDIA_TOOLS = {
     "ffmpeg": RUNTIME_DIR / "video-tools/node_modules/@ffmpeg-installer/darwin-x64/ffmpeg",
     "ffprobe": RUNTIME_DIR / "video-tools/node_modules/ffprobe-static/bin/darwin/x64/ffprobe",
@@ -185,15 +194,18 @@ class VideoProbe:
     has_audio: bool
 
 
-def _run(command: list[str], *, timeout: float) -> subprocess.CompletedProcess[bytes]:
+def _run(
+    command: list[str], *, timeout: float, stage: str
+) -> subprocess.CompletedProcess[bytes]:
+    """Run one media-tool stage without exposing its command or stderr in state."""
     try:
         return subprocess.run(command, capture_output=True, check=True, timeout=timeout)
     except FileNotFoundError as exc:
         raise VideoExtractionError("video_tool_unavailable") from exc
     except subprocess.TimeoutExpired as exc:
-        raise VideoLimitError("video_processing_timeout") from exc
+        raise VideoLimitError(f"video_{stage}_timeout") from exc
     except subprocess.CalledProcessError as exc:
-        raise VideoExtractionError("video_media_not_supported") from exc
+        raise VideoToolCommandError(stage=stage, return_code=exc.returncode) from exc
 
 
 def probe_video(path: Path) -> VideoProbe:
@@ -213,6 +225,7 @@ def probe_video(path: Path) -> VideoProbe:
             str(path),
         ],
         timeout=runtime.video_processing_timeout_seconds,
+        stage="probe",
     )
     import json
 
@@ -260,6 +273,7 @@ def extract_frame(video: Path, timestamp_ms: int, destination: Path) -> None:
             str(destination),
         ],
         timeout=runtime.video_processing_timeout_seconds,
+        stage="frame_extract",
     )
     if not destination.is_file() or destination.stat().st_size == 0:
         raise VideoExtractionError("frame_decode_failed")
@@ -272,6 +286,7 @@ def extract_audio(video: Path, destination: Path) -> None:
     _run(
         [ffmpeg, "-y", "-i", str(video), "-vn", "-ac", "1", "-ar", "16000", str(destination)],
         timeout=runtime.video_processing_timeout_seconds,
+        stage="audio_extract",
     )
 
 
