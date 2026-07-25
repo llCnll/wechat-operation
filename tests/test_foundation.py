@@ -26,9 +26,13 @@ def test_json_formatter_emits_safe_structured_log():
     formatter = config.settings.JsonFormatter()
     record = logging.LogRecord("test", logging.INFO, "", 0, "completed", (), None)
     record.topic_id = 123
+    record.video_stage = "frame_extract"
+    record.process_exit_code = 9
     payload = json.loads(formatter.format(record))
     assert payload["message"] == "completed"
     assert payload["topic_id"] == 123
+    assert payload["video_stage"] == "frame_extract"
+    assert payload["process_exit_code"] == 9
 
 
 @pytest.mark.django_db(transaction=True)

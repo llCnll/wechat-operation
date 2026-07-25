@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import os
+import subprocess
 
 import httpx
 import pytest
@@ -12,6 +13,7 @@ from django.test import RequestFactory
 from config.settings import SensitiveDataFilter
 from jobs.models import BackgroundJob, JobStatus
 from jobs.services import execute_next_job, recover_interrupted_jobs
+from jobs.task_types import VIDEO_EXTRACT_TASK
 from posts.models import CandidatePost, MediaType, OriginalPost, OriginType, PostMedia
 from posts.services import classify_content_card
 from reviews.adapters import SourceTransportError, SpeechTranscriptionClient
@@ -28,6 +30,7 @@ from reviews.video import (
     VideoLimitError,
     VideoMediaReader,
     VideoProbe,
+    VideoToolCommandError,
     candidate_times,
     extract_frame,
     media_fingerprint,
@@ -289,6 +292,23 @@ def test_extract_frame_requires_a_nonempty_output_file(monkeypatch, tmp_path):
         extract_frame(tmp_path / "input.bin", 5_000, tmp_path / "frame.jpg")
 
 
+def test_extract_frame_classifies_ffmpeg_command_failure_by_stage(monkeypatch, tmp_path):
+    monkeypatch.setattr("reviews.video.media_tool_path", lambda _name: "ffmpeg")
+    monkeypatch.setattr(
+        "reviews.video.subprocess.run",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            subprocess.CalledProcessError(9, ["ffmpeg"])
+        ),
+    )
+
+    with pytest.raises(VideoToolCommandError) as captured:
+        extract_frame(tmp_path / "input.bin", 0, tmp_path / "frame.jpg")
+
+    assert str(captured.value) == "video_frame_extract_command_failed:exit_9"
+    assert captured.value.stage == "frame_extract"
+    assert captured.value.return_code == 9
+
+
 @pytest.mark.django_db
 def test_video_worker_only_recovers_its_own_interrupted_jobs():
     video_job = BackgroundJob.objects.create(
@@ -361,6 +381,50 @@ def test_video_worker_keeps_qr_when_detector_and_ocr_are_partially_unavailable(m
     assert extraction.status == VideoExtractionStatus.PARTIAL
     assert "qr_detector_unavailable" in extraction.error_summary
     assert "audio_track_unavailable" in extraction.error_summary
+
+
+@pytest.mark.django_db
+def test_failed_video_extraction_marks_its_job_failed_and_logs_safe_stage(monkeypatch, caplog):
+    post = OriginalPost.objects.create(topic_id=3131, content_id="video-failure")
+    media = PostMedia.objects.create(
+        post=post, url="https://media.example/video.mp4", media_type=MediaType.VIDEO
+    )
+    extraction = VideoExtraction.objects.create(
+        post=post,
+        media=media,
+        media_fingerprint=media_fingerprint(media.url),
+        extractor_version=VIDEO_EXTRACTOR_VERSION,
+    )
+    job = BackgroundJob.objects.create(
+        task_type=VIDEO_EXTRACT_TASK,
+        idempotency_key="video-failure",
+        parameter_summary={"video_extraction_id": extraction.pk},
+    )
+    monkeypatch.setattr("reviews.video_tasks.VideoMediaReader.download", lambda *_args: None)
+    monkeypatch.setattr("reviews.video_tasks.probe_video", lambda _path: VideoProbe(500, False))
+    monkeypatch.setattr("reviews.video_tasks.candidate_times", lambda _duration: [0])
+    monkeypatch.setattr(
+        "reviews.video_tasks.extract_frame",
+        lambda *_args: (_ for _ in ()).throw(
+            VideoToolCommandError(stage="frame_extract", return_code=9)
+        ),
+    )
+    caplog.set_level(logging.WARNING, logger="reviews.video_tasks")
+
+    processed = execute_next_job({VIDEO_EXTRACT_TASK: extract_video_handler})
+
+    assert processed is not None
+    extraction.refresh_from_db()
+    job.refresh_from_db()
+    assert extraction.status == VideoExtractionStatus.FAILED
+    assert extraction.error_summary == "video_frame_extract_command_failed:exit_9"
+    assert job.status == JobStatus.FAILED
+    assert job.error_summary == extraction.error_summary
+    record = next(record for record in caplog.records if record.message == "视频提取失败")
+    assert record.topic_id == post.topic_id
+    assert record.result_code == extraction.error_summary
+    assert record.video_stage == "frame_extract"
+    assert record.process_exit_code == 9
 
 
 @pytest.mark.django_db

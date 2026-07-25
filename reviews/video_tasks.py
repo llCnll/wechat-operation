@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import re
 import unicodedata
 from dataclasses import dataclass
@@ -10,6 +11,7 @@ from pathlib import Path
 
 from config.settings import runtime
 from jobs.models import BackgroundJob
+from jobs.services import JobTerminalError
 from jobs.task_types import VIDEO_EXTRACT_TASK
 from posts.models import MediaType
 
@@ -19,6 +21,7 @@ from .video import (
     VideoExtractionError,
     VideoLimitError,
     VideoMediaReader,
+    VideoToolCommandError,
     candidate_times,
     dhash,
     extract_audio,
@@ -33,6 +36,7 @@ from .video import (
 VIDEO_EXTRACTOR_VERSION = "v3"
 QR_CONTIGUOUS_GAP_MS = 1_000
 OCR_TEXT_SIMILARITY_THRESHOLD = 0.92
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -75,6 +79,27 @@ def _set_status(extraction: VideoExtraction, status: str, error: str = "", frame
     extraction.save(update_fields=("status", "error_summary", "frame_count", "updated_at"))
 
 
+def _log_terminal_failure(
+    job: BackgroundJob,
+    extraction: VideoExtraction,
+    error: str,
+    *,
+    cause: Exception | None = None,
+) -> None:
+    """Log enough safe context to diagnose a failed attempt without media material."""
+    extra = {
+        "task_id": job.pk,
+        "topic_id": extraction.post.topic_id,
+        "result_code": error,
+    }
+    if isinstance(cause, VideoToolCommandError):
+        extra.update(
+            video_stage=cause.stage,
+            process_exit_code=cause.return_code,
+        )
+    logger.warning("视频提取失败", extra=extra)
+
+
 def _store_qr(extraction: VideoExtraction, span: QrSpan, sequence: int) -> None:
     VideoEvidence.objects.update_or_create(
         extraction=extraction,
@@ -95,8 +120,10 @@ def extract_video_handler(job: BackgroundJob) -> None:
     )
     media = extraction.media
     if media.media_type != MediaType.VIDEO:
-        _set_status(extraction, VideoExtractionStatus.FAILED, "video_media_invalid")
-        return
+        error = "video_media_invalid"
+        _set_status(extraction, VideoExtractionStatus.FAILED, error)
+        _log_terminal_failure(job, extraction, error)
+        raise JobTerminalError(error)
     _set_status(extraction, VideoExtractionStatus.RUNNING)
     VideoEvidence.objects.filter(extraction=extraction).delete()
     partial: list[str] = []
@@ -208,8 +235,10 @@ def extract_video_handler(job: BackgroundJob) -> None:
         _set_status(extraction, VideoExtractionStatus.SKIPPED_LIMIT, safe_error(exc), frame_count)
         return
     except Exception as exc:
-        _set_status(extraction, VideoExtractionStatus.FAILED, safe_error(exc), frame_count)
-        return
+        error = safe_error(exc)
+        _set_status(extraction, VideoExtractionStatus.FAILED, error, frame_count)
+        _log_terminal_failure(job, extraction, error, cause=exc)
+        raise JobTerminalError(error) from exc
     _set_status(
         extraction,
         VideoExtractionStatus.PARTIAL if partial else VideoExtractionStatus.SUCCEEDED,

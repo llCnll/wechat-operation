@@ -92,6 +92,17 @@
 ### Requirement: 视频提取失败的审核降级
 系统 SHALL 在视频任务达到成功、部分完成、失败、取消或资源限制等终态后允许对应 AI 评估继续执行。视频证据缺失、部分完成或失败本身 SHALL NOT 使人工审核任务标记为重点关注，亦不得自动触发上游处置或阻止运营人员查看已有文本和图片证据；仅在标题、正文和投票均为空且该视频没有可用当前媒体证据时，审核任务 SHALL 按 AI 审核工作流记录 `EVIDENCE_MISSING`。
 
+### Requirement: 视频任务与提取结果的终态一致性
+系统 SHALL 将视频提取记录与其 `VIDEO_EXTRACT` 后台任务的终态语义保持一致。媒体无效、读取失败、媒体工具命令失败或其他导致提取记录为 `FAILED` 的异常，后台任务 SHALL 以同一脱敏错误分类进入 `FAILED`，不得显示为成功。`PARTIAL` 表示已产生可用的部分证据，`SKIPPED_LIMIT` 表示已按受控资源上限完成降级，二者的后台任务 SHALL 标记为成功。媒体工具命令失败分类 SHALL 至少区分 `probe`、`frame_extract` 与 `audio_extract` 阶段，并可附带安全的进程退出码；持久化状态和结构化日志 SHALL NOT 包含媒体 URL、临时路径、完整命令、Cookie、令牌或原始 stderr。
+
+#### Scenario: 首帧抽取命令失败
+- **WHEN** `ffprobe` 已成功且 `ffmpeg` 在候选帧抽取阶段以非零退出码结束
+- **THEN** 提取记录和后台任务 SHALL 均标记为失败，错误分类为 `video_frame_extract_command_failed:exit_<code>`，结构化日志 SHALL 记录安全的阶段与退出码
+
+#### Scenario: 资源上限内受控停止
+- **WHEN** 视频因字节、处理时间或时长上限进入 `SKIPPED_LIMIT`
+- **THEN** 提取记录 SHALL 保留对应受限原因，后台任务 SHALL 标记为成功，AI 评估可继续使用其余内容
+
 #### Scenario: 视频超出时长限制
 - **WHEN** 视频时长超过提取时保存的上限快照
 - **THEN** 系统 SHALL 记录历史上限、实际时长和脱敏摘要，AI 评估 SHALL 使用其余可用内容继续执行；仅在空文字输入且该视频没有可用当前媒体证据时，审核任务 SHALL 记录 `EVIDENCE_MISSING`

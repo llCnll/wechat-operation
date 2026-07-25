@@ -56,4 +56,6 @@ ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1 $e
 
 视频因超过时长上限而未提取时，审核详情会显示该次提取保存的实际时长与历史上限，例如“视频时长 31 秒，超过提取时资源与采样时长上限 30 秒，未进行提取”。修改当前配置不会改写历史说明。
 
+视频工具命令失败会按阶段保存脱敏分类，例如 `video_probe_command_failed:exit_1`、`video_frame_extract_command_failed:exit_1` 或 `video_audio_extract_command_failed:exit_1`；超时对应 `video_<stage>_timeout`。视频 Worker 日志会额外记录任务 ID、帖子 ID、阶段和退出码，便于区分媒体探测、抽帧和音频提取问题，但不会记录视频 URL、临时路径、完整命令、Cookie、令牌或原始工具 stderr。提取记录为 `FAILED` 时，对应 `VIDEO_EXTRACT` 后台任务也必须标记失败；`PARTIAL` 和受资源限制的 `SKIPPED_LIMIT` 仍是已完成的受控降级。
+
 停止或回滚时，先停止视频 Worker、关闭 `VIDEO_ENABLED`，再重启 Supervisor；已有本地文本证据可保留追溯。视频失败任务保留脱敏状态，供人工核验。
