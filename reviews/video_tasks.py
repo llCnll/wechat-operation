@@ -30,6 +30,7 @@ from .video import (
     probe_video,
     qr_present,
     safe_error,
+    sampling_intervals,
     video_workdir,
 )
 
@@ -136,20 +137,25 @@ def extract_video_handler(job: BackgroundJob) -> None:
             if extraction.duration_limit_seconds is None:
                 extraction.duration_limit_seconds = runtime.video_max_duration_seconds
             extraction.duration_ms = probe.duration_ms
-            extraction.save(
-                update_fields=("duration_ms", "duration_limit_seconds", "updated_at")
+            extraction.sampled_intervals_ms = []
+            intervals = sampling_intervals(
+                probe.duration_ms, extraction.duration_limit_seconds * 1000
             )
-            if probe.duration_ms > extraction.duration_limit_seconds * 1000:
-                _set_status(
-                    extraction,
-                    VideoExtractionStatus.SKIPPED_LIMIT,
-                    "video_duration_limit_exceeded",
+            extraction.save(
+                update_fields=(
+                    "duration_ms",
+                    "duration_limit_seconds",
+                    "sampled_intervals_ms",
+                    "updated_at",
                 )
-                return
+            )
+            distributed_sampling = len(intervals) > 1
+            if distributed_sampling:
+                partial.append("video_duration_distributed_sampling")
             hashes: list[int] = []
             selected: list[tuple[int, Path, bool]] = []
             qr_spans: list[QrSpan] = []
-            for timestamp in candidate_times(probe.duration_ms):
+            for timestamp in candidate_times(probe.duration_ms, intervals):
                 frame = directory / f"frame-{timestamp}.jpg"
                 try:
                     extract_frame(video, timestamp, frame)
@@ -179,6 +185,8 @@ def extract_video_handler(job: BackgroundJob) -> None:
                     continue
                 hashes.append(value)
                 selected.append((timestamp, frame, False))
+            extraction.sampled_intervals_ms = [list(interval) for interval in intervals]
+            extraction.save(update_fields=("sampled_intervals_ms", "updated_at"))
             for sequence, span in enumerate(qr_spans):
                 _store_qr(extraction, span, sequence)
             selected.sort(key=lambda item: (not item[2], item[0]))
@@ -209,7 +217,7 @@ def extract_video_handler(job: BackgroundJob) -> None:
                         )
                         accepted_ocr_text.append(normalized_ocr_text(text))
                     ocr_sequence += 1
-            if probe.has_audio:
+            if probe.has_audio and not distributed_sampling:
                 try:
                     audio = directory / "audio.wav"
                     extract_audio(video, audio)

@@ -74,7 +74,7 @@
       <details class="console-video-advanced">
         <summary><span>资源与采样高级配置</span><small>默认值已适配 30 秒视频，通常无需调整</small></summary>
         <div class="console-dialog-fields console-video-advanced-fields">
-          <label>最大时长（秒）<input name="VIDEO_MAX_DURATION_SECONDS" value="{{ admin_console.runtime_config.video_max_duration_seconds }}" min="1" max="60" type="number"></label>
+          <label>最大采样时长（秒）<input name="VIDEO_MAX_DURATION_SECONDS" value="{{ admin_console.runtime_config.video_max_duration_seconds }}" min="1" max="60" type="number"></label>
           <label>最大字节数<input name="VIDEO_MAX_BYTES" value="{{ admin_console.runtime_config.video_max_bytes }}" min="1048576" type="number"></label>
           <label>每帖最大视频数<input name="VIDEO_MAX_PER_POST" value="{{ admin_console.runtime_config.video_max_per_post }}" min="1" max="10" type="number"></label>
           <label>帧最长边（像素）<input name="VIDEO_MAX_FRAME_EDGE" value="{{ admin_console.runtime_config.video_max_frame_edge }}" min="240" max="1920" type="number"></label>

@@ -84,6 +84,7 @@ def test_admin_home_is_configuration_and_traceability_console(admin_client):
     assert "配置 AI 审核" in page
     assert "配置 OCR" in page
     assert "配置视频审核" in page
+    assert "最大采样时长（秒）" in page
     assert (
         "/admin/runtime/services/video_extraction/start/" in page
         or "/admin/runtime/services/video_extraction/restart/" in page

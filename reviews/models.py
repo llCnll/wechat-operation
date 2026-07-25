@@ -134,6 +134,7 @@ class VideoExtraction(models.Model):
     )
     duration_ms = models.PositiveIntegerField(null=True, blank=True)
     duration_limit_seconds = models.PositiveIntegerField(null=True, blank=True)
+    sampled_intervals_ms = models.JSONField(blank=True, default=list)
     frame_count = models.PositiveIntegerField(default=0)
     error_summary = models.CharField(max_length=500, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
