@@ -1,0 +1,22 @@
+version: 1.6.0
+previous: 1.5.0
+changes:
+  - 新增异步舆情报告：可锁定正常帖来源范围、异步生成页面报告、重跑同一来源并导出指定运行版本的 Word 文档。
+  - 新增独立舆情报告 Worker，报告分析仅使用本地锁定文本、AI 快照和互动快照，不访问游戏圈会话、CDP、Chrome、上游或模型。
+  - 修复人工处置：已屏蔽帖子可沉底、已沉底帖子可屏蔽；AI 自动处置仍不会覆盖已变化的人工状态。
+  - 强化增量字段与 Supervisor 生命周期兼容性，避免新旧 Worker 交错时新增必填列导致写入失败，并确保 Supervisor 收到终止信号时关闭受管服务。
+upgrade:
+  dependencies: uv-sync
+  database: migrate
+  static: collectstatic
+  restart:
+    mode: supervisor
+    services: []
+  once_jobs: []
+  manual: []
+verification:
+  - uv run python manage.py validate_releases
+  - uv run pytest -q tests/test_release_protocol.py tests/test_release_source_archive.py
+  - uv run python manage.py check
+  - 确认 Supervisor 完整重启后 Web、游戏圈会话服务、舆情报告 Worker 与既有期望运行的 Worker 均恢复。
+  - 在舆情报告页面创建一个仅含正常帖的测试任务，确认完成后可查看报告、来源追溯和 Word 导出；不得将该验证用于上游写入或模型调用。
