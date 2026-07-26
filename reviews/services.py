@@ -20,7 +20,9 @@ from jobs.adapters import WriteResultUnknownError
 from jobs.services import enqueue_job
 from jobs.task_types import AI_AUTOMATED_MODERATION_TASK, AI_EVALUATE_TASK, OCR_EXTRACT_TASK
 from posts.models import (
+    POST_STATUS_MODERATION_MASK,
     POST_STATUS_NORMAL,
+    POST_STATUS_SELF_VISIBLE,
     CandidatePost,
     MediaType,
     OriginalPost,
@@ -77,7 +79,7 @@ POST_BOUND_OPERATION_ACTIONS = frozenset(
 )
 _TARGET_REACHED_OPERATION_RESULT_CODES = frozenset(("OK", "ALREADY_APPLIED"))
 _READBACK_STATE_OPERATION_RESULT_CODES = _TARGET_REACHED_OPERATION_RESULT_CODES | frozenset(
-    ("SKIPPED_UPSTREAM_NOT_NORMAL",)
+    ("SKIPPED_UPSTREAM_NOT_NORMAL", "SKIPPED_UPSTREAM_NOT_ACTIONABLE")
 )
 MUTE_DURATIONS_DAYS = frozenset((1, 3, 7, 30))
 BLOCK_REASON_OPTIONS = (
@@ -135,16 +137,31 @@ def operation_result_has_readback_state(result_code: str) -> bool:
     return result_code in _READBACK_STATE_OPERATION_RESULT_CODES
 
 
-def _preflight_operation_result(action: str, before_state: dict[str, object]) -> tuple[str, str] | None:
-    """Classify a non-writing SINK/BLOCK preflight from the authoritative source state."""
+def _preflight_operation_result(
+    action: str,
+    before_state: dict[str, object],
+    *,
+    allow_moderation_overwrite: bool,
+) -> tuple[str, str] | None:
+    """Classify a SINK/BLOCK preflight without blocking valid overwrite operations."""
     if action not in {RecommendedAction.SINK, RecommendedAction.BLOCK}:
         return None
     status = before_state.get("status")
+    if not isinstance(status, int):
+        return "SKIPPED_UPSTREAM_NOT_ACTIONABLE", "上游帖子状态无效，无法执行覆盖处置"
+    if is_post_deleted(status):
+        return "SKIPPED_UPSTREAM_NOT_ACTIONABLE", "上游帖子已从管理队列删除，无法执行覆盖处置"
+    if status & POST_STATUS_SELF_VISIBLE:
+        return "SKIPPED_UPSTREAM_NOT_ACTIONABLE", "上游帖子仅自己可见，无法执行覆盖处置"
     expected_status = EXPECTED_OPERATION_STATUS[action]
     if status == expected_status:
         return "ALREADY_APPLIED", "上游帖子已处于目标状态，跳过重复处置"
+    if status & POST_STATUS_MODERATION_MASK:
+        if allow_moderation_overwrite:
+            return None
+        return "SKIPPED_UPSTREAM_NOT_ACTIONABLE", "上游帖子状态已变化，自动处置不覆盖人工状态"
     if status != POST_STATUS_NORMAL:
-        return "SKIPPED_UPSTREAM_NOT_NORMAL", "上游帖子已不是正常状态，跳过重复处置"
+        return "SKIPPED_UPSTREAM_NOT_ACTIONABLE", "上游帖子状态不支持覆盖处置"
     return None
 
 
@@ -1420,7 +1437,11 @@ def execute_confirmed_operation(
                 current_author_openid = _operation_author_openid(before_payload)
                 payload["author_openid"] = current_author_openid
         expected_status = EXPECTED_OPERATION_STATUS.get(action)
-        preflight_result = _preflight_operation_result(action, before_state)
+        preflight_result = _preflight_operation_result(
+            action,
+            before_state,
+            allow_moderation_overwrite=execution_source == OperationExecutionSource.HUMAN,
+        )
         if preflight_result is not None:
             result_code, error_summary = preflight_result
             after_state = before_state
