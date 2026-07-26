@@ -885,6 +885,50 @@ def test_dashboard_rejects_operation_for_post_deleted_from_management_queue(monk
 
 
 @pytest.mark.django_db
+def test_dashboard_allows_deleted_post_author_unmute_without_post_read(monkeypatch):
+    monkeypatch.setattr(runtime, "enable_upstream_writes", True)
+    monkeypatch.setattr(runtime, "enable_unmute_writes", True)
+    user = get_user_model().objects.create_user(username="deleted-author-action")
+    post = OriginalPost.objects.create(
+        topic_id=1003,
+        content_id="deleted-author-action-content",
+        status=POST_STATUS_DELETED,
+        source_appid="wx-game",
+        author_openid="deleted-author",
+    )
+    source = object()
+    executed = []
+
+    @contextmanager
+    def source_session(_post):
+        yield source
+
+    def execute(*args, **kwargs):
+        executed.append(kwargs)
+        assert kwargs["action"] == RecommendedAction.UNMUTE
+        assert kwargs["source"] is source
+        assert kwargs["upstream_payload"] == {"author_openid": "deleted-author"}
+        return SimpleNamespace(result_code="OK")
+
+    monkeypatch.setattr("posts.views._source_for_post", source_session)
+    monkeypatch.setattr("posts.views.execute_confirmed_operation", execute)
+    client = Client()
+    client.force_login(user)
+
+    page = client.get(f"/?appid={post.source_appid}&topic={post.topic_id}").content.decode()
+    assert 'data-operation="MUTE"' in page
+    assert 'data-operation="UNMUTE"' in page
+
+    response = client.post(
+        f"/posts/{post.topic_id}/operate/UNMUTE/",
+        {"reason": "作者状态核验后解除禁言", "confirmation_key": "deleted-author-unmute"},
+    )
+
+    assert response.status_code == 302
+    assert len(executed) == 1
+
+
+@pytest.mark.django_db
 def test_dashboard_skip_completes_review_without_upstream_request():
     user = get_user_model().objects.create_user(username="skip-operator", password="test-password")
     post = OriginalPost.objects.create(topic_id=101, content_id="content-101")

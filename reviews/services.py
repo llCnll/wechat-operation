@@ -67,6 +67,14 @@ EXPECTED_OPERATION_STATUS = {
     RecommendedAction.SINK: 8,
     RecommendedAction.BLOCK: 4,
 }
+POST_BOUND_OPERATION_ACTIONS = frozenset(
+    (
+        RecommendedAction.RESTORE,
+        RecommendedAction.SINK,
+        RecommendedAction.BLOCK,
+        RecommendedAction.BLOCK_AND_MUTE,
+    )
+)
 _TARGET_REACHED_OPERATION_RESULT_CODES = frozenset(("OK", "ALREADY_APPLIED"))
 _READBACK_STATE_OPERATION_RESULT_CODES = _TARGET_REACHED_OPERATION_RESULT_CODES | frozenset(
     ("SKIPPED_UPSTREAM_NOT_NORMAL",)
@@ -1280,9 +1288,9 @@ def save_reply_draft(
 def create_confirmed_operation(
     task: ReviewTask, *, user, action: str, reason: str, confirmation_key: str | None = None
 ) -> OperationAudit:
-    if is_post_deleted(task.post.status):
-        raise ValueError("帖子已从原平台管理队列删除，不能执行处置")
-    if is_post_self_visible(task.post.status):
+    if is_post_deleted(task.post.status) and action in POST_BOUND_OPERATION_ACTIONS:
+        raise ValueError("帖子已从原平台管理队列删除，不能执行帖子处置")
+    if is_post_self_visible(task.post.status) and action in POST_BOUND_OPERATION_ACTIONS:
         raise ValueError("帖子当前仅自己可见，不能覆盖原平台可见性状态")
     if not is_operation_enabled(action):
         raise PermissionError("上游写操作能力未启用")
@@ -1349,13 +1357,14 @@ def execute_confirmed_operation(
 ) -> OperationAudit:
     """Execute one verified upstream operation with an explicit actor source."""
     payload = _prepare_upstream_payload(action, reason, upstream_payload)
-    if is_post_deleted(task.post.status):
-        raise ValueError("帖子已从原平台管理队列删除，不能执行处置")
-    if is_post_self_visible(task.post.status):
+    if is_post_deleted(task.post.status) and action in POST_BOUND_OPERATION_ACTIONS:
+        raise ValueError("帖子已从原平台管理队列删除，不能执行帖子处置")
+    if is_post_self_visible(task.post.status) and action in POST_BOUND_OPERATION_ACTIONS:
         raise ValueError("帖子当前仅自己可见，不能覆盖原平台可见性状态")
-    candidate = CandidatePost.objects.filter(topic_id=task.post.topic_id).first()
-    if candidate is None or candidate.origin_type != OriginType.ORIGINAL:
-        raise ValueError("操作前原创状态复核失败")
+    if action in POST_BOUND_OPERATION_ACTIONS:
+        candidate = CandidatePost.objects.filter(topic_id=task.post.topic_id).first()
+        if candidate is None or candidate.origin_type != OriginType.ORIGINAL:
+            raise ValueError("操作前原创状态复核失败")
 
     # Commit the confirmation before contacting the upstream service. If the process
     # stops after an upstream write, a repeated confirmation returns this audit rather

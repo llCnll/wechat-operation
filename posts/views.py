@@ -95,6 +95,14 @@ DASHBOARD_SORT_OPTIONS = (
 
 BATCH_AI_ACTIONS = frozenset((RecommendedAction.SINK, RecommendedAction.BLOCK))
 BATCH_AI_LIMIT = 20
+POST_BOUND_UPSTREAM_ACTIONS = frozenset(
+    (
+        RecommendedAction.SINK,
+        RecommendedAction.BLOCK,
+        RecommendedAction.RESTORE,
+        RecommendedAction.BLOCK_AND_MUTE,
+    )
+)
 
 POST_STATUS_FILTER_OPTIONS = (
     ("NORMAL", "正常"),
@@ -1100,10 +1108,10 @@ def confirm_dashboard_operation(request, topic_id: int, action: str):
     post = get_object_or_404(OriginalPost, topic_id=topic_id)
     redirect_url = _dashboard_return_url(request, post.topic_id)
     action = action.upper()
-    if is_post_deleted(post.status):
-        messages.error(request, "帖子已从原平台管理队列删除，不能执行处置。")
+    if is_post_deleted(post.status) and action in POST_BOUND_UPSTREAM_ACTIONS:
+        messages.error(request, "帖子已从原平台管理队列删除，不能执行帖子处置。")
         return redirect(redirect_url)
-    if is_post_self_visible(post.status) and action != "SKIP":
+    if is_post_self_visible(post.status) and action in POST_BOUND_UPSTREAM_ACTIONS:
         messages.error(request, "帖子当前仅自己可见，不能覆盖原平台可见性状态。")
         return redirect(redirect_url)
     task, _ = ReviewTask.objects.get_or_create(

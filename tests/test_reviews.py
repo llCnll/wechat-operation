@@ -1170,6 +1170,63 @@ def test_deleted_post_with_known_author_can_still_read_back_author_state(monkeyp
 
 
 @pytest.mark.django_db
+def test_deleted_post_with_known_author_can_execute_mute_without_candidate(monkeypatch):
+    monkeypatch.setattr(runtime, "enable_upstream_writes", True)
+    monkeypatch.setattr(runtime, "enable_mute_writes", True)
+    monkeypatch.setattr("reviews.services.sleep", lambda _seconds: None)
+    post = OriginalPost.objects.create(
+        topic_id=218,
+        content_id="deleted-author-mute",
+        source_appid="wx-test",
+        author_openid="deleted-author",
+        status=POST_STATUS_DELETED,
+    )
+    _, task = persist_assessment(
+        post,
+        AssessmentOutput(
+            content_category="OTHER", recommended_action="MUTE", overall_confidence=0.9
+        ),
+    )
+
+    class Source:
+        reads = 0
+
+        def get_author_detail(self, openid):
+            assert openid == "deleted-author"
+            self.reads += 1
+            block_end_time = 0 if self.reads == 1 else 2_000_000_000
+            return {
+                "data": {
+                    "user": {
+                        "openid": openid,
+                        "block_info": {"appid": "wx-test", "block_end_time": block_end_time},
+                        "global_block_end_time": 0,
+                    }
+                }
+            }
+
+        def get_post_metrics(self, _topic_id):
+            pytest.fail("删除帖作者禁言不得读取帖子详情")
+
+        def perform_confirmed_operation(self, *, topic_id, action, payload):
+            assert topic_id == post.topic_id
+            assert action == RecommendedAction.MUTE
+            assert payload["author_openid"] == post.author_openid
+            return {"errcode": 0, "errmsg": "ok"}
+
+    audit = execute_confirmed_operation(
+        task,
+        user=None,
+        action=RecommendedAction.MUTE,
+        reason="人工确认",
+        source=Source(),
+        upstream_payload={"mute_days": 1, "block_reason_code": 1},
+    )
+
+    assert audit.result_code == "OK"
+
+
+@pytest.mark.django_db
 def test_mute_keeps_action_failed_when_write_raises_even_if_readback_matches(monkeypatch):
     monkeypatch.setattr(runtime, "enable_upstream_writes", True)
     monkeypatch.setattr(runtime, "enable_mute_writes", True)
