@@ -1,0 +1,25 @@
+{% extends "posts/operations_base.html" %}
+{% load static %}
+
+{% block title %}舆情报告 | 游戏圈运营{% endblock %}
+{% block extra_head %}<link href="{% static 'reporting/public_opinion_reports.css' %}" rel="stylesheet">{% endblock %}
+
+{% block content %}
+<section class="masthead compact-head opinion-head"><div><p class="eyebrow">PUBLIC OPINION REPORTING</p><h1>舆情报告</h1><p>基于锁定的正常原创帖生成，互动指标按每次运行时点更新。</p></div></section>
+<section class="opinion-create">
+  <header><div><h2>创建报告</h2><p>首次执行锁定帖子成员、内容和 AI 快照；重跑不会改变来源范围。</p></div></header>
+  {% if range_error %}<p class="opinion-inline-error">{{ range_error }}</p>{% endif %}
+  <form method="post" action="{% url 'create-public-opinion-report' %}">{% csrf_token %}
+    <label>开始日期<input type="date" name="start_date" value="{{ start_date|date:'Y-m-d' }}"></label>
+    <label>结束日期<input type="date" name="end_date" value="{{ end_date|date:'Y-m-d' }}"></label>
+    {% if managed_games|length > 1 %}<label>游戏<select name="appid">{% for game in managed_games %}<option value="{{ game.appid }}" {% if game.appid == appid %}selected{% endif %}>{{ game.name }}</option>{% endfor %}</select></label>{% else %}<input type="hidden" name="appid" value="{{ appid }}">{% endif %}
+    <button type="submit">创建任务</button>
+  </form>
+</section>
+<section class="opinion-history"><header><h2>报告历史</h2><span>{{ active_game.name|default:'当前游戏' }}</span></header>
+  {% if reports %}<div class="opinion-report-list">{% for report in reports %}<article>
+    <div><p class="opinion-range">{{ report.start_day|date:'Y-m-d' }} 至 {{ report.end_day|date:'Y-m-d' }}</p><h3><a href="{% url 'public-opinion-report-detail' report.pk %}?appid={{ appid }}">报告 #{{ report.pk }}</a></h3><p>来源{% if report.source_locked_at %}已于 {{ report.source_locked_at|date:'Y-m-d H:i:s' }}锁定{% else %}等待首次执行锁定{% endif %}</p></div>
+    <dl><div><dt>最近运行</dt><dd>{% if report.latest_run %}运行 {{ report.latest_run.run_number }} · {{ report.latest_run.get_status_display }}{% else %}尚未入队{% endif %}</dd></div><div><dt>当前完成版本</dt><dd>{% if report.current_successful_run %}运行 {{ report.current_successful_run.run_number }}{% else %}尚无完成版本{% endif %}</dd></div><div><dt>保留至</dt><dd>{{ report.retention_until|date:'Y-m-d' }}</dd></div></dl>
+  </article>{% endfor %}</div>{% else %}<p class="opinion-empty">尚未创建舆情报告。</p>{% endif %}
+</section>
+{% endblock %}

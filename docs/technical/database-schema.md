@@ -449,6 +449,7 @@ AI 评估中的单项风险证据，可保存多段命中内容。
 | `POST_AUTHOR_MUTE_STATUS_SYNC` | 扫描当前游戏全量帖子作者；按作者去重读取用户详情，只将仍禁言作者补充到禁言管理，不设置永久禁言；同一范围仅保留一个活跃任务。 | 禁言维护 Worker（Supervisor 服务 `mute_maintenance`） |
 | `AUTHOR_MUTE_STATUS_BACKFILL_V2` | 一次性补全历史原创帖作者昵称与禁言状态；已知作者按游戏去重读取作者详情。旧 `AUTHOR_MUTE_STATUS_BACKFILL` 不由新版 Worker 认领。 | 人工补采 Worker（Supervisor 服务 `backfill_ingestion`） |
 | `METRIC_DAILY_SYNC` / `METRIC_WEEKLY_SYNC` / `METRIC_BACKFILL` | 游戏圈日/周聚合指标同步或人工范围回填；当前工作区已实现、待发布。 | 指标快照 Worker（Supervisor 服务 `metric_sync`） |
+| `PUBLIC_OPINION_REPORT` | 锁定本地正常原创帖来源后生成一份舆情报告运行版本；不调用 CDP、上游或模型。 | 舆情报告 Worker（Supervisor 服务 `public_opinion_reporting`） |
 
 ## `reporting_gamecirclemetricsnapshot`（游戏圈指标快照，待发布）
 

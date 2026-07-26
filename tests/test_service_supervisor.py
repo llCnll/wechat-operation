@@ -81,8 +81,9 @@ def test_supervisor_control_server_requires_token_and_reports_status(tmp_path):
             "game_circle_session",
             "ingestion",
             "backfill_ingestion",
-            "metric_sync",
-            "review",
+                "metric_sync",
+                "public_opinion_reporting",
+                "review",
             "video_extraction",
             "ai_moderation",
             "mute_maintenance",
@@ -136,7 +137,7 @@ def test_bootstrap_terminates_identifiable_legacy_services_before_preflight(tmp_
         service: {"desired": False}
         for service in (
             "controlled_chrome", "web", "scheduler", "game_circle_session", "ingestion",
-            "backfill_ingestion", "metric_sync", "review", "video_extraction", "ai_moderation",
+                "backfill_ingestion", "metric_sync", "public_opinion_reporting", "review", "video_extraction", "ai_moderation",
             "mute_maintenance",
         )
     }
@@ -199,7 +200,7 @@ def test_reconcile_replaces_session_owner_when_controlled_chrome_is_lost(tmp_pat
         service: {"desired": False}
         for service in (
             "controlled_chrome", "web", "scheduler", "game_circle_session", "ingestion",
-            "backfill_ingestion", "metric_sync", "review", "video_extraction", "ai_moderation",
+                "backfill_ingestion", "metric_sync", "public_opinion_reporting", "review", "video_extraction", "ai_moderation",
             "mute_maintenance",
         )
     }
@@ -410,7 +411,7 @@ def test_shutdown_stops_services_in_dependency_order_without_clearing_desired(tm
     supervisor.shutdown()
 
     assert calls == [
-        "ai_moderation", "video_extraction", "review", "metric_sync", "backfill_ingestion",
+        "ai_moderation", "video_extraction", "review", "metric_sync", "public_opinion_reporting", "backfill_ingestion",
         "ingestion", "mute_maintenance", "scheduler", "game_circle_session",
         "controlled_chrome", "web",
     ]

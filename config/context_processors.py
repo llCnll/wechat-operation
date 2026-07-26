@@ -20,6 +20,7 @@ MANAGED_SERVICE_NAMES = (
     "ingestion",
     "backfill_ingestion",
     "metric_sync",
+    "public_opinion_reporting",
     "review",
     "video_extraction",
     "ai_moderation",
@@ -352,6 +353,15 @@ def _build_runtime_console(
         business_condition="当前操作游戏和已验证的当前游戏 Frame 可用后，才能完成来源读取。",
         missing_behavior="Worker 仍可运行；指标任务按既有语义延后或失败并保留摘要。",
     )
+    public_opinion_card = _service_card(
+        snapshot,
+        "public-opinion-reporting",
+        "舆情报告 Worker",
+        "仅读取本地锁定的帖子、AI 快照与互动快照，生成可追溯的舆情报告。",
+        service="public_opinion_reporting",
+        business_condition="无需 Chrome、游戏圈会话、AI 模型或上游访问。",
+        missing_behavior="创建的报告任务保持等待，直到 Worker 启动。",
+    )
     review_card = _service_card(
         snapshot,
         "review",
@@ -441,7 +451,14 @@ def _build_runtime_console(
             missing_behavior="页面仅显示固定脱敏错误和终端恢复方向。",
         ),),
         "game-circle-access": (game_circle_card,),
-        "core-workers": (scheduler_card, ingestion_card, metric_card, review_card, mute_card),
+        "core-workers": (
+            scheduler_card,
+            ingestion_card,
+            metric_card,
+            public_opinion_card,
+            review_card,
+            mute_card,
+        ),
         "optional-capabilities": (ocr_card, video_card, writes_card, ai_moderation_card),
     }
     service_groups = tuple(

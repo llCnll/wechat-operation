@@ -164,6 +164,12 @@ urlpatterns = [
         reporting_views.refresh_operations_analysis_metrics,
         name="refresh-operations-analysis-metrics",
     ),
+    path("public-opinion-reports/", reporting_views.public_opinion_reports, name="public-opinion-reports"),
+    path("public-opinion-reports/create/", reporting_views.create_public_opinion_report, name="create-public-opinion-report"),
+    path("public-opinion-reports/<int:report_id>/", reporting_views.public_opinion_report_detail, name="public-opinion-report-detail"),
+    path("public-opinion-reports/<int:report_id>/rerun/", reporting_views.rerun_public_opinion_report, name="rerun-public-opinion-report"),
+    path("public-opinion-reports/<int:report_id>/sources/", reporting_views.public_opinion_report_sources, name="public-opinion-report-sources"),
+    path("public-opinion-reports/<int:report_id>/runs/<int:run_number>/word/", reporting_views.export_public_opinion_report_word, name="export-public-opinion-report-word"),
     path("posts/<int:topic_id>/", post_views.post_detail, name="operations-post-detail"),
     path(
         "posts/<int:topic_id>/refresh/",

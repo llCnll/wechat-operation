@@ -1,0 +1,32 @@
+{% extends "posts/operations_base.html" %}
+{% load static %}
+
+{% block title %}报告 #{{ report.pk }} | 舆情报告{% endblock %}
+{% block extra_head %}<link href="{% static 'reporting/public_opinion_reports.css' %}" rel="stylesheet">{% endblock %}
+
+{% block content %}
+<section class="masthead compact-head opinion-head">
+  <div><p class="eyebrow">PUBLIC OPINION REPORTING</p><h1>报告 #{{ report.pk }}</h1><p>{{ report.start_day|date:'Y-m-d' }} 至 {{ report.end_day|date:'Y-m-d' }} · {{ active_game.name|default:'当前游戏' }}</p></div>
+  <div class="opinion-head-actions"><a href="{% url 'public-opinion-reports' %}?appid={{ appid }}">返回报告列表</a>{% if report.source_locked_at %}<a href="{% url 'public-opinion-report-sources' report.pk %}?appid={{ appid }}">查看锁定来源</a>{% endif %}</div>
+</section>
+<section class="opinion-runbar">
+  <div><span>来源锁定</span><b>{% if report.source_locked_at %}{{ report.source_locked_at|date:'Y-m-d H:i:s' }}{% else %}等待首次执行{% endif %}</b></div>
+  <div><span>当前运行</span><b>运行 {{ run.run_number }} · {{ run.get_status_display }}</b></div>
+  <form method="post" action="{% url 'rerun-public-opinion-report' report.pk %}">{% csrf_token %}<input type="hidden" name="appid" value="{{ appid }}"><button type="submit" {% if not report.source_locked_at %}disabled{% endif %}>重跑固定来源</button></form>
+</section>
+<nav class="opinion-run-tabs" aria-label="报告运行版本">{% for item in runs %}<a class="{% if item.pk == run.pk %}active{% endif %}" href="?appid={{ appid }}&run={{ item.run_number }}">运行 {{ item.run_number }} · {{ item.get_status_display }}</a>{% endfor %}</nav>
+{% if run.status == 'SUCCEEDED' %}
+<section class="opinion-actions"><p>运营参考，仅供人工核验。互动指标时点：{{ run.metrics_as_of|date:'Y-m-d H:i:s' }}</p><a href="{% url 'export-public-opinion-report-word' report.pk run.run_number %}?appid={{ appid }}">导出 Word</a></section>
+<section class="opinion-quality"><header><h2>数据质量</h2><p>来源内容和 AI 快照固定；互动数据按本运行时点读取。</p></header><dl><div><dt>锁定来源</dt><dd>{{ payload.data_quality.source_count }}</dd></div><div><dt>AI 覆盖</dt><dd>{{ payload.data_quality.ai_assessment_count }}/{{ payload.data_quality.source_count }}</dd></div><div><dt>情绪覆盖</dt><dd>{{ payload.data_quality.sentiment_covered_count }}/{{ payload.data_quality.source_count }}</dd></div><div><dt>互动快照</dt><dd>{{ payload.data_quality.interaction_snapshot_count }}/{{ payload.data_quality.source_count }}</dd></div></dl>{% for item in payload.limitations %}<p class="opinion-limitation">{{ item }}</p>{% endfor %}</section>
+<section class="opinion-insights">
+  <article class="opinion-insight-primary"><header><h2>内容类别</h2><span>AI 覆盖 {{ payload.data_quality.ai_assessment_count }}/{{ payload.data_quality.source_count }}</span></header><ul>{% for item in payload.categories %}<li><span>{{ item.label }}</span><b>{{ item.count }}</b></li>{% empty %}<li>没有已覆盖的类别。</li>{% endfor %}</ul></article>
+  <div class="opinion-insight-stack"><article><h2>情绪</h2><ul>{% for item in payload.sentiments %}<li><span>{{ item.label }}</span><b>{{ item.count }}</b></li>{% empty %}<li>没有可映射的情绪。</li>{% endfor %}</ul></article><article><h2>反馈价值</h2><ul>{% for item in payload.summary.feedback_values %}<li><span>{{ item.label }}</span><b>{{ item.count }}</b></li>{% empty %}<li>没有已覆盖的反馈价值。</li>{% endfor %}</ul></article></div>
+  <div class="opinion-insight-stack"><article><h2>风险</h2><ul>{% for item in payload.risks %}<li><span>{{ item.label }}</span><b>{{ item.count }}</b></li>{% empty %}<li>没有锁定风险证据。</li>{% endfor %}</ul></article><article><h2>议题</h2><p class="opinion-note">计数可重叠。</p><ul>{% for item in payload.topics %}<li><span>{{ item.label }}</span><b>{{ item.count }}</b></li>{% empty %}<li>未匹配到预设议题。</li>{% endfor %}</ul></article></div>
+</section>
+<section class="opinion-section"><header><h2>热词</h2><p>{% if payload.hotwords.baseline_available %}与固定上期基线比较{% else %}没有可用上期基线，仅展示本期词频{% endif %}</p></header><div class="opinion-table"><div><span>词语</span><span>本期</span><span>基线</span><span>差异</span></div>{% for item in payload.hotwords.items %}<div><b>{{ item.term }}</b><span>{{ item.current_count }}</span><span>{{ item.baseline_count|default:'-' }}</span><span>{{ item.difference|default:'-' }}</span></div>{% empty %}<p>没有可用热词。</p>{% endfor %}</div></section>
+<section class="opinion-section"><header><h2>高互动代表帖</h2><p>只展示锁定来源中的代表帖；互动率已应用最低浏览量门槛。</p></header><div class="opinion-table opinion-representatives"><div><span>帖子</span><span>标题</span><span>互动</span><span>互动率</span></div>{% for item in payload.representative_posts.by_total %}<div><a href="{% url 'operations-post-detail' item.topic_id %}">#{{ item.topic_id }}</a><span>{{ item.title }}</span><b>{{ item.interaction_total }}</b><span>{{ item.engagement_rate_percent|floatformat:2 }}%</span></div>{% empty %}<p>没有可用互动快照。</p>{% endfor %}</div></section>
+<section class="opinion-grid opinion-trends"><article><h2>每日趋势</h2><div class="opinion-mini-table">{% for item in payload.daily_trend %}<div><span>{{ item.day }}</span><b>{{ item.post_count }} 帖</b><small>情绪 {{ item.sentiment_covered }} · 议题 {{ item.topic_hits }}</small></div>{% empty %}<p>没有可用趋势数据。</p>{% endfor %}</div></article><article><h2>发帖时段</h2><div class="opinion-mini-table">{% for item in payload.hour_distribution %}<div><span>{{ item.label }}:00</span><b>{{ item.count }} 帖</b></div>{% empty %}<p>没有可用时段数据。</p>{% endfor %}</div></article></section>
+<section class="opinion-section"><header><h2>运营观察</h2><p>所有观察均需人工核验，不构成自动处置建议。</p></header><ul class="opinion-observations">{% for item in payload.observations %}<li>{{ item.message }} <b>需人工核验</b></li>{% empty %}<li>当前未触发固定观察规则。</li>{% endfor %}</ul></section>
+{% else %}<section class="opinion-pending"><h2>{{ run.get_status_display }}</h2><p>{% if run.error_summary %}{{ run.error_summary }}{% else %}报告 Worker 完成后将在此展示完整的不可变结果。{% endif %}</p></section>{% endif %}
+{% if run.status == 'PENDING' or run.status == 'RUNNING' %}<script>window.setTimeout(()=>window.location.reload(),5000)</script>{% endif %}
+{% endblock %}
