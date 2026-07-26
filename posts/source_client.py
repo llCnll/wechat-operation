@@ -12,6 +12,7 @@ from config.cdp import CdpGameFrame, CdpTargetUnavailableError, CdpUnavailableEr
 from jobs.adapters import (
     CandidatePostDTO,
     PluginSessionExpiredError,
+    SourceAuthenticationRejectedError,
     SourceBusinessDeletedError,
     SourceContractError,
     SourceTransportError,
@@ -101,6 +102,8 @@ class CdpGameCircleClient:
                 raise SourceContractError(
                     "来源 CDP 返回结构无效", safe_reason="INVALID_EVALUATION_RESULT"
                 )
+            if result.get("status") == 401:
+                raise SourceAuthenticationRejectedError("来源请求被认证拒绝")
             if not isinstance(result.get("payload"), dict):
                 raise SourceContractError(
                     "来源详情响应不是 JSON", safe_reason="NON_JSON_RESPONSE"
@@ -186,7 +189,7 @@ class CdpGameCircleClient:
 
     def get_author_detail(self, openid: str) -> dict[str, Any]:
         """Read one author's current mute state without depending on a topic ID."""
-        if not isinstance(openid, str) or not openid:
+        if not isinstance(openid, str) or not openid or len(openid) > 255:
             raise SourceContractError("作者用户 ID 无效")
         return self._get(
             "getuserdetail",
@@ -203,6 +206,19 @@ class CdpGameCircleClient:
                 )
             },
         )
+
+    def get_author_detail_with_timeout(
+        self, openid: str, *, timeout_seconds: float
+    ) -> dict[str, Any]:
+        """Bound one author-state read without changing the client's default timeout."""
+        if timeout_seconds <= 0:
+            raise SourceTransportError("作者状态读取已超过允许的验证时间")
+        original_timeout = self.frame.timeout
+        self.frame.timeout = min(original_timeout, timeout_seconds)
+        try:
+            return self.get_author_detail(openid)
+        finally:
+            self.frame.timeout = original_timeout
 
     def get_post_metrics_with_timeout(
         self, topic_id: int, *, timeout_seconds: float

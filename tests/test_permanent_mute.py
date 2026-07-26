@@ -427,6 +427,39 @@ def test_post_author_scan_deduplicates_authors_and_only_adds_muted_users():
 
 
 @pytest.mark.django_db
+def test_post_author_scan_refreshes_a_known_author_even_when_the_linked_post_is_deleted():
+    game = _activate()
+    post = OriginalPost.objects.create(
+        topic_id=88014,
+        content_id="deleted-known-author",
+        source_appid=game.appid,
+        author_openid="known-deleted-author",
+        status=128,
+    )
+    scan = enqueue_post_author_mute_status_sync()
+    source = SimpleNamespace(
+        get_author_detail=Mock(
+            return_value={
+                "data": {
+                    "user": {
+                        "openid": post.author_openid,
+                        "nick_name": "已删除帖作者",
+                        "global_block_end_time": 0,
+                    }
+                }
+            }
+        )
+    )
+
+    with patch("jobs.permanent_mute.GameCirclePostClient", return_value=nullcontext(source)):
+        post_author_mute_status_sync_handler(scan.job)
+
+    post.refresh_from_db()
+    assert source.get_author_detail.call_args_list == [call(post.author_openid)]
+    assert post.author_nick_name == "已删除帖作者"
+
+
+@pytest.mark.django_db
 def test_mute_management_queues_a_read_only_author_status_refresh():
     game = _activate()
     _status()

@@ -22,7 +22,12 @@ def health_check(request):
 
 def browser_login_status(request):
     state = GameCircleLoginRuntimeState.objects.filter(pk=1).first()
-    stale = state is None or state.checked_at is None or state.checked_at < timezone.now() - timedelta(minutes=10)
+    # Freshness means that the session service has recently observed the outer
+    # page, regardless of whether that observation proved a valid login or a
+    # required scan.  ``outer_verified_at`` deliberately records only a
+    # successful getappinfo verification, so using it here would hide a fresh,
+    # confirmed LOGIN_REQUIRED state as an indeterminate one.
+    stale = state is None or state.checked_at < timezone.now() - timedelta(minutes=10)
     if stale:
         return JsonResponse(
             {
@@ -40,8 +45,11 @@ def browser_login_status(request):
     reasons = {
         GameCircleLoginRuntimeState.OuterState.OUTER_READY: "已检测到有效的受控微信外层会话",
         GameCircleLoginRuntimeState.OuterState.LOGIN_PENDING: "微信页面等待扫码登录",
+        GameCircleLoginRuntimeState.OuterState.LOGIN_REQUIRED: "微信登录态已失效，请重新扫码",
         GameCircleLoginRuntimeState.OuterState.BROWSER_UNAVAILABLE: "受控 Chrome 未启动",
     }
+    if state.error_category == GameCircleLoginRuntimeState.ErrorCategory.OUTER_SESSION_UNREADY:
+        reasons[state.outer_state] = "受控会话页未保持可用登录上下文，请查看页面后重新检查"
     return JsonResponse(
         {
             "valid": valid,
@@ -118,6 +126,10 @@ urlpatterns = [
         supervisor_views.save_runtime_configuration,
         name="save-runtime-configuration",
     ),
+    path("admin/scheduled-producers/<int:producer_id>/", supervisor_views.save_scheduled_producer, name="save-scheduled-producer"),
+    path("admin/scheduled-producers/<int:producer_id>/rules/", supervisor_views.create_scheduled_producer_rule, name="create-scheduled-producer-rule"),
+    path("admin/scheduled-producer-rules/<int:rule_id>/", supervisor_views.save_scheduled_producer_rule, name="save-scheduled-producer-rule"),
+    path("admin/scheduled-producer-rules/<int:rule_id>/delete/", supervisor_views.delete_scheduled_producer_rule, name="delete-scheduled-producer-rule"),
     path("", post_views.operations_dashboard, name="operations-dashboard"),
     path("mute-management/", post_views.mute_management, name="mute-management"),
     path(

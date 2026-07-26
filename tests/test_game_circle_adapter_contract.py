@@ -6,6 +6,7 @@ from config.game_circle_adapter import (
     ExplicitOuterPage,
     GameCircleContractError,
     GameCircleOuterAdapter,
+    OuterLoginExpiredError,
     OuterSessionUnreadyError,
     plugin_redirect_url,
 )
@@ -26,6 +27,8 @@ def test_current_game_contract_uses_absolute_gamemp_url_from_the_outer_page():
     assert adapter.read_current_game() == "game-a"
     expression = page.evaluate.call_args.args[0]
     assert "https://gamemp.weixin.qq.com/cgi-bin/gamewxagsettingwap/getappinfo" in expression
+    assert "cache: 'no-store'" in expression
+    assert "headers:" not in expression
 
 
 def test_explicit_outer_page_passes_its_owned_target_to_the_cdp_base():
@@ -39,6 +42,17 @@ def test_current_game_contract_returns_the_actual_outer_game():
     page.evaluate.return_value = {"status": 200, "errcode": 0, "appid": "game-b"}
 
     assert GameCircleOuterAdapter(page).read_current_game() == "game-b"
+
+
+@pytest.mark.parametrize("errcode", [40001, 40042])
+def test_current_game_contract_classifies_the_verified_expired_login_response(errcode):
+    page = Mock()
+    page.evaluate.return_value = {"status": 401, "errcode": errcode}
+
+    with pytest.raises(OuterLoginExpiredError) as exc_info:
+        GameCircleOuterAdapter(page).read_current_game()
+
+    assert exc_info.value.safe_reason == "LOGIN_EXPIRED"
 
 
 def test_current_game_wait_retries_until_the_verified_contract_is_readable(monkeypatch):
@@ -158,8 +172,9 @@ def test_refresh_direct_failure_boundaries(scan_required, has_token, message):
 
 def test_outer_scan_probe_only_classifies_visible_login_markers():
     page = Mock()
-    page.body_text.return_value = "请使用微信扫描二维码登录"
-    assert GameCircleOuterAdapter(page).scan_required() is True
+    for text in ("请使用微信扫描二维码登录", "微信扫一扫，选择公众平台账号登录"):
+        page.body_text.return_value = text
+        assert GameCircleOuterAdapter(page).scan_required() is True
     page.body_text.return_value = "已进入管理首页"
     assert GameCircleOuterAdapter(page).scan_required() is False
 
@@ -170,3 +185,32 @@ def test_missing_outer_token_has_a_dedicated_non_chrome_failure_type():
 
     with pytest.raises(OuterSessionUnreadyError, match="缺少运行时 token"):
         GameCircleOuterAdapter(page).read_outer_token()
+
+
+def test_stable_outer_session_requires_the_same_page_token_before_and_after_getappinfo():
+    page = Mock()
+    page.evaluate.return_value = {
+        "kind": "response", "status": 200, "errcode": 0, "appid": "game-a",
+        "token": "outer-token", "stable": True,
+    }
+
+    result = GameCircleOuterAdapter(page).wait_for_stable_outer_session(timeout_seconds=1)
+
+    assert result is not None
+    assert result.appid == "game-a"
+    assert result.token == "outer-token"
+    expression = page.evaluate.call_args.args[0]
+    assert "beforeToken === afterToken" in expression
+    assert "getappinfo" in expression
+
+
+def test_stable_outer_session_rejects_a_post_request_page_change(monkeypatch):
+    page = Mock()
+    page.evaluate.return_value = {
+        "kind": "response", "status": 200, "errcode": 0, "appid": "game-a",
+        "token": None, "stable": False,
+    }
+    monkeypatch.setattr("config.game_circle_adapter.sleep", lambda _seconds: None)
+
+    with pytest.raises(OuterSessionUnreadyError, match="页面已变化"):
+        GameCircleOuterAdapter(page).wait_for_stable_outer_session(timeout_seconds=0)

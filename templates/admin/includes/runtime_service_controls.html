@@ -1,0 +1,10 @@
+{% if node.service %}
+  {% if node.service == "web" %}
+  <form method="post" action="{% url 'supervisor-control-service' service=node.service action='restart' %}">{% csrf_token %}<input type="hidden" name="return_to" value="/admin/"><button type="submit">重启 Web</button></form>
+  {% elif node.running %}
+  <form method="post" action="{% url 'supervisor-control-service' service=node.service action='restart' %}">{% csrf_token %}<input type="hidden" name="return_to" value="/admin/"><button type="submit">重启</button></form><form method="post" action="{% url 'supervisor-control-service' service=node.service action='stop' %}">{% csrf_token %}<input type="hidden" name="return_to" value="/admin/"><button class="is-quiet" type="submit">停止</button></form>
+  {% else %}
+  <form method="post" action="{% url 'supervisor-control-service' service=node.service action='start' %}">{% csrf_token %}<input type="hidden" name="return_to" value="/admin/"><button type="submit">启动</button></form>
+  {% endif %}
+  <button class="is-quiet" type="button" data-supervisor-logs="{% url 'supervisor-service-logs' service=node.service %}" data-supervisor-log-label="{{ node.label }}">日志</button>
+{% endif %}

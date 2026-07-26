@@ -19,7 +19,6 @@ from uuid import uuid4
 from django.utils import timezone
 
 from config.cdp import (
-    CONTROLLED_LOGIN_URL,
     CdpBrowser,
     CdpBrowserUnavailableError,
     CdpGameFrame,
@@ -33,6 +32,7 @@ from config.game_circle_adapter import (
     GameCircleOuterAdapter,
     GameSelectionError,
     OuterSessionUnreadyError,
+    OuterLoginExpiredError,
     plugin_redirect_url,
 )
 from config.game_circle_ipc import GameCircleIpcError, IpcRequest, WriteResultUnknownError
@@ -45,6 +45,7 @@ from config.settings import (
 from jobs.adapters import (
     PluginSessionExpiredError,
     SourceBusinessDeletedError,
+    SourceAuthenticationRejectedError,
     SourceContractError,
     SourceTransportError,
 )
@@ -58,6 +59,9 @@ from posts.game_catalog import resolve_execution_scope
 
 
 LOGIN_WAIT_SECONDS = 15 * 60
+LOGIN_COMPLETION_SETTLE_SECONDS = 10
+OUTER_SESSION_PROBE_SECONDS = 5 * 60
+SOURCE_AUTH_RECHECK_COOLDOWN_SECONDS = 5
 SESSION_TARGET_ROLES = frozenset(
     {"HOME_IDLE", "LOGIN_PENDING", "HOME_CANDIDATE", "PLUGIN_CANDIDATE", "LEASE_HOME", "LEASE_PLUGIN"}
 )
@@ -129,6 +133,7 @@ class _LoginPending:
     target_id: str
     browser_generation: str
     expires_at: datetime
+    settle_not_before_at: datetime | None = None
 
 
 @dataclass(frozen=True)
@@ -145,6 +150,48 @@ class _BootstrapFlight:
     done: Event = field(default_factory=Event)
     result: BootstrapResult | None = None
     error: Exception | None = None
+
+
+class _OuterSessionKind(str, Enum):
+    SCAN_REQUIRED = "SCAN_REQUIRED"
+    VERIFIED_WITH_TOKEN = "VERIFIED_WITH_TOKEN"
+    VERIFIED_TOKEN_UNREADY = "VERIFIED_TOKEN_UNREADY"
+
+
+@dataclass
+class _OuterSession:
+    """Facts observed from one service-owned HOME without conflating token absence."""
+
+    page: ExplicitOuterPage
+    outer: GameCircleOuterAdapter
+    kind: _OuterSessionKind
+    token: str | None = None
+    current_appid: str | None = None
+
+
+class _OuterRecheckOutcome(str, Enum):
+    """The only outcomes a source-authentication recheck may publish."""
+
+    OUTER_READY = "OUTER_READY"
+    LOGIN_REQUIRED = "LOGIN_REQUIRED"
+    INDETERMINATE = "INDETERMINATE"
+
+
+class _LoginWaitResolution(str, Enum):
+    """The only terminal transitions for a manually opened login page."""
+
+    RECOVER_SESSION = "RECOVER_SESSION"
+    REQUIRE_LOGIN = "REQUIRE_LOGIN"
+
+
+@dataclass
+class _OuterRecheckFlight:
+    """One generation-scoped outer verification shared by source failures."""
+
+    browser_generation: str
+    expires_at_monotonic: float
+    done: Event = field(default_factory=Event)
+    outcome: _OuterRecheckOutcome = _OuterRecheckOutcome.INDETERMINATE
 
 
 class _DeadlineBoundFrame:
@@ -196,6 +243,8 @@ class GameCircleSessionService:
         self._maintenance_stop = Event()
         self._maintenance_thread: Thread | None = None
         self.max_concurrent_accesses = GAME_CIRCLE_MAX_CONCURRENT_ACCESSES
+        self._next_outer_probe_at = 0.0
+        self._source_auth_recheck: _OuterRecheckFlight | None = None
         self._save_projection()
 
     # -- lifecycle and safe projection -------------------------------------------------
@@ -212,6 +261,7 @@ class GameCircleSessionService:
         while not self._maintenance_stop.wait(2):
             self._observe_login_pending()
             self._repair_if_enabled()
+            self._probe_outer_if_due()
             self._reclaim_retiring()
 
     def stop_accepting(self) -> None:
@@ -257,41 +307,59 @@ class GameCircleSessionService:
         category: str = GameCircleLoginRuntimeState.ErrorCategory.NONE,
         actions: tuple[str, ...] = (),
         wait_until: datetime | None = None,
+        frame_scope_version: int | None = None,
+        outer_verified: bool = False,
     ) -> None:
         row, _ = GameCircleLoginRuntimeState.objects.get_or_create(pk=1)
-        legacy = (
-            GameCircleLoginRuntimeState.LoginState.READY
-            if frame == GameCircleLoginRuntimeState.FrameState.READY
-            else GameCircleLoginRuntimeState.LoginState.SCAN_REQUIRED
-            if outer == GameCircleLoginRuntimeState.OuterState.LOGIN_PENDING
-            else GameCircleLoginRuntimeState.LoginState.UNAVAILABLE
-            if outer == GameCircleLoginRuntimeState.OuterState.BROWSER_UNAVAILABLE
-            else GameCircleLoginRuntimeState.LoginState.UNKNOWN
-        )
+        legacy = self._legacy_login_state(outer, frame)
         now = timezone.now()
         row.login_state = legacy
         row.outer_state = outer
         row.frame_state = frame
+        row.frame_scope_version = (
+            frame_scope_version if frame == GameCircleLoginRuntimeState.FrameState.READY else None
+        )
         row.available_actions = list(actions)
         row.login_wait_until = wait_until
         row.error_category = category
         row.checked_at = now
+        if outer_verified:
+            row.outer_verified_at = now
         if frame == GameCircleLoginRuntimeState.FrameState.READY:
             row.last_ready_at = now
         row.save(
             update_fields=[
-                "login_state", "outer_state", "frame_state", "available_actions", "login_wait_until",
-                "error_category", "checked_at", "last_ready_at", "updated_at",
+                "login_state", "outer_state", "frame_state", "frame_scope_version", "available_actions", "login_wait_until",
+                "error_category", "checked_at", "outer_verified_at", "last_ready_at", "updated_at",
             ]
         )
+
+    @staticmethod
+    def _legacy_login_state(outer: str, frame: str) -> str:
+        if frame == GameCircleLoginRuntimeState.FrameState.READY:
+            return GameCircleLoginRuntimeState.LoginState.READY
+        if outer in {
+            GameCircleLoginRuntimeState.OuterState.LOGIN_PENDING,
+            GameCircleLoginRuntimeState.OuterState.LOGIN_REQUIRED,
+        }:
+            return GameCircleLoginRuntimeState.LoginState.SCAN_REQUIRED
+        if outer == GameCircleLoginRuntimeState.OuterState.BROWSER_UNAVAILABLE:
+            return GameCircleLoginRuntimeState.LoginState.UNAVAILABLE
+        return GameCircleLoginRuntimeState.LoginState.UNKNOWN
 
     def runtime_status(self) -> dict[str, object]:
         row = GameCircleLoginRuntimeState.objects.filter(pk=1).first()
         if row is None:
-            return {"outer_state": "UNKNOWN", "frame_state": "UNKNOWN", "available_actions": []}
+            return {
+                "outer_state": "UNKNOWN",
+                "frame_state": "UNKNOWN",
+                "frame_scope_version": None,
+                "available_actions": [],
+            }
         return {
             "outer_state": row.outer_state,
             "frame_state": row.frame_state,
+            "frame_scope_version": row.frame_scope_version,
             "available_actions": list(row.available_actions or []),
             "login_wait_until": row.login_wait_until.isoformat() if row.login_wait_until else None,
             "error_category": row.error_category,
@@ -553,28 +621,257 @@ class GameCircleSessionService:
         return result
 
     def _ensure_home(self, browser: CdpBrowser) -> str:
-        existing = self._owned_target("HOME_IDLE")
-        if existing and browser.target_exists(existing):
-            return existing
+        with self._lock:
+            candidates = [
+                (target.target_id, target.role)
+                for target in self._owned_targets.values()
+                if target.owner_epoch == self.owner_epoch and target.role in {"HOME_IDLE", "LOGIN_PENDING"}
+            ]
+        live: dict[str, list[str]] = {"LOGIN_PENDING": [], "HOME_IDLE": []}
+        for target_id, role in candidates:
+            if browser.target_exists(target_id):
+                live[role].append(target_id)
+                continue
+            with self._lock:
+                self._owned_targets.pop(target_id, None)
+                if self._login_pending and self._login_pending.target_id == target_id:
+                    self._login_pending = None
+                self._save_projection()
+        if live["LOGIN_PENDING"] or live["HOME_IDLE"]:
+            # An explicit scan page is the user's active recovery context and
+            # wins over an older idle page.  Only current-owner extras are safe
+            # to close here.
+            keeper = (live["LOGIN_PENDING"] or live["HOME_IDLE"])[0]
+            for target_id in [*live["LOGIN_PENDING"], *live["HOME_IDLE"]]:
+                if target_id == keeper:
+                    continue
+                self._safe_close(browser, target_id)
+            return keeper
         target = browser.create_target("https://mp.weixin.qq.com/", background=True)
         self._register_owned(target, "HOME_IDLE")
         return target
 
-    def _outer_session(self, home: str) -> tuple[ExplicitOuterPage, GameCircleOuterAdapter, str | None]:
+    def _observable_home(self, browser: CdpBrowser) -> str:
+        """Prefer the current lease HOME so UI and source calls share one page."""
+        try:
+            scope = current_execution_scope(persist_default=False)
+        except ValueError:
+            scope = None
+        lease = self._active_lease(scope) if scope is not None else None
+        if lease is not None and browser.target_exists(lease.home_target_id):
+            return lease.home_target_id
+        return self._ensure_home(browser)
+
+    def _outer_session(self, home: str) -> _OuterSession:
         page = ExplicitOuterPage(target_id=home)
         if not page.wait_for_public_page():
             page.close()
             raise CdpTargetUnavailableError("受控 HOME 未在限定时间内就绪")
         outer = GameCircleOuterAdapter(page)
-        if outer.scan_required():
-            return page, outer, None
+        current_appid: str | None = None
         try:
-            return page, outer, outer.read_outer_token()
+            verified = outer.wait_for_stable_outer_session()
+            if verified is None:
+                return _OuterSession(page, outer, _OuterSessionKind.SCAN_REQUIRED)
+            current_appid = verified.appid
+            return _OuterSession(
+                page,
+                outer,
+                _OuterSessionKind.VERIFIED_WITH_TOKEN,
+                verified.token,
+                current_appid,
+            )
         except OuterSessionUnreadyError:
-            return page, outer, None
+            return _OuterSession(
+                page,
+                outer,
+                _OuterSessionKind.VERIFIED_TOKEN_UNREADY,
+                current_appid=current_appid,
+            )
+        except (CdpUnavailableError, GameCircleContractError, OuterLoginExpiredError):
+            page.close()
+            raise
+
+    def _retire_generation_leases(self) -> None:
+        now = timezone.now()
+        with self._lock:
+            for leases in self._leases.values():
+                for lease in leases:
+                    if lease.browser_generation == self._browser_generation and lease.state == "ACTIVE":
+                        lease.state = "RETIRING"
+                        lease.retire_not_before_at = now
+            self._save_projection()
+
+    def _lease_is_active(self, lease: SessionLease) -> bool:
+        with self._lock:
+            return (
+                lease.browser_generation == self._browser_generation
+                and lease.state == "ACTIVE"
+                and any(candidate is lease for candidate in self._leases.get(lease.appid, []))
+            )
+
+    def _project_current_scope_frame_unready(self, scope: ExecutionScope) -> None:
+        if not self._is_current_scope(scope):
+            return
+        row = GameCircleLoginRuntimeState.objects.filter(pk=1).first()
+        outer = row.outer_state if row is not None else GameCircleLoginRuntimeState.OuterState.UNKNOWN
+        self._set_runtime(
+            outer,
+            GameCircleLoginRuntimeState.FrameState.UNREADY,
+            category=GameCircleLoginRuntimeState.ErrorCategory.FRAME_UNREADY,
+            actions=(
+                GameCircleLoginRuntimeState.Action.BUILD_FRAME,
+                GameCircleLoginRuntimeState.Action.CHECK_LOGIN,
+            ),
+        )
+
+    def _retire_rejected_lease(self, scope: ExecutionScope, lease: SessionLease) -> None:
+        """Retire only the lease that produced a source-authentication failure."""
+        now = timezone.now()
+        with self._lock:
+            if self._lease_is_active(lease):
+                lease.state = "RETIRING"
+                lease.retire_not_before_at = now
+            self._save_projection()
+        self._project_current_scope_frame_unready(scope)
+
+    def _source_auth_recheck_flight(self, lease: SessionLease) -> tuple[_OuterRecheckFlight, bool]:
+        now = monotonic()
+        with self._lock:
+            existing = self._source_auth_recheck
+            if (
+                existing is not None
+                and existing.browser_generation == lease.browser_generation
+                and (not existing.done.is_set() or existing.expires_at_monotonic > now)
+            ):
+                return existing, False
+            flight = _OuterRecheckFlight(
+                browser_generation=lease.browser_generation,
+                expires_at_monotonic=now + SOURCE_AUTH_RECHECK_COOLDOWN_SECONDS,
+            )
+            self._source_auth_recheck = flight
+            return flight, True
+
+    def _finish_source_auth_recheck(
+        self, flight: _OuterRecheckFlight, outcome: _OuterRecheckOutcome
+    ) -> None:
+        with self._lock:
+            flight.outcome = outcome
+            flight.done.set()
+
+    def _verify_after_source_rejection(self, scope: ExecutionScope, lease: SessionLease) -> None:
+        """Classify a 401 once per generation without touching a replacement lease."""
+        flight, leader = self._source_auth_recheck_flight(lease)
+        if leader:
+            outcome = _OuterRecheckOutcome.INDETERMINATE
+            with self._control_lane:
+                page = None
+                try:
+                    if not self._lease_is_active(lease):
+                        return
+                    outer_session = self._outer_session(lease.home_target_id)
+                    page = outer_session.page
+                    if outer_session.kind == _OuterSessionKind.SCAN_REQUIRED:
+                        self._set_login_required()
+                        outcome = _OuterRecheckOutcome.LOGIN_REQUIRED
+                    else:
+                        self._retire_rejected_lease(scope, lease)
+                        outcome = _OuterRecheckOutcome.OUTER_READY
+                except OuterLoginExpiredError:
+                    self._set_login_required()
+                    outcome = _OuterRecheckOutcome.LOGIN_REQUIRED
+                except (CdpUnavailableError, GameCircleContractError):
+                    pass
+                finally:
+                    if page is not None:
+                        page.close()
+                    self._finish_source_auth_recheck(flight, outcome)
+        else:
+            flight.done.wait(timeout=30)
+            with self._control_lane:
+                if flight.outcome == _OuterRecheckOutcome.OUTER_READY:
+                    self._retire_rejected_lease(scope, lease)
+
+    def _set_login_required(self) -> None:
+        self._retire_generation_leases()
+        self._set_runtime(
+            GameCircleLoginRuntimeState.OuterState.LOGIN_REQUIRED,
+            GameCircleLoginRuntimeState.FrameState.UNREADY,
+            category=GameCircleLoginRuntimeState.ErrorCategory.SCAN_REQUIRED,
+            actions=(GameCircleLoginRuntimeState.Action.OPEN_LOGIN,),
+        )
+
+    def _set_outer_session_unready(self) -> None:
+        """Project an unusable controlled HOME without falsely requiring a scan."""
+        self._clear_login_pending()
+        self._set_runtime(
+            GameCircleLoginRuntimeState.OuterState.UNKNOWN,
+            GameCircleLoginRuntimeState.FrameState.UNREADY,
+            category=GameCircleLoginRuntimeState.ErrorCategory.OUTER_SESSION_UNREADY,
+            actions=(
+                GameCircleLoginRuntimeState.Action.CHECK_LOGIN,
+                GameCircleLoginRuntimeState.Action.OPEN_LOGIN,
+            ),
+        )
+
+    def _record_outer_verification(self) -> None:
+        """Update only facts observed by HOME; Frame readiness has another owner."""
+        row, _ = GameCircleLoginRuntimeState.objects.get_or_create(pk=1)
+        now = timezone.now()
+        row.login_state = self._legacy_login_state(
+            GameCircleLoginRuntimeState.OuterState.OUTER_READY,
+            row.frame_state,
+        )
+        row.outer_state = GameCircleLoginRuntimeState.OuterState.OUTER_READY
+        row.checked_at = now
+        row.outer_verified_at = now
+        row.save(
+            update_fields=[
+                "login_state",
+                "outer_state",
+                "checked_at",
+                "outer_verified_at",
+                "updated_at",
+            ]
+        )
+
+    def _probe_outer_if_due(self) -> None:
+        if monotonic() < self._next_outer_probe_at:
+            return
+        try:
+            scope = current_execution_scope(persist_default=False)
+        except ValueError:
+            return
+        lease = self._active_lease(scope)
+        if lease is None:
+            return
+        self._next_outer_probe_at = monotonic() + OUTER_SESSION_PROBE_SECONDS
+        with self._control_lane:
+            page = None
+            try:
+                if not self._lease_is_active(lease):
+                    return
+                outer_session = self._outer_session(lease.home_target_id)
+                page = outer_session.page
+                if outer_session.kind == _OuterSessionKind.SCAN_REQUIRED:
+                    self._set_login_required()
+                else:
+                    self._record_outer_verification()
+            except OuterLoginExpiredError:
+                self._set_login_required()
+            except (CdpUnavailableError, GameCircleContractError):
+                pass
+            finally:
+                if page is not None:
+                    page.close()
 
     def _set_bootstrap_failure(
-        self, scope: ExecutionScope | None, category: str, *, broken_active_lease: bool
+        self,
+        scope: ExecutionScope | None,
+        category: str,
+        *,
+        broken_active_lease: bool,
+        outer_verified: bool = False,
     ) -> None:
         """Project failure without hiding a still-usable lease for the current scope."""
         if scope is not None:
@@ -584,8 +881,13 @@ class GameCircleSessionService:
             except ValueError:
                 pass
         ready = not broken_active_lease and scope is not None and self._active_lease(scope) is not None
+        outer_state = (
+            GameCircleLoginRuntimeState.OuterState.OUTER_READY
+            if outer_verified or ready
+            else GameCircleLoginRuntimeState.OuterState.UNKNOWN
+        )
         self._set_runtime(
-            GameCircleLoginRuntimeState.OuterState.OUTER_READY,
+            outer_state,
             GameCircleLoginRuntimeState.FrameState.READY if ready else GameCircleLoginRuntimeState.FrameState.UNREADY,
             category=GameCircleLoginRuntimeState.ErrorCategory.NONE if ready else category,
             actions=(
@@ -593,6 +895,8 @@ class GameCircleSessionService:
                 if ready
                 else (GameCircleLoginRuntimeState.Action.BUILD_FRAME, GameCircleLoginRuntimeState.Action.CHECK_LOGIN)
             ),
+            frame_scope_version=scope.scope_version if ready and scope is not None else None,
+            outer_verified=outer_verified,
         )
 
     def _bootstrap_locked(
@@ -605,6 +909,7 @@ class GameCircleSessionService:
         page: ExplicitOuterPage | None = None
         close_candidate_home = True
         broken_active_lease = False
+        outer_verified = False
         try:
             self._set_runtime(
                 GameCircleLoginRuntimeState.OuterState.BOOTSTRAPPING,
@@ -626,6 +931,7 @@ class GameCircleSessionService:
                         GameCircleLoginRuntimeState.OuterState.OUTER_READY,
                         GameCircleLoginRuntimeState.FrameState.READY,
                         actions=(GameCircleLoginRuntimeState.Action.CHECK_LOGIN, GameCircleLoginRuntimeState.Action.KEEPALIVE),
+                        frame_scope_version=scope.scope_version if scope is not None else None,
                     )
                     return BootstrapResult(False)
             if intent.checks_outer_only and active_lease is not None and not broken_active_lease:
@@ -635,11 +941,37 @@ class GameCircleSessionService:
                 close_candidate_home = False
             else:
                 home = self._ensure_home(browser)
-            page, outer, token = self._outer_session(home)
-            if token is None:
-                self._register_login_pending(home, generation)
-                close_candidate_home = False
+            try:
+                outer_session = self._outer_session(home)
+            except OuterLoginExpiredError:
+                if active_lease is None and self._owned_target("HOME_IDLE") == home:
+                    self._hold_candidate_for_login_recovery(home, generation)
+                    home = ""
+                    close_candidate_home = False
+                    return BootstrapResult(False, GameCircleLoginRuntimeState.ErrorCategory.SCAN_REQUIRED)
+                self._set_login_required()
+                return BootstrapResult(
+                    False, GameCircleLoginRuntimeState.ErrorCategory.SCAN_REQUIRED, terminal=True
+                )
+            page = outer_session.page
+            outer = outer_session.outer
+            if outer_session.kind == _OuterSessionKind.SCAN_REQUIRED:
+                # A new service-owned Home can transiently land on loginpage even
+                # when the Chrome profile will recover it without a scan. Retain
+                # this exact target and let the bounded login observer decide.
+                if active_lease is None and self._owned_target("HOME_IDLE") == home:
+                    page.close()
+                    page = None
+                    self._hold_candidate_for_login_recovery(home, generation)
+                    home = ""
+                    close_candidate_home = False
+                    return BootstrapResult(False, GameCircleLoginRuntimeState.ErrorCategory.SCAN_REQUIRED)
+                self._set_login_required()
                 return BootstrapResult(False, GameCircleLoginRuntimeState.ErrorCategory.SCAN_REQUIRED, terminal=True)
+            if outer_session.kind == _OuterSessionKind.VERIFIED_TOKEN_UNREADY:
+                self._set_outer_session_unready()
+                return BootstrapResult(False, GameCircleLoginRuntimeState.ErrorCategory.OUTER_SESSION_UNREADY)
+            outer_verified = True
             self._clear_login_pending()
             if intent.checks_outer_only:
                 frame_ready = active_lease is not None and not broken_active_lease
@@ -652,6 +984,8 @@ class GameCircleSessionService:
                         if frame_ready
                         else (GameCircleLoginRuntimeState.Action.BUILD_FRAME,)
                     ),
+                    frame_scope_version=scope.scope_version if frame_ready and scope is not None else None,
+                    outer_verified=True,
                 )
                 return BootstrapResult(False)
             if scope is None:
@@ -660,9 +994,12 @@ class GameCircleSessionService:
                     GameCircleLoginRuntimeState.OuterState.OUTER_READY,
                     GameCircleLoginRuntimeState.FrameState.UNREADY,
                     actions=(GameCircleLoginRuntimeState.Action.CHECK_LOGIN,),
+                    outer_verified=True,
                 )
                 return BootstrapResult(False, GameCircleLoginRuntimeState.ErrorCategory.FRAME_UNREADY, terminal=True)
-            current_appid = outer.wait_for_readable_current_game()
+            token = outer.read_usable_outer_token()
+            current_appid = outer_session.current_appid
+            assert current_appid is not None
             if intent is BootstrapIntent.KEEPALIVE and current_appid == scope.target_appid:
                 intermediates = sorted({appid for appid in outer.list_switchable_game_appids() if appid != scope.target_appid})
                 if not intermediates:
@@ -696,6 +1033,8 @@ class GameCircleSessionService:
                     GameCircleLoginRuntimeState.OuterState.OUTER_READY,
                     GameCircleLoginRuntimeState.FrameState.READY,
                     actions=(GameCircleLoginRuntimeState.Action.CHECK_LOGIN, GameCircleLoginRuntimeState.Action.KEEPALIVE),
+                    frame_scope_version=scope.scope_version,
+                    outer_verified=True,
                 )
             else:
                 # A frozen keepalive may finish after the operator selects a
@@ -716,9 +1055,14 @@ class GameCircleSessionService:
                 actions=(GameCircleLoginRuntimeState.Action.CHECK_LOGIN,),
             )
             return BootstrapResult(False, GameCircleLoginRuntimeState.ErrorCategory.CHROME_UNAVAILABLE)
+        except OuterLoginExpiredError:
+            self._set_login_required()
+            return BootstrapResult(False, GameCircleLoginRuntimeState.ErrorCategory.SCAN_REQUIRED, terminal=True)
         except GameSelectionError:
             category = GameCircleLoginRuntimeState.ErrorCategory.GAME_NOT_SELECTABLE
-            self._set_bootstrap_failure(scope, category, broken_active_lease=broken_active_lease)
+            self._set_bootstrap_failure(
+                scope, category, broken_active_lease=broken_active_lease, outer_verified=outer_verified
+            )
             return BootstrapResult(
                 False,
                 category,
@@ -726,15 +1070,21 @@ class GameCircleSessionService:
             )
         except GameCircleContractError:
             category = GameCircleLoginRuntimeState.ErrorCategory.FRAME_UNREADY
-            self._set_bootstrap_failure(scope, category, broken_active_lease=broken_active_lease)
+            self._set_bootstrap_failure(
+                scope, category, broken_active_lease=broken_active_lease, outer_verified=outer_verified
+            )
             return BootstrapResult(False, category)
         except CdpTargetUnavailableError:
             category = GameCircleLoginRuntimeState.ErrorCategory.TARGET_UNAVAILABLE
-            self._set_bootstrap_failure(scope, category, broken_active_lease=broken_active_lease)
+            self._set_bootstrap_failure(
+                scope, category, broken_active_lease=broken_active_lease, outer_verified=outer_verified
+            )
             return BootstrapResult(False, category)
         except (SourceContractError, SourceTransportError, PluginSessionExpiredError):
             category = GameCircleLoginRuntimeState.ErrorCategory.SOURCE_VERIFICATION_FAILED
-            self._set_bootstrap_failure(scope, category, broken_active_lease=broken_active_lease)
+            self._set_bootstrap_failure(
+                scope, category, broken_active_lease=broken_active_lease, outer_verified=outer_verified
+            )
             return BootstrapResult(False, category)
         finally:
             if page is not None:
@@ -782,6 +1132,7 @@ class GameCircleSessionService:
         raise RuntimeError(result.category)
 
     def _register_login_pending(self, home: str, generation: str) -> None:
+        """Keep one service-owned login-route target while its session may recover."""
         expires = timezone.now() + timedelta(seconds=LOGIN_WAIT_SECONDS)
         with self._lock:
             self._login_pending = _LoginPending(home, generation, expires)
@@ -797,6 +1148,10 @@ class GameCircleSessionService:
             wait_until=expires,
         )
 
+    def _hold_candidate_for_login_recovery(self, home: str, generation: str) -> None:
+        """Promote a new background Home to the single recoverable login target."""
+        self._register_login_pending(home, generation)
+
     def _clear_login_pending(self) -> None:
         with self._lock:
             pending = self._login_pending
@@ -804,6 +1159,47 @@ class GameCircleSessionService:
             if pending and pending.target_id in self._owned_targets:
                 self._owned_targets[pending.target_id].role = "HOME_IDLE"
             self._save_projection()
+
+    def _resolve_login_wait(self, resolution: _LoginWaitResolution) -> None:
+        """End a login wait through the sole recovery or failure transition.
+
+        Both a verified scan completion and a lost wait target need the regular
+        Bootstrap protocol: persisted browser state is the authority, not the
+        former target identifier.  Confirmed expiration and timeout take the
+        other explicit transition and retain the operator-facing login state.
+        """
+        self._clear_login_pending()
+        if resolution is _LoginWaitResolution.RECOVER_SESSION:
+            self.bootstrap_current_scope(intent=BootstrapIntent.ESTABLISH_FRAME)
+        else:
+            self._set_login_required()
+
+    def _login_wait_is_ready_for_verification(self, pending: _LoginPending) -> bool:
+        """Advance the manual-login state without probing during token propagation.
+
+        The platform can render its post-scan HOME before its outer credential is
+        usable by ``getappinfo``.  We therefore observe only the visible scan
+        page first, wait a fixed bounded interval after it disappears, then let
+        the regular outer-session protocol make the authentication conclusion.
+        """
+        page: ExplicitOuterPage | None = None
+        try:
+            page = ExplicitOuterPage(target_id=pending.target_id)
+            if not page.wait_for_public_page():
+                return False
+            outer = GameCircleOuterAdapter(page)
+            if outer.is_login_page() and outer.scan_required():
+                pending.settle_not_before_at = None
+                return False
+        finally:
+            if page is not None:
+                page.close()
+
+        now = timezone.now()
+        if pending.settle_not_before_at is None:
+            pending.settle_not_before_at = now + timedelta(seconds=LOGIN_COMPLETION_SETTLE_SECONDS)
+            return False
+        return now >= pending.settle_not_before_at
 
     def _observe_login_pending(self) -> None:
         """Inspect the registered login page under the same lane as Bootstrap."""
@@ -822,41 +1218,35 @@ class GameCircleSessionService:
                 self._safe_close(browser, pending.target_id)
             except CdpUnavailableError:
                 pass
-            self._clear_login_pending()
-            self._set_runtime(
-                GameCircleLoginRuntimeState.OuterState.OUTER_READY,
-                GameCircleLoginRuntimeState.FrameState.UNREADY,
-                category=GameCircleLoginRuntimeState.ErrorCategory.SCAN_REQUIRED,
-                actions=(GameCircleLoginRuntimeState.Action.OPEN_LOGIN,),
-            )
+            self._resolve_login_wait(_LoginWaitResolution.REQUIRE_LOGIN)
             return
         try:
             browser = CdpBrowser(timeout=2)
             if self._sync_generation(browser) != pending.browser_generation or not browser.target_exists(pending.target_id):
-                self._clear_login_pending()
+                self._resolve_login_wait(_LoginWaitResolution.RECOVER_SESSION)
                 return
-            page, outer, token = self._outer_session(pending.target_id)
-            page.close()
-            if token:
-                self._clear_login_pending()
-                self.bootstrap_current_scope(intent=BootstrapIntent.ESTABLISH_FRAME)
-        except CdpUnavailableError:
+            if not self._login_wait_is_ready_for_verification(pending):
+                return
+            outer_session = self._outer_session(pending.target_id)
+            outer_session.page.close()
+            if outer_session.kind == _OuterSessionKind.SCAN_REQUIRED:
+                pending.settle_not_before_at = None
+                return
+            if outer_session.kind == _OuterSessionKind.VERIFIED_WITH_TOKEN:
+                self._resolve_login_wait(_LoginWaitResolution.RECOVER_SESSION)
+        except OuterLoginExpiredError:
+            self._resolve_login_wait(_LoginWaitResolution.REQUIRE_LOGIN)
+        except (CdpUnavailableError, GameCircleContractError):
             return
 
     def open_login_page(self) -> dict[str, str]:
-        """The sole explicit action allowed to show or focus a target."""
+        """Activate the one service-owned page used for all session facts."""
         with self._control_lane:
             browser = CdpBrowser()
-            generation = self._sync_generation(browser)
-            with self._lock:
-                pending = self._login_pending
-            if pending and pending.browser_generation == generation and browser.target_exists(pending.target_id):
-                browser.activate_target(pending.target_id)
-                return {"status": "LOGIN_PAGE_REUSED"}
-            target = browser.create_target(CONTROLLED_LOGIN_URL, background=False)
-            self._register_owned(target, "LOGIN_PENDING")
-            self._register_login_pending(target, generation)
-            return {"status": "LOGIN_PAGE_OPENED"}
+            self._sync_generation(browser)
+            target = self._observable_home(browser)
+            browser.activate_target(target)
+            return {"status": "CONTROLLED_SESSION_PAGE_OPENED"}
 
     # -- fixed IPC surface ---------------------------------------------------------------
 
@@ -883,13 +1273,19 @@ class GameCircleSessionService:
         return self._execute_source_request(request)
 
     def _execute_source_request(self, request: IpcRequest) -> dict[str, Any]:
-        requested_timeout = request.params.get("timeout_seconds", 30) if request.method == "POSTS_GET_METRICS" else 30
+        requested_timeout = (
+            request.params.get("timeout_seconds", 30)
+            if request.method in {"POSTS_GET_METRICS", "POSTS_GET_AUTHOR_DETAIL"}
+            else 30
+        )
         try:
             timeout_seconds = float(requested_timeout)
         except (TypeError, ValueError) as exc:
             raise GameCircleIpcError("INVALID_REQUEST", "来源请求超时参数无效") from exc
+        lease: SessionLease | None = None
         try:
             with self.access(request.scope, timeout_seconds=timeout_seconds) as access:
+                lease = access.lease
                 if request.method.startswith("POSTS_"):
                     client = self._post_client(access)
                     try:
@@ -901,7 +1297,14 @@ class GameCircleSessionService:
                         if request.method == "POSTS_GET_METRICS":
                             return {"payload": client.get_post_metrics(int(request.params["topic_id"]))}
                         if request.method == "POSTS_GET_AUTHOR_DETAIL":
-                            return {"payload": client.get_author_detail(str(request.params["openid"]))}
+                            openid = request.params.get("openid")
+                            if not isinstance(openid, str) or not openid or len(openid) > 255:
+                                raise SourceContractError("作者用户 ID 无效")
+                            return {
+                                "payload": client.get_author_detail_with_timeout(
+                                    openid, timeout_seconds=timeout_seconds
+                                )
+                            }
                         if request.method == "POSTS_OPERATION":
                             payload = request.params.get("payload")
                             if not request.operation_id or not isinstance(payload, dict):
@@ -922,8 +1325,14 @@ class GameCircleSessionService:
             raise
         except SourceBusinessDeletedError as exc:
             raise GameCircleIpcError("SOURCE_DELETED", "原平台帖子已从管理队列删除") from exc
+        except SourceAuthenticationRejectedError as exc:
+            if lease is not None:
+                self._verify_after_source_rejection(request.scope, lease)
+            raise GameCircleIpcError("SESSION_UNAVAILABLE", "游戏圈会话已失效，请重新登录或建立 Frame") from exc
         except PluginSessionExpiredError as exc:
-            self._set_runtime(GameCircleLoginRuntimeState.OuterState.OUTER_READY, GameCircleLoginRuntimeState.FrameState.UNREADY, category=GameCircleLoginRuntimeState.ErrorCategory.FRAME_UNREADY, actions=(GameCircleLoginRuntimeState.Action.BUILD_FRAME,))
+            if lease is not None:
+                with self._control_lane:
+                    self._retire_rejected_lease(request.scope, lease)
             raise GameCircleIpcError("SESSION_UNAVAILABLE", "当前游戏 Frame 已失效，请先人工建立") from exc
         except SourceContractError as exc:
             raise GameCircleIpcError("SOURCE_CONTRACT", "原平台响应不符合已验证契约") from exc
@@ -938,16 +1347,22 @@ class GameCircleSessionService:
                 browser = CdpBrowser()
                 self._sync_generation(browser)
                 home = self._ensure_home(browser)
-                page, outer, token = self._outer_session(home)
+                outer_session = self._outer_session(home)
                 try:
-                    if token is None:
-                        self._register_login_pending(home, self._browser_generation)
+                    if outer_session.kind == _OuterSessionKind.SCAN_REQUIRED:
+                        self._set_login_required()
                         raise GameCircleIpcError("SESSION_UNAVAILABLE", "外层会话需要人工扫码")
-                    return outer.list_managed_games()
+                    if outer_session.kind == _OuterSessionKind.VERIFIED_TOKEN_UNREADY:
+                        self._set_outer_session_unready()
+                        raise GameCircleIpcError("SESSION_UNAVAILABLE", "外层会话暂未就绪")
+                    return outer_session.outer.list_managed_games()
                 finally:
-                    page.close()
+                    outer_session.page.close()
             except GameCircleIpcError:
                 raise
+            except OuterLoginExpiredError as exc:
+                self._set_login_required()
+                raise GameCircleIpcError("SESSION_UNAVAILABLE", "外层登录态已过期，请重新扫码") from exc
             except CdpUnavailableError as exc:
                 raise GameCircleIpcError("SOURCE_UNAVAILABLE", "无法读取可管理游戏目录") from exc
             except GameCircleContractError as exc:

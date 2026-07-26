@@ -1,0 +1,24 @@
+version: 1.5.0
+previous: 1.4.0
+changes:
+  - 新增可配置的自动任务生产者：运营人员可为固定生产者配置启停与受限规则，并查看最近执行点和脱敏运行状态。
+  - 重构系统配置运行控制台，统一展示 Supervisor、受控游戏圈会话、当前游戏 Frame 与业务 Worker 的运行状态和恢复入口。
+  - 视频审核对超过采样预算的视频按开头、中间和结尾分布式抽帧，保存实际覆盖区间并避免将局部证据误解为整段结论。
+  - 强化 Supervisor 与受控 Chrome 生命周期：受管 Web/Worker 通过实例租约在 Supervisor 异常退出后停止，Chrome 以专用端口与 generation 管理，避免重复拉起。
+  - 作者禁言状态改为按作者和当前游戏独立核验，内容管理显示作者昵称；关联帖子删除后，已知作者仍可禁言或解除禁言，沉底、屏蔽和恢复等帖子处置仍保持禁用。
+upgrade:
+  dependencies: none
+  database: migrate
+  static: collectstatic
+  restart:
+    mode: supervisor
+    services: []
+  once_jobs: []
+  manual:
+    - 升级前确认不存在非终态的旧 `AUTHOR_MUTE_STATUS_BACKFILL` 任务；旧任务必须达到终态后，新版人工补采 Worker 才可启动。
+verification:
+  - uv run python manage.py validate_releases
+  - uv run pytest -q tests/test_release_protocol.py tests/test_release_source_archive.py
+  - uv run python manage.py check
+  - 确认 Supervisor 重启后 Web、游戏圈会话服务与已期望运行的 Worker 均恢复；系统配置页可读取受控会话页、外层会话与当前游戏 Frame 状态。
+  - 在受控浏览器完成一次不含认证材料记录的会话页检查，确认自动检查不创建额外 HOME；未授权环境不得执行上游写入验证。

@@ -10,7 +10,7 @@ from config.game_circle_ipc import GameCircleIpcError
 from posts.game_catalog import set_active_game
 from posts.models import POST_STATUS_DELETED, CandidatePost, ManagedGame, OriginalPost, OriginType
 from posts.tasks import (
-    AUTHOR_MUTE_STATUS_BACKFILL_TASK,
+    AUTHOR_MUTE_STATUS_BACKFILL_V2_TASK,
     BACKFILL_INGESTION_WORKER_HANDLERS,
     LEGACY_INGEST_WINDOW_TASK,
     MANUAL_INGEST_WINDOW_TASK,
@@ -282,7 +282,7 @@ def test_ingestion_worker_lanes_are_explicit_and_keep_legacy_jobs_in_backfill():
         LEGACY_INGEST_WINDOW_TASK,
         MANUAL_INGEST_WINDOW_TASK,
         METRICS_REFRESH_WINDOW_TASK,
-        AUTHOR_MUTE_STATUS_BACKFILL_TASK,
+        AUTHOR_MUTE_STATUS_BACKFILL_V2_TASK,
     }
     assert BACKFILL_INGESTION_WORKER_HANDLERS[LEGACY_INGEST_WINDOW_TASK] is ingest_window_handler
 

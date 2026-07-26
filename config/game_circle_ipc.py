@@ -30,6 +30,7 @@ from posts.game_catalog import ExecutionScope
 
 MAX_REQUEST_BYTES = 64 * 1024
 MAX_RESPONSE_BYTES = 4 * 1024 * 1024
+MAX_AUTHOR_OPENID_LENGTH = 255
 IPC_CAPABILITY_ENV = "OPERATION_GAME_CIRCLE_IPC_CAPABILITY"
 POST_METHODS = frozenset(
     {
@@ -288,7 +289,21 @@ class GameCirclePostClient:
         return self._payload("POSTS_GET_METRICS", {"topic_id": topic_id, "timeout_seconds": timeout_seconds})
 
     def get_author_detail(self, openid: str) -> dict[str, Any]:
+        if not isinstance(openid, str) or not openid or len(openid) > MAX_AUTHOR_OPENID_LENGTH:
+            raise SourceContractError("作者用户 ID 无效")
         return self._payload("POSTS_GET_AUTHOR_DETAIL", {"openid": openid})
+
+    def get_author_detail_with_timeout(
+        self, openid: str, *, timeout_seconds: float
+    ) -> dict[str, Any]:
+        if not isinstance(openid, str) or not openid or len(openid) > MAX_AUTHOR_OPENID_LENGTH:
+            raise SourceContractError("作者用户 ID 无效")
+        if not isinstance(timeout_seconds, (int, float)) or timeout_seconds <= 0:
+            raise SourceContractError("作者详情读取超时参数无效")
+        return self._payload(
+            "POSTS_GET_AUTHOR_DETAIL",
+            {"openid": openid, "timeout_seconds": timeout_seconds},
+        )
 
     def perform_confirmed_operation(self, *, topic_id: int, action: str, payload: dict[str, Any], operation_id: str = "") -> dict[str, Any]:
         return self._payload("POSTS_OPERATION", {"topic_id": topic_id, "action": action, "payload": payload}, operation_id=operation_id or str(uuid4()))

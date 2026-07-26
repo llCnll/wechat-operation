@@ -5,18 +5,29 @@ import pytest
 from django.utils import timezone
 
 from config.cdp import CdpTargetUnavailableError
+from config.game_circle_adapter import GameCircleContractError, OuterLoginExpiredError
 from config.game_circle_ipc import GameCircleIpcError, IpcRequest
 from config.game_circle_service import (
     BootstrapIntent,
     BootstrapResult,
     GameCircleSessionService,
+    LOGIN_COMPLETION_SETTLE_SECONDS,
     OwnedTarget,
     SessionLease,
+    _OuterSession,
+    _OuterSessionKind,
     _LoginPending,
 )
+from jobs.adapters import PluginSessionExpiredError
 from posts.game_catalog import ExecutionScope
 from posts.models import GameCircleLoginRuntimeState
 from service_supervisor.runtime import RuntimeStore
+
+
+@pytest.fixture(autouse=True)
+def isolate_game_circle_runtime_store(monkeypatch, tmp_path):
+    """Keep session projections out of the live Supervisor runtime on Windows."""
+    monkeypatch.setattr("config.game_circle_service.RUNTIME_DIR", tmp_path)
 
 
 def _lease(appid="game-a"):
@@ -27,6 +38,36 @@ def _lease(appid="game-a"):
         plugin_target_id="plugin",
         source_token="test-only-token",
         issued_at=timezone.now(),
+    )
+
+
+def _verified_outer(page, outer, token="outer-token"):
+    if hasattr(outer, "__dict__") and not hasattr(outer, "read_usable_outer_token"):
+        outer.read_usable_outer_token = lambda: token
+    current_appid = (
+        outer.wait_for_readable_current_game()
+        if hasattr(outer, "wait_for_readable_current_game")
+        else "game-a"
+    )
+    return _OuterSession(
+        page,
+        outer,
+        _OuterSessionKind.VERIFIED_WITH_TOKEN,
+        token,
+        current_appid,
+    )
+
+
+def _scan_required_outer(page, outer):
+    return _OuterSession(page, outer, _OuterSessionKind.SCAN_REQUIRED)
+
+
+def _token_unready_outer(page, outer):
+    return _OuterSession(
+        page,
+        outer,
+        _OuterSessionKind.VERIFIED_TOKEN_UNREADY,
+        current_appid="game-a",
     )
 
 
@@ -128,7 +169,7 @@ def test_login_pending_is_unique_and_exposes_only_fixed_projection(monkeypatch):
             return "browser"
 
         def create_target(self, _url, *, background):
-            assert background is False
+            assert background is True
             return "private-target"
 
         def target_exists(self, target_id):
@@ -137,16 +178,138 @@ def test_login_pending_is_unique_and_exposes_only_fixed_projection(monkeypatch):
         def activate_target(self, target_id):
             assert target_id == "private-target"
 
+    GameCircleLoginRuntimeState.objects.create(
+        outer_state=GameCircleLoginRuntimeState.OuterState.LOGIN_REQUIRED,
+        frame_state=GameCircleLoginRuntimeState.FrameState.UNREADY,
+        available_actions=[GameCircleLoginRuntimeState.Action.OPEN_LOGIN],
+    )
     service = GameCircleSessionService()
     monkeypatch.setattr("config.game_circle_service.CdpBrowser", Browser)
 
-    assert service.open_login_page()["status"] == "LOGIN_PAGE_OPENED"
-    assert service.open_login_page()["status"] == "LOGIN_PAGE_REUSED"
-    state = GameCircleLoginRuntimeState.objects.get(pk=1)
-    assert state.outer_state == GameCircleLoginRuntimeState.OuterState.LOGIN_PENDING
-    assert state.frame_state == GameCircleLoginRuntimeState.FrameState.UNREADY
-    assert state.available_actions == [GameCircleLoginRuntimeState.Action.OPEN_LOGIN]
+    assert service.open_login_page()["status"] == "CONTROLLED_SESSION_PAGE_OPENED"
+    assert service.open_login_page()["status"] == "CONTROLLED_SESSION_PAGE_OPENED"
     assert "private-target" not in str(service.runtime_status())
+
+
+@pytest.mark.django_db
+def test_open_login_page_opens_the_observable_controlled_session_page(monkeypatch):
+    GameCircleLoginRuntimeState.objects.create(
+        outer_state=GameCircleLoginRuntimeState.OuterState.UNKNOWN,
+        frame_state=GameCircleLoginRuntimeState.FrameState.UNREADY,
+    )
+    service = GameCircleSessionService()
+    class Browser:
+        def browser_generation(self):
+            return "browser"
+        def target_exists(self, _target_id):
+            return False
+        def create_target(self, _url, *, background):
+            assert background is True
+            return "controlled-home"
+        def activate_target(self, target_id):
+            assert target_id == "controlled-home"
+
+    monkeypatch.setattr("config.game_circle_service.CdpBrowser", Browser)
+    assert service.open_login_page() == {"status": "CONTROLLED_SESSION_PAGE_OPENED"}
+
+
+@pytest.mark.django_db
+def test_unverified_bootstrap_failure_projects_unknown_outer_state(monkeypatch):
+    class Browser:
+        def browser_generation(self):
+            return "browser"
+
+        def create_target(self, _url, *, background):
+            assert background is True
+            return "candidate-home"
+
+        def close_target(self, _target_id):
+            return None
+
+        def target_exists(self, _target_id):
+            return False
+
+    service = GameCircleSessionService()
+    monkeypatch.setattr("config.game_circle_service.CdpBrowser", Browser)
+    monkeypatch.setattr(
+        service,
+        "_outer_session",
+        lambda _home: (_ for _ in ()).throw(GameCircleContractError("request failed")),
+    )
+
+    result = service.bootstrap(scope=ExecutionScope("game-a", 1), intent=BootstrapIntent.ESTABLISH_FRAME)
+
+    state = GameCircleLoginRuntimeState.objects.get(pk=1)
+    assert result.category == GameCircleLoginRuntimeState.ErrorCategory.FRAME_UNREADY
+    assert state.outer_state == GameCircleLoginRuntimeState.OuterState.UNKNOWN
+    assert state.frame_state == GameCircleLoginRuntimeState.FrameState.UNREADY
+    assert GameCircleLoginRuntimeState.Action.OPEN_LOGIN not in state.available_actions
+
+
+@pytest.mark.django_db
+def test_open_login_page_after_outer_recovery_remains_observable(monkeypatch):
+    GameCircleLoginRuntimeState.objects.create(
+        outer_state=GameCircleLoginRuntimeState.OuterState.OUTER_READY,
+        frame_state=GameCircleLoginRuntimeState.FrameState.BUILDING,
+        available_actions=[],
+    )
+    service = GameCircleSessionService()
+
+    class Browser:
+        def browser_generation(self):
+            return "browser"
+        def target_exists(self, _target_id):
+            return False
+        def create_target(self, _url, *, background):
+            assert background is True
+            return "controlled-home"
+        def activate_target(self, target_id):
+            assert target_id == "controlled-home"
+
+    monkeypatch.setattr("config.game_circle_service.CdpBrowser", Browser)
+    assert service.open_login_page() == {"status": "CONTROLLED_SESSION_PAGE_OPENED"}
+
+
+@pytest.mark.django_db
+def test_open_controlled_session_page_reuses_the_current_lease_home(monkeypatch):
+    scope = ExecutionScope("game-a", 1)
+    service = GameCircleSessionService()
+    service._browser_generation = "browser"
+    service._leases[scope.target_appid] = [_lease()]
+
+    class Browser:
+        def browser_generation(self):
+            return "browser"
+        def target_exists(self, target_id):
+            return target_id == "home"
+        def create_target(self, *_args, **_kwargs):
+            pytest.fail("a live lease HOME must be the observable session page")
+        def activate_target(self, target_id):
+            assert target_id == "home"
+
+    monkeypatch.setattr("config.game_circle_service.CdpBrowser", Browser)
+    monkeypatch.setattr("config.game_circle_service.current_execution_scope", lambda **_kwargs: scope)
+
+    assert service.open_login_page() == {"status": "CONTROLLED_SESSION_PAGE_OPENED"}
+
+
+def test_ensure_home_keeps_login_pending_page_ahead_of_idle_page(monkeypatch):
+    service = GameCircleSessionService()
+    service._owned_targets = {
+        "idle": OwnedTarget("idle", "HOME_IDLE", service.owner_epoch),
+        "pending": OwnedTarget("pending", "LOGIN_PENDING", service.owner_epoch),
+    }
+    closed = []
+
+    class Browser:
+        def target_exists(self, target_id):
+            return target_id in {"idle", "pending"}
+        def close_target(self, target_id):
+            closed.append(target_id)
+
+    assert service._ensure_home(Browser()) == "pending"
+    assert closed == ["idle"]
+    assert set(service._owned_targets) == {"pending"}
 
 
 @pytest.mark.django_db
@@ -201,7 +364,7 @@ def test_bootstrap_publishes_only_after_frame_identity_and_minimum_read(monkeypa
 
     service = GameCircleSessionService()
     monkeypatch.setattr("config.game_circle_service.CdpBrowser", Browser)
-    monkeypatch.setattr(service, "_outer_session", lambda _home: (Page(), Outer(), "outer-token"))
+    monkeypatch.setattr(service, "_outer_session", lambda _home: _verified_outer(Page(), Outer()))
     monkeypatch.setattr("config.game_circle_service.CdpGameFrame", Frame)
     monkeypatch.setattr("config.game_circle_service.bind_game_identity", lambda *_args, **_kwargs: "source-token")
     monkeypatch.setattr("config.game_circle_service.CdpGameCircleClient", Verifier)
@@ -217,7 +380,7 @@ def test_bootstrap_publishes_only_after_frame_identity_and_minimum_read(monkeypa
 
 
 @pytest.mark.django_db
-def test_bootstrap_scan_required_creates_no_frame_and_registers_one_wait(monkeypatch):
+def test_bootstrap_scan_route_holds_the_candidate_for_bounded_session_recovery(monkeypatch):
     created = []
 
     class Browser:
@@ -229,7 +392,7 @@ def test_bootstrap_scan_required_creates_no_frame_and_registers_one_wait(monkeyp
             return "home"
 
         def target_exists(self, _target_id):
-            return False
+            return True
 
         def close_target(self, _target_id):
             return None
@@ -240,15 +403,83 @@ def test_bootstrap_scan_required_creates_no_frame_and_registers_one_wait(monkeyp
 
     service = GameCircleSessionService()
     monkeypatch.setattr("config.game_circle_service.CdpBrowser", Browser)
-    monkeypatch.setattr(service, "_outer_session", lambda _home: (Page(), object(), None))
+    monkeypatch.setattr(service, "_outer_session", lambda _home: _scan_required_outer(Page(), object()))
 
     service.bootstrap(scope=ExecutionScope("game-a", 1), intent=BootstrapIntent.ESTABLISH_FRAME)
 
     assert created == [True]
     assert service._login_pending is not None
+    assert service._login_pending.target_id == "home"
+    assert service._owned_targets["home"].role == "LOGIN_PENDING"
     state = GameCircleLoginRuntimeState.objects.get(pk=1)
     assert state.outer_state == GameCircleLoginRuntimeState.OuterState.LOGIN_PENDING
     assert state.frame_state == GameCircleLoginRuntimeState.FrameState.UNREADY
+
+
+@pytest.mark.django_db
+def test_bootstrap_outer_rejection_holds_the_candidate_for_bounded_session_recovery(monkeypatch):
+    class Browser:
+        def browser_generation(self):
+            return "browser"
+
+        def create_target(self, _url, *, background):
+            assert background is True
+            return "home"
+
+        def target_exists(self, _target_id):
+            return True
+
+        def close_target(self, _target_id):
+            return None
+
+    service = GameCircleSessionService()
+    monkeypatch.setattr("config.game_circle_service.CdpBrowser", Browser)
+    monkeypatch.setattr(
+        service,
+        "_outer_session",
+        lambda _home: (_ for _ in ()).throw(OuterLoginExpiredError("expired")),
+    )
+
+    result = service.bootstrap(scope=ExecutionScope("game-a", 1), intent=BootstrapIntent.ESTABLISH_FRAME)
+
+    assert result.terminal is False
+    assert service._login_pending is not None
+    assert service._owned_targets["home"].role == "LOGIN_PENDING"
+    assert GameCircleLoginRuntimeState.objects.get(pk=1).outer_state == GameCircleLoginRuntimeState.OuterState.LOGIN_PENDING
+
+
+@pytest.mark.django_db
+def test_open_login_activates_the_recoverable_candidate_instead_of_creating_another_tab(monkeypatch):
+    service = GameCircleSessionService()
+    service._browser_generation = "browser"
+    service._owned_targets["candidate-home"] = OwnedTarget(
+        "candidate-home", "LOGIN_PENDING", service.owner_epoch
+    )
+    service._login_pending = _LoginPending(
+        "candidate-home", "browser", timezone.now() + timedelta(minutes=1)
+    )
+    GameCircleLoginRuntimeState.objects.create(
+        outer_state=GameCircleLoginRuntimeState.OuterState.LOGIN_PENDING,
+        frame_state=GameCircleLoginRuntimeState.FrameState.UNREADY,
+        available_actions=[GameCircleLoginRuntimeState.Action.OPEN_LOGIN],
+    )
+
+    class Browser:
+        def browser_generation(self):
+            return "browser"
+
+        def target_exists(self, target_id):
+            return target_id == "candidate-home"
+
+        def activate_target(self, target_id):
+            assert target_id == "candidate-home"
+
+        def create_target(self, *_args, **_kwargs):
+            pytest.fail("recoverable candidate must be reused")
+
+    monkeypatch.setattr("config.game_circle_service.CdpBrowser", Browser)
+
+    assert service.open_login_page() == {"status": "CONTROLLED_SESSION_PAGE_OPENED"}
 
 
 @pytest.mark.django_db
@@ -273,7 +504,7 @@ def test_outer_session_check_preserves_ready_frame_actions(monkeypatch):
     service._browser_generation = "browser"
     service._leases[scope.target_appid] = [_lease()]
     monkeypatch.setattr("config.game_circle_service.CdpBrowser", Browser)
-    monkeypatch.setattr(service, "_outer_session", lambda _home: (Page(), object(), "outer-token"))
+    monkeypatch.setattr(service, "_outer_session", lambda _home: _verified_outer(Page(), object()))
 
     service.bootstrap(scope=scope, intent=BootstrapIntent.CHECK_OUTER_SESSION)
 
@@ -331,7 +562,8 @@ def test_scan_completion_reuses_registered_home_before_bootstrap(monkeypatch):
     service._owned_targets["home"] = OwnedTarget("home", "LOGIN_PENDING", service.owner_epoch)
     service._login_pending = _LoginPending("home", "browser", timezone.now() + timedelta(minutes=1))
     monkeypatch.setattr("config.game_circle_service.CdpBrowser", Browser)
-    monkeypatch.setattr(service, "_outer_session", lambda target: (Page(), object(), "outer-token"))
+    monkeypatch.setattr(service, "_outer_session", lambda target: _verified_outer(Page(), object()))
+    monkeypatch.setattr(service, "_login_wait_is_ready_for_verification", lambda _pending: True)
     observed = []
     monkeypatch.setattr(service, "bootstrap_current_scope", lambda **kwargs: observed.append(kwargs))
 
@@ -340,6 +572,106 @@ def test_scan_completion_reuses_registered_home_before_bootstrap(monkeypatch):
     assert observed == [{"intent": BootstrapIntent.ESTABLISH_FRAME}]
     assert service._login_pending is None
     assert service._owned_targets["home"].role == "HOME_IDLE"
+
+
+@pytest.mark.django_db
+def test_lost_pending_login_target_reenters_regular_bootstrap(monkeypatch):
+    pending = _LoginPending("login-home", "browser", timezone.now() + timedelta(minutes=1))
+    service = GameCircleSessionService()
+    service._browser_generation = "browser"
+    service._owned_targets[pending.target_id] = OwnedTarget(
+        pending.target_id, "LOGIN_PENDING", service.owner_epoch
+    )
+    service._login_pending = pending
+
+    class Browser:
+        def __init__(self, **_kwargs):
+            return None
+
+        def browser_generation(self):
+            return "browser"
+
+        def target_exists(self, _target_id):
+            return False
+
+    resumed = []
+    monkeypatch.setattr("config.game_circle_service.CdpBrowser", Browser)
+    monkeypatch.setattr(
+        service, "bootstrap_current_scope", lambda **kwargs: resumed.append(kwargs)
+    )
+
+    service._observe_login_pending_locked()
+
+    assert service._login_pending is None
+    assert resumed == [{"intent": BootstrapIntent.ESTABLISH_FRAME}]
+
+
+@pytest.mark.django_db
+def test_login_wait_defers_outer_verification_for_ten_seconds_after_scan_disappears(monkeypatch):
+    service = GameCircleSessionService()
+    pending = _LoginPending("login-home", "browser", timezone.now() + timedelta(minutes=1))
+
+    class Page:
+        def __init__(self, **_kwargs):
+            return None
+
+        def wait_for_public_page(self):
+            return True
+
+        def close(self):
+            return None
+
+    class Outer:
+        def __init__(self, _page):
+            return None
+
+        def is_login_page(self):
+            return False
+
+        def scan_required(self):
+            return False
+
+    monkeypatch.setattr("config.game_circle_service.ExplicitOuterPage", Page)
+    monkeypatch.setattr("config.game_circle_service.GameCircleOuterAdapter", Outer)
+
+    assert service._login_wait_is_ready_for_verification(pending) is False
+    assert pending.settle_not_before_at is not None
+    assert pending.settle_not_before_at - timezone.now() <= timedelta(seconds=LOGIN_COMPLETION_SETTLE_SECONDS)
+
+
+@pytest.mark.django_db
+def test_login_wait_does_not_probe_while_the_post_scan_settle_window_is_open(monkeypatch):
+    service = GameCircleSessionService()
+    pending = _LoginPending(
+        "login-home",
+        "browser",
+        timezone.now() + timedelta(minutes=1),
+        settle_not_before_at=timezone.now() + timedelta(seconds=LOGIN_COMPLETION_SETTLE_SECONDS),
+    )
+    service._login_pending = pending
+
+    class Browser:
+        def __init__(self, **_kwargs):
+            return None
+
+        def browser_generation(self):
+            return "browser"
+
+        def target_exists(self, target_id):
+            return target_id == pending.target_id
+
+    service._browser_generation = "browser"
+    monkeypatch.setattr("config.game_circle_service.CdpBrowser", Browser)
+    monkeypatch.setattr(service, "_login_wait_is_ready_for_verification", lambda _pending: False)
+    monkeypatch.setattr(
+        service,
+        "_outer_session",
+        lambda _target: pytest.fail("getappinfo must not run during the settle window"),
+    )
+
+    service._observe_login_pending_locked()
+
+    assert service._login_pending is pending
 
 
 @pytest.mark.django_db
@@ -363,7 +695,7 @@ def test_outer_ready_without_current_scope_never_creates_a_plugin(monkeypatch):
 
     service = GameCircleSessionService()
     monkeypatch.setattr("config.game_circle_service.CdpBrowser", Browser)
-    monkeypatch.setattr(service, "_outer_session", lambda _home: (Page(), object(), "outer-token"))
+    monkeypatch.setattr(service, "_outer_session", lambda _home: _verified_outer(Page(), object()))
 
     service.bootstrap(scope=None, intent=BootstrapIntent.ESTABLISH_FRAME)
 
@@ -403,7 +735,7 @@ def test_unselectable_target_is_not_published(monkeypatch):
 
     service = GameCircleSessionService()
     monkeypatch.setattr("config.game_circle_service.CdpBrowser", Browser)
-    monkeypatch.setattr(service, "_outer_session", lambda _home: (Page(), Outer(), "outer-token"))
+    monkeypatch.setattr(service, "_outer_session", lambda _home: _verified_outer(Page(), Outer()))
 
     service.bootstrap(scope=ExecutionScope("game-a", 1), intent=BootstrapIntent.ESTABLISH_FRAME)
 
@@ -454,7 +786,7 @@ def test_unstable_frame_is_not_published(monkeypatch):
 
     service = GameCircleSessionService()
     monkeypatch.setattr("config.game_circle_service.CdpBrowser", lambda: browser)
-    monkeypatch.setattr(service, "_outer_session", lambda _home: (Page(), Outer(), "outer-token"))
+    monkeypatch.setattr(service, "_outer_session", lambda _home: _verified_outer(Page(), Outer()))
     monkeypatch.setattr("config.game_circle_service.CdpGameFrame", Frame)
 
     service.bootstrap(scope=ExecutionScope("game-a", 1), intent=BootstrapIntent.ESTABLISH_FRAME)
@@ -510,7 +842,7 @@ def test_keepalive_intermediate_failure_closes_the_candidate_home(monkeypatch):
 
     service = GameCircleSessionService()
     monkeypatch.setattr("config.game_circle_service.CdpBrowser", Browser)
-    monkeypatch.setattr(service, "_outer_session", lambda _home: (Page(), Outer(), "outer-token"))
+    monkeypatch.setattr(service, "_outer_session", lambda _home: _verified_outer(Page(), Outer()))
 
     result = service.bootstrap(scope=ExecutionScope("game-a", 1), intent=BootstrapIntent.KEEPALIVE)
 
@@ -582,7 +914,7 @@ def test_failed_keepalive_preserves_current_active_lease_projection(monkeypatch)
         "plugin": OwnedTarget("plugin", "LEASE_PLUGIN", service.owner_epoch, scope.target_appid),
     }
     monkeypatch.setattr("config.game_circle_service.CdpBrowser", Browser)
-    monkeypatch.setattr(service, "_outer_session", lambda _home: (Page(), Outer(), "outer-token"))
+    monkeypatch.setattr(service, "_outer_session", lambda _home: _verified_outer(Page(), Outer()))
     monkeypatch.setattr("config.game_circle_service.current_execution_scope", lambda **_kwargs: scope)
     monkeypatch.setattr("config.game_circle_service.CdpGameFrame", Frame)
 
@@ -704,7 +1036,7 @@ def test_repair_replacement_bypasses_active_lease_short_circuit(monkeypatch):
         "plugin": OwnedTarget("plugin", "LEASE_PLUGIN", service.owner_epoch, scope.target_appid),
     }
     monkeypatch.setattr("config.game_circle_service.CdpBrowser", Browser)
-    monkeypatch.setattr(service, "_outer_session", lambda _home: (Page(), Outer(), "outer-token"))
+    monkeypatch.setattr(service, "_outer_session", lambda _home: _verified_outer(Page(), Outer()))
     monkeypatch.setattr("config.game_circle_service.CdpGameFrame", Frame)
     monkeypatch.setattr("config.game_circle_service.bind_game_identity", lambda *_args, **_kwargs: "source-token")
     monkeypatch.setattr("config.game_circle_service.CdpGameCircleClient", Verifier)
@@ -767,7 +1099,7 @@ def test_failed_repair_of_a_broken_lease_projects_frame_unready(monkeypatch):
         "plugin": OwnedTarget("plugin", "LEASE_PLUGIN", service.owner_epoch, scope.target_appid),
     }
     monkeypatch.setattr("config.game_circle_service.CdpBrowser", Browser)
-    monkeypatch.setattr(service, "_outer_session", lambda _home: (Page(), Outer(), "outer-token"))
+    monkeypatch.setattr(service, "_outer_session", lambda _home: _verified_outer(Page(), Outer()))
     monkeypatch.setattr("config.game_circle_service.CdpGameFrame", Frame)
     monkeypatch.setattr("config.game_circle_service.current_execution_scope", lambda **_kwargs: scope)
 
@@ -875,3 +1207,379 @@ def test_retiring_lease_forgets_a_target_already_removed_by_the_browser(monkeypa
     assert "game-a" not in service._leases
     assert service._owned_targets == {}
     assert browser.closed == ["home"]
+
+
+@pytest.mark.django_db
+def test_outer_probe_does_not_overwrite_an_unready_frame(monkeypatch):
+    scope = ExecutionScope("game-a", 1)
+    service = GameCircleSessionService()
+    service._browser_generation = "browser"
+    service._leases[scope.target_appid] = [_lease()]
+    service._set_runtime(
+        GameCircleLoginRuntimeState.OuterState.OUTER_READY,
+        GameCircleLoginRuntimeState.FrameState.UNREADY,
+        category=GameCircleLoginRuntimeState.ErrorCategory.FRAME_UNREADY,
+        actions=(GameCircleLoginRuntimeState.Action.BUILD_FRAME,),
+    )
+
+    class Page:
+        def close(self):
+            return None
+
+    monkeypatch.setattr("config.game_circle_service.current_execution_scope", lambda **_kwargs: scope)
+    monkeypatch.setattr(service, "_outer_session", lambda _home: _verified_outer(Page(), object()))
+
+    service._probe_outer_if_due()
+
+    state = GameCircleLoginRuntimeState.objects.get(pk=1)
+    assert state.outer_state == GameCircleLoginRuntimeState.OuterState.OUTER_READY
+    assert state.frame_state == GameCircleLoginRuntimeState.FrameState.UNREADY
+    assert state.available_actions == [GameCircleLoginRuntimeState.Action.BUILD_FRAME]
+    assert state.outer_verified_at is not None
+
+
+@pytest.mark.django_db
+def test_outer_probe_keeps_existing_lease_on_a_temporary_contract_failure(monkeypatch):
+    scope = ExecutionScope("game-a", 1)
+    service = GameCircleSessionService()
+    service._browser_generation = "browser"
+    lease = _lease()
+    service._leases[scope.target_appid] = [lease]
+    service._set_runtime(
+        GameCircleLoginRuntimeState.OuterState.OUTER_READY,
+        GameCircleLoginRuntimeState.FrameState.READY,
+        frame_scope_version=scope.scope_version,
+        outer_verified=True,
+    )
+    verified_at = GameCircleLoginRuntimeState.objects.get(pk=1).outer_verified_at
+    monkeypatch.setattr("config.game_circle_service.current_execution_scope", lambda **_kwargs: scope)
+    monkeypatch.setattr(
+        service,
+        "_outer_session",
+        lambda _home: (_ for _ in ()).throw(GameCircleContractError("temporary")),
+    )
+
+    service._probe_outer_if_due()
+
+    state = GameCircleLoginRuntimeState.objects.get(pk=1)
+    assert lease.state == "ACTIVE"
+    assert state.outer_state == GameCircleLoginRuntimeState.OuterState.OUTER_READY
+    assert state.outer_verified_at == verified_at
+
+
+@pytest.mark.django_db
+def test_outer_probe_keeps_leases_when_login_is_verified_but_home_token_is_unready(monkeypatch):
+    scope = ExecutionScope("game-a", 1)
+    service = GameCircleSessionService()
+    service._browser_generation = "browser"
+    lease = _lease()
+    service._leases[scope.target_appid] = [lease]
+
+    class Page:
+        def close(self):
+            return None
+
+    monkeypatch.setattr("config.game_circle_service.current_execution_scope", lambda **_kwargs: scope)
+    monkeypatch.setattr(
+        service,
+        "_outer_session",
+        lambda _home: _token_unready_outer(Page(), object()),
+    )
+
+    service._probe_outer_if_due()
+
+    state = GameCircleLoginRuntimeState.objects.get(pk=1)
+    assert lease.state == "ACTIVE"
+    assert state.outer_state == GameCircleLoginRuntimeState.OuterState.OUTER_READY
+    assert state.outer_verified_at is not None
+
+
+@pytest.mark.django_db
+def test_expired_outer_recheck_retires_all_generation_leases(monkeypatch):
+    scope = ExecutionScope("game-a", 1)
+    service = GameCircleSessionService()
+    service._browser_generation = "browser"
+    rejected = _lease("game-a")
+    sibling = _lease("game-b")
+    service._leases = {"game-a": [rejected], "game-b": [sibling]}
+    monkeypatch.setattr(
+        service,
+        "_outer_session",
+        lambda _home: (_ for _ in ()).throw(OuterLoginExpiredError("expired")),
+    )
+
+    service._verify_after_source_rejection(scope, rejected)
+
+    assert rejected.state == "RETIRING"
+    assert sibling.state == "RETIRING"
+    state = GameCircleLoginRuntimeState.objects.get(pk=1)
+    assert state.outer_state == GameCircleLoginRuntimeState.OuterState.LOGIN_REQUIRED
+    assert state.frame_state == GameCircleLoginRuntimeState.FrameState.UNREADY
+    assert state.login_state == GameCircleLoginRuntimeState.LoginState.SCAN_REQUIRED
+
+
+@pytest.mark.django_db
+def test_source_recheck_with_verified_token_unready_retires_only_the_rejected_lease(monkeypatch):
+    scope = ExecutionScope("game-a", 1)
+    service = GameCircleSessionService()
+    service._browser_generation = "browser"
+    rejected = _lease("game-a")
+    sibling = _lease("game-b")
+    service._leases = {"game-a": [rejected], "game-b": [sibling]}
+
+    class Page:
+        def close(self):
+            return None
+
+    monkeypatch.setattr(
+        service,
+        "_outer_session",
+        lambda _home: _token_unready_outer(Page(), object()),
+    )
+
+    service._verify_after_source_rejection(scope, rejected)
+
+    assert rejected.state == "RETIRING"
+    assert sibling.state == "ACTIVE"
+
+
+@pytest.mark.django_db
+def test_pending_login_contract_failure_keeps_the_maintenance_loop_observable(monkeypatch):
+    service = GameCircleSessionService()
+    pending = _LoginPending("login-home", "browser", timezone.now() + timedelta(minutes=1))
+    service._login_pending = pending
+
+    class Browser:
+        def __init__(self, **_kwargs):
+            return None
+
+        def browser_generation(self):
+            return "browser"
+
+        def target_exists(self, target_id):
+            return target_id == pending.target_id
+
+    monkeypatch.setattr("config.game_circle_service.CdpBrowser", Browser)
+    monkeypatch.setattr(
+        service,
+        "_outer_session",
+        lambda _home: (_ for _ in ()).throw(GameCircleContractError("temporary")),
+    )
+
+    service._observe_login_pending_locked()
+
+    assert service._login_pending is pending
+
+
+@pytest.mark.django_db
+def test_expired_login_wait_projects_login_required_not_outer_ready(monkeypatch):
+    service = GameCircleSessionService()
+    pending = _LoginPending("login-home", "browser", timezone.now() - timedelta(seconds=1))
+    service._login_pending = pending
+
+    class Browser:
+        def browser_generation(self):
+            return "browser"
+
+        def close_target(self, _target_id):
+            return None
+
+    monkeypatch.setattr("config.game_circle_service.CdpBrowser", Browser)
+
+    service._observe_login_pending_locked()
+
+    state = GameCircleLoginRuntimeState.objects.get(pk=1)
+    assert service._login_pending is None
+    assert state.outer_state == GameCircleLoginRuntimeState.OuterState.LOGIN_REQUIRED
+    assert state.frame_state == GameCircleLoginRuntimeState.FrameState.UNREADY
+
+
+@pytest.mark.django_db
+def test_managed_game_directory_expiry_projects_login_required(monkeypatch):
+    service = GameCircleSessionService()
+
+    class Browser:
+        def browser_generation(self):
+            return "browser"
+
+        def create_target(self, _url, *, background):
+            assert background is True
+            return "home"
+
+    monkeypatch.setattr("config.game_circle_service.CdpBrowser", Browser)
+    monkeypatch.setattr(
+        service,
+        "_outer_session",
+        lambda _home: (_ for _ in ()).throw(OuterLoginExpiredError("expired")),
+    )
+
+    with pytest.raises(GameCircleIpcError) as raised:
+        service.list_managed_games()
+
+    assert raised.value.category == "SESSION_UNAVAILABLE"
+    assert GameCircleLoginRuntimeState.objects.get(pk=1).outer_state == GameCircleLoginRuntimeState.OuterState.LOGIN_REQUIRED
+
+
+@pytest.mark.django_db
+def test_managed_game_directory_unready_session_never_projects_outer_ready(monkeypatch):
+    service = GameCircleSessionService()
+
+    class Browser:
+        def browser_generation(self):
+            return "browser"
+
+        def create_target(self, _url, *, background):
+            assert background is True
+            return "home"
+
+    class Page:
+        def close(self):
+            return None
+
+    monkeypatch.setattr("config.game_circle_service.CdpBrowser", Browser)
+    monkeypatch.setattr(service, "_outer_session", lambda _home: _token_unready_outer(Page(), object()))
+
+    with pytest.raises(GameCircleIpcError) as raised:
+        service.list_managed_games()
+
+    state = GameCircleLoginRuntimeState.objects.get(pk=1)
+    assert raised.value.category == "SESSION_UNAVAILABLE"
+    assert state.outer_state == GameCircleLoginRuntimeState.OuterState.UNKNOWN
+    assert state.error_category == GameCircleLoginRuntimeState.ErrorCategory.OUTER_SESSION_UNREADY
+
+
+@pytest.mark.django_db
+def test_stale_source_rejection_never_retires_a_replacement_lease(monkeypatch):
+    scope = ExecutionScope("game-a", 1)
+    service = GameCircleSessionService()
+    service._browser_generation = "browser"
+    rejected = _lease()
+    replacement = _lease()
+    rejected.state = "RETIRING"
+    service._leases[scope.target_appid] = [replacement, rejected]
+    monkeypatch.setattr(
+        service,
+        "_outer_session",
+        lambda _home: pytest.fail("a superseded lease must not trigger an outer recheck"),
+    )
+
+    service._verify_after_source_rejection(scope, rejected)
+
+    assert replacement.state == "ACTIVE"
+
+
+@pytest.mark.django_db
+def test_concurrent_source_rejections_share_one_outer_recheck(monkeypatch):
+    scope_a = ExecutionScope("game-a", 1)
+    scope_b = ExecutionScope("game-b", 1)
+    service = GameCircleSessionService()
+    service._browser_generation = "browser"
+    lease_a = _lease("game-a")
+    lease_b = _lease("game-b")
+    service._leases = {"game-a": [lease_a], "game-b": [lease_b]}
+    entered = Event()
+    release = Event()
+    calls = []
+
+    class Page:
+        def close(self):
+            return None
+
+    def outer_session(_home):
+        calls.append(True)
+        entered.set()
+        assert release.wait(timeout=2)
+        return _verified_outer(Page(), object())
+
+    monkeypatch.setattr(service, "_outer_session", outer_session)
+    # This test exercises the flight protocol only; avoid writing Django state
+    # from the two worker threads.
+    monkeypatch.setattr(service, "_is_current_scope", lambda _scope: False)
+    first = Thread(target=lambda: service._verify_after_source_rejection(scope_a, lease_a))
+    second = Thread(target=lambda: service._verify_after_source_rejection(scope_b, lease_b))
+
+    first.start()
+    assert entered.wait(timeout=2)
+    second.start()
+    release.set()
+    first.join(timeout=2)
+    second.join(timeout=2)
+
+    assert not first.is_alive()
+    assert not second.is_alive()
+    assert calls == [True]
+    assert lease_a.state == "RETIRING"
+    assert lease_b.state == "RETIRING"
+
+
+@pytest.mark.django_db
+def test_outer_probe_is_throttled_for_a_healthy_lease(monkeypatch):
+    scope = ExecutionScope("game-a", 1)
+    service = GameCircleSessionService()
+    service._browser_generation = "browser"
+    service._leases[scope.target_appid] = [_lease()]
+    calls = []
+
+    class Page:
+        def close(self):
+            return None
+
+    monkeypatch.setattr("config.game_circle_service.current_execution_scope", lambda **_kwargs: scope)
+    monkeypatch.setattr(
+        service,
+        "_outer_session",
+        lambda _home: (calls.append(True) or _verified_outer(Page(), object())),
+    )
+
+    service._probe_outer_if_due()
+    service._probe_outer_if_due()
+
+    assert calls == [True]
+
+
+@pytest.mark.django_db
+def test_publishing_a_refreshed_lease_keeps_an_inflight_old_access_usable():
+    scope = ExecutionScope("game-a", 1)
+    service = GameCircleSessionService()
+    service._browser_generation = "browser"
+    old = _lease()
+    service._leases[scope.target_appid] = [old]
+
+    with service.access(scope) as access:
+        service._publish_lease(
+            scope=scope,
+            generation="browser",
+            home="new-home",
+            plugin="new-plugin",
+            source_token="new-source-token",
+        )
+
+        assert access.lease is old
+        assert old.state == "RETIRING"
+        assert access.access_id in old.active_accesses
+        assert service._active_lease(scope) is not old
+
+
+@pytest.mark.django_db
+def test_verified_frame_identity_rejection_retires_its_lease(monkeypatch):
+    scope = ExecutionScope("game-a", 1)
+    service = GameCircleSessionService()
+    service._browser_generation = "browser"
+    lease = _lease()
+    service._leases[scope.target_appid] = [lease]
+    monkeypatch.setattr(service, "_is_current_scope", lambda value: value == scope)
+
+    class Client:
+        def get_post_metrics(self, _topic_id):
+            raise PluginSessionExpiredError("identity expired")
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(service, "_post_client", lambda _access: Client())
+
+    with pytest.raises(GameCircleIpcError) as raised:
+        service._execute_source_request(IpcRequest("POSTS_GET_METRICS", scope, {"topic_id": 1}, ""))
+
+    assert raised.value.category == "SESSION_UNAVAILABLE"
+    assert lease.state == "RETIRING"

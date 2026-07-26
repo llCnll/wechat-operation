@@ -1,7 +1,7 @@
 from datetime import timedelta
 from contextlib import contextmanager
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import call, patch
 
 import pytest
 from django.contrib.auth import get_user_model
@@ -109,8 +109,9 @@ def test_browser_login_status_only_allows_opening_login_page_when_scan_is_requir
         outer_state=GameCircleLoginRuntimeState.OuterState.LOGIN_PENDING,
         frame_state=GameCircleLoginRuntimeState.FrameState.UNREADY,
         available_actions=[GameCircleLoginRuntimeState.Action.OPEN_LOGIN],
-        error_category=GameCircleLoginRuntimeState.ErrorCategory.SCAN_REQUIRED,
-        checked_at=timezone.now(),
+            error_category=GameCircleLoginRuntimeState.ErrorCategory.SCAN_REQUIRED,
+            checked_at=timezone.now(),
+            outer_verified_at=timezone.now(),
     )
 
     scan_required = Client().get("/auth/status").json()
@@ -132,12 +133,31 @@ def test_browser_login_status_only_allows_opening_login_page_when_scan_is_requir
 
 
 @pytest.mark.django_db
+def test_browser_login_status_keeps_a_fresh_login_required_state_visible_without_success_timestamp():
+    GameCircleLoginRuntimeState.objects.create(
+        outer_state=GameCircleLoginRuntimeState.OuterState.LOGIN_REQUIRED,
+        frame_state=GameCircleLoginRuntimeState.FrameState.UNREADY,
+        available_actions=[GameCircleLoginRuntimeState.Action.OPEN_LOGIN],
+        error_category=GameCircleLoginRuntimeState.ErrorCategory.SCAN_REQUIRED,
+        checked_at=timezone.now(),
+        outer_verified_at=None,
+    )
+
+    status = Client().get("/auth/status").json()
+
+    assert status["state"] == GameCircleLoginRuntimeState.OuterState.LOGIN_REQUIRED
+    assert status["can_open_login"] is True
+    assert status["reason"] == "微信登录态已失效，请重新扫码"
+
+
+@pytest.mark.django_db
 def test_browser_login_status_reports_outer_session_and_current_game_frame_separately():
     GameCircleLoginRuntimeState.objects.create(
         outer_state=GameCircleLoginRuntimeState.OuterState.OUTER_READY,
         frame_state=GameCircleLoginRuntimeState.FrameState.READY,
-        error_category=GameCircleLoginRuntimeState.ErrorCategory.NONE,
-        checked_at=timezone.now(),
+            error_category=GameCircleLoginRuntimeState.ErrorCategory.NONE,
+            checked_at=timezone.now(),
+            outer_verified_at=timezone.now(),
     )
     status = Client().get("/auth/status").json()
 
@@ -159,6 +179,26 @@ def test_dashboard_explicitly_marks_missing_author_mute_observation_as_unknown()
     assert response.status_code == 200
     assert "作者禁言状态：状态未知（尚未同步）" in response.content.decode()
     assert "author-mute-status is-unknown" in response.content.decode()
+
+
+@pytest.mark.django_db
+def test_dashboard_displays_only_the_local_author_nickname_projection():
+    user = get_user_model().objects.create_user(username="author-display", password="test-password")
+    post = OriginalPost.objects.create(
+        topic_id=981,
+        content_id="author-display",
+        source_appid="wx6d2454a8afcd9706",
+        content_text="待审核",
+        author_nick_name="展示作者",
+    )
+    client = Client()
+    client.force_login(user)
+
+    response = client.get(f"/?topic={post.topic_id}")
+
+    assert response.status_code == 200
+    assert response.content.decode().count("展示作者") >= 2
+    assert "作者未知" not in response.content.decode()
 
 
 @pytest.mark.django_db
@@ -327,7 +367,21 @@ def test_invalid_cdp_login_control_only_opens_controlled_chrome(mock_call):
 
     assert response.status_code == 302
     assert response.url == "/reports/"
-    mock_call.assert_called_once_with("OPEN_CONTROLLED_LOGIN")
+    assert mock_call.call_args_list == [call("OPEN_CONTROLLED_LOGIN"), call("CHECK_LOGIN")]
+
+
+@pytest.mark.django_db
+@patch("posts.views.GameCircleIpcClient.call", side_effect=[{"status": "CONTROLLED_SESSION_PAGE_OPENED"}, {"status": "CHECK_COMPLETED"}])
+def test_login_control_reports_a_recovered_session_without_claiming_it_opened_a_page(mock_call):
+    user = get_user_model().objects.create_user(username="cdp-login-ready", password="test-password")
+    client = Client()
+    client.force_login(user)
+
+    response = client.post("/auth/open-login/", {"return_to": "/admin/"}, follow=True)
+
+    assert response.status_code == 200
+    assert "已打开受控会话页并完成状态检查" in response.content.decode()
+    assert mock_call.call_args_list == [call("OPEN_CONTROLLED_LOGIN"), call("CHECK_LOGIN")]
 
 
 @pytest.mark.django_db
@@ -596,6 +650,64 @@ def test_dashboard_explains_duration_limited_video_with_historical_snapshot():
 
 
 @pytest.mark.django_db
+def test_dashboard_explains_distributed_video_sampling_with_historical_budget():
+    user = get_user_model().objects.create_user(
+        username="distributed-sampling", password="test-password"
+    )
+    post = OriginalPost.objects.create(topic_id=1012, content_id="distributed-video")
+    media = post.media.create(url="https://example.test/distributed.mp4", media_type="VIDEO")
+    VideoExtraction.objects.create(
+        post=post,
+        media=media,
+        media_fingerprint=media_fingerprint(media.url),
+        extractor_version=VIDEO_EXTRACTOR_VERSION,
+        status="PARTIAL",
+        error_summary="video_duration_distributed_sampling;frame_decode_failed",
+        duration_ms=90_000,
+        duration_limit_seconds=60,
+        sampled_intervals_ms=[[0, 20_000], [35_000, 55_000], [70_000, 90_000]],
+    )
+    client = Client()
+    client.force_login(user)
+
+    page = client.get("/", {"topic": post.topic_id}).content.decode()
+
+    explanation = (
+        "视频时长 90 秒，提取时采样预算 60 秒；已覆盖 "
+        "0:00–0:20、0:35–0:55、1:10–1:30，未覆盖其他时间，未执行 ASR。"
+    )
+    assert explanation in page
+    assert "video_duration_distributed_sampling" not in page
+    assert "frame_decode_failed" in page
+
+
+@pytest.mark.django_db
+def test_dashboard_keeps_distributed_sampling_code_when_its_range_is_missing():
+    user = get_user_model().objects.create_user(
+        username="missing-sampling-range", password="test-password"
+    )
+    post = OriginalPost.objects.create(topic_id=1013, content_id="missing-sampling-range")
+    media = post.media.create(url="https://example.test/missing-range.mp4", media_type="VIDEO")
+    VideoExtraction.objects.create(
+        post=post,
+        media=media,
+        media_fingerprint=media_fingerprint(media.url),
+        extractor_version=VIDEO_EXTRACTOR_VERSION,
+        status="PARTIAL",
+        error_summary="video_duration_distributed_sampling",
+        duration_ms=90_000,
+        duration_limit_seconds=60,
+    )
+    client = Client()
+    client.force_login(user)
+
+    page = client.get("/", {"topic": post.topic_id}).content.decode()
+
+    assert "video_duration_distributed_sampling" in page
+    assert "未覆盖其他时间，未执行 ASR。" not in page
+
+
+@pytest.mark.django_db
 def test_operations_dashboard_shows_sink_status_and_only_restore_transition():
     user = get_user_model().objects.create_user(username="sink-status", password="test-password")
     OriginalPost.objects.create(topic_id=1003, content_id="sunk-content", status=8)
@@ -770,6 +882,50 @@ def test_dashboard_rejects_operation_for_post_deleted_from_management_queue(monk
 
     assert response.status_code == 302
     assert not ReviewTask.objects.filter(post=post).exists()
+
+
+@pytest.mark.django_db
+def test_dashboard_allows_deleted_post_author_unmute_without_post_read(monkeypatch):
+    monkeypatch.setattr(runtime, "enable_upstream_writes", True)
+    monkeypatch.setattr(runtime, "enable_unmute_writes", True)
+    user = get_user_model().objects.create_user(username="deleted-author-action")
+    post = OriginalPost.objects.create(
+        topic_id=1003,
+        content_id="deleted-author-action-content",
+        status=POST_STATUS_DELETED,
+        source_appid="wx-game",
+        author_openid="deleted-author",
+    )
+    source = object()
+    executed = []
+
+    @contextmanager
+    def source_session(_post):
+        yield source
+
+    def execute(*args, **kwargs):
+        executed.append(kwargs)
+        assert kwargs["action"] == RecommendedAction.UNMUTE
+        assert kwargs["source"] is source
+        assert kwargs["upstream_payload"] == {"author_openid": "deleted-author"}
+        return SimpleNamespace(result_code="OK")
+
+    monkeypatch.setattr("posts.views._source_for_post", source_session)
+    monkeypatch.setattr("posts.views.execute_confirmed_operation", execute)
+    client = Client()
+    client.force_login(user)
+
+    page = client.get(f"/?appid={post.source_appid}&topic={post.topic_id}").content.decode()
+    assert 'data-operation="MUTE"' in page
+    assert 'data-operation="UNMUTE"' in page
+
+    response = client.post(
+        f"/posts/{post.topic_id}/operate/UNMUTE/",
+        {"reason": "作者状态核验后解除禁言", "confirmation_key": "deleted-author-unmute"},
+    )
+
+    assert response.status_code == 302
+    assert len(executed) == 1
 
 
 @pytest.mark.django_db

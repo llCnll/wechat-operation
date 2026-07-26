@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import re
 import unicodedata
 from dataclasses import dataclass
@@ -10,6 +11,7 @@ from pathlib import Path
 
 from config.settings import runtime
 from jobs.models import BackgroundJob
+from jobs.services import JobTerminalError
 from jobs.task_types import VIDEO_EXTRACT_TASK
 from posts.models import MediaType
 
@@ -19,6 +21,7 @@ from .video import (
     VideoExtractionError,
     VideoLimitError,
     VideoMediaReader,
+    VideoToolCommandError,
     candidate_times,
     dhash,
     extract_audio,
@@ -27,12 +30,14 @@ from .video import (
     probe_video,
     qr_present,
     safe_error,
+    sampling_intervals,
     video_workdir,
 )
 
 VIDEO_EXTRACTOR_VERSION = "v3"
 QR_CONTIGUOUS_GAP_MS = 1_000
 OCR_TEXT_SIMILARITY_THRESHOLD = 0.92
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -75,6 +80,27 @@ def _set_status(extraction: VideoExtraction, status: str, error: str = "", frame
     extraction.save(update_fields=("status", "error_summary", "frame_count", "updated_at"))
 
 
+def _log_terminal_failure(
+    job: BackgroundJob,
+    extraction: VideoExtraction,
+    error: str,
+    *,
+    cause: Exception | None = None,
+) -> None:
+    """Log enough safe context to diagnose a failed attempt without media material."""
+    extra = {
+        "task_id": job.pk,
+        "topic_id": extraction.post.topic_id,
+        "result_code": error,
+    }
+    if isinstance(cause, VideoToolCommandError):
+        extra.update(
+            video_stage=cause.stage,
+            process_exit_code=cause.return_code,
+        )
+    logger.warning("视频提取失败", extra=extra)
+
+
 def _store_qr(extraction: VideoExtraction, span: QrSpan, sequence: int) -> None:
     VideoEvidence.objects.update_or_create(
         extraction=extraction,
@@ -95,8 +121,10 @@ def extract_video_handler(job: BackgroundJob) -> None:
     )
     media = extraction.media
     if media.media_type != MediaType.VIDEO:
-        _set_status(extraction, VideoExtractionStatus.FAILED, "video_media_invalid")
-        return
+        error = "video_media_invalid"
+        _set_status(extraction, VideoExtractionStatus.FAILED, error)
+        _log_terminal_failure(job, extraction, error)
+        raise JobTerminalError(error)
     _set_status(extraction, VideoExtractionStatus.RUNNING)
     VideoEvidence.objects.filter(extraction=extraction).delete()
     partial: list[str] = []
@@ -109,20 +137,25 @@ def extract_video_handler(job: BackgroundJob) -> None:
             if extraction.duration_limit_seconds is None:
                 extraction.duration_limit_seconds = runtime.video_max_duration_seconds
             extraction.duration_ms = probe.duration_ms
-            extraction.save(
-                update_fields=("duration_ms", "duration_limit_seconds", "updated_at")
+            extraction.sampled_intervals_ms = []
+            intervals = sampling_intervals(
+                probe.duration_ms, extraction.duration_limit_seconds * 1000
             )
-            if probe.duration_ms > extraction.duration_limit_seconds * 1000:
-                _set_status(
-                    extraction,
-                    VideoExtractionStatus.SKIPPED_LIMIT,
-                    "video_duration_limit_exceeded",
+            extraction.save(
+                update_fields=(
+                    "duration_ms",
+                    "duration_limit_seconds",
+                    "sampled_intervals_ms",
+                    "updated_at",
                 )
-                return
+            )
+            distributed_sampling = len(intervals) > 1
+            if distributed_sampling:
+                partial.append("video_duration_distributed_sampling")
             hashes: list[int] = []
             selected: list[tuple[int, Path, bool]] = []
             qr_spans: list[QrSpan] = []
-            for timestamp in candidate_times(probe.duration_ms):
+            for timestamp in candidate_times(probe.duration_ms, intervals):
                 frame = directory / f"frame-{timestamp}.jpg"
                 try:
                     extract_frame(video, timestamp, frame)
@@ -152,6 +185,8 @@ def extract_video_handler(job: BackgroundJob) -> None:
                     continue
                 hashes.append(value)
                 selected.append((timestamp, frame, False))
+            extraction.sampled_intervals_ms = [list(interval) for interval in intervals]
+            extraction.save(update_fields=("sampled_intervals_ms", "updated_at"))
             for sequence, span in enumerate(qr_spans):
                 _store_qr(extraction, span, sequence)
             selected.sort(key=lambda item: (not item[2], item[0]))
@@ -182,7 +217,7 @@ def extract_video_handler(job: BackgroundJob) -> None:
                         )
                         accepted_ocr_text.append(normalized_ocr_text(text))
                     ocr_sequence += 1
-            if probe.has_audio:
+            if probe.has_audio and not distributed_sampling:
                 try:
                     audio = directory / "audio.wav"
                     extract_audio(video, audio)
@@ -208,8 +243,10 @@ def extract_video_handler(job: BackgroundJob) -> None:
         _set_status(extraction, VideoExtractionStatus.SKIPPED_LIMIT, safe_error(exc), frame_count)
         return
     except Exception as exc:
-        _set_status(extraction, VideoExtractionStatus.FAILED, safe_error(exc), frame_count)
-        return
+        error = safe_error(exc)
+        _set_status(extraction, VideoExtractionStatus.FAILED, error, frame_count)
+        _log_terminal_failure(job, extraction, error, cause=exc)
+        raise JobTerminalError(error) from exc
     _set_status(
         extraction,
         VideoExtractionStatus.PARTIAL if partial else VideoExtractionStatus.SUCCEEDED,

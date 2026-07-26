@@ -3,8 +3,8 @@
 ## 部署边界
 
 - 日常只启动一个 `uv run python -m service_supervisor`。Supervisor 是受控 Chrome、Web、Scheduler、游戏圈会话续接 Worker、实时采集 Worker、人工补采 Worker、指标快照 Worker、AI Worker 与禁言维护 Worker 的唯一进程所有者；它使用独占文件锁防止第二个实例接管同一运行态。
-- 停止整套服务时，在启动 Supervisor 的终端按 `Ctrl+C` 并等待命令退出；不要只终止外层 `uv` 或直接关闭受控 Chrome。Supervisor 会将终止信号转换为受管服务的优雅退出。若系统强制终止了进程，下一次启动会仅回收带项目专属命令、资料目录和调试端口标识的遗留进程，再创建一组新进程；受控 Chrome 连续异常退出三次会停止自动重试，避免反复弹窗，需查看脱敏日志后在页面手动重启。
-- 所有可变运行态均位于 `runtime/`：`runtime/.env`、`runtime/operations.sqlite3`、收集后的 `runtime/static/`、`runtime/worker-locks/`、`runtime/supervisor/` 与日志。`runtime/supervisor/` 包含控制令牌、服务状态、心跳和日志，代码包和版本控制均应排除整个目录。
+- 停止整套服务时，在启动 Supervisor 的终端按 `Ctrl+C` 并等待命令退出；不要只终止外层 `uv` 或直接关闭受控 Chrome。Supervisor 会按业务 Worker、会话、受控 Chrome、Web 的顺序停止当前服务。若 Supervisor 被强制终止，Web 和 Worker 会在本机实例租约过期后自行退出，`desired` 运行意图保持不变；遗留 Chrome 可以保留，下一次 Supervisor 启动会先清理专用 `127.0.0.1:9222` 再创建全新会话 owner。该端口只能用于本项目受控 Chrome。受控 Chrome 连续异常恢复三次失败后会停止自动重试，需查看脱敏日志后在页面手动重启。
+- 所有可变运行态均位于 `runtime/`：`runtime/.env`、`runtime/operations.sqlite3`、收集后的 `runtime/static/`、`runtime/worker-locks/`、`runtime/supervisor/` 与日志。`runtime/supervisor/` 包含控制令牌、服务状态、实例租约、心跳和日志，代码包和版本控制均应排除整个目录。
 - 数据库位于 `runtime/operations.sqlite3`。离线文件备份前必须停止整个 Supervisor，再复制数据库文件及可能存在的 `-wal`、`-shm` 文件；只停止部分 Worker 不能保证没有 Web 或其他受管服务写入。
 - 首次部署在启动 Supervisor 前，执行 Agent 必须手工运行 `uv run python manage.py migrate` 和 `uv run python manage.py createsuperuser`；不得记录管理员密码。后续迁移、静态资源收集和默认策略检查由 Supervisor 幂等执行。
 
@@ -41,13 +41,15 @@ Compress-Archive -Path $items.FullName -DestinationPath ../wechat-operation.zip 
 
 ## 会话与密钥
 
-- Chrome CDP 仅由 Supervisor 启动的受控 Chrome 使用；它采用独立 profile 且只监听 loopback，不保存 Cookie、令牌或运营者身份标识。管理详情中的发帖作者用户 ID仅可按产品定义保存到原创帖和作者禁言状态，用于禁言管理与历史关联，不得写入日志或导出。
+- Chrome CDP 仅由 Supervisor 启动的受控 Chrome 使用；它采用独立 profile 且只监听固定的 `127.0.0.1:9222`，不保存 Cookie、令牌或运营者身份标识。Supervisor 以 CDP browser generation 判断 Chrome 健康，不能以启动器 PID 变化判定浏览器死亡；启动时优先请求 CDP 关闭旧浏览器，端口仍占用才终止监听进程。不得将其他浏览器或本机程序绑定到该端口。管理详情中的发帖作者用户 ID仅可按产品定义保存到原创帖和作者禁言状态，用于禁言管理与历史关联，不得写入日志或导出。
 - `game_circle_session` 是唯一持有 CDP、outer token、来源身份 token 与系统自建 target 的常驻服务。Web、采集、指标、AI、回填与一次性任务只通过固定、仅监听 `127.0.0.1`、且由 Supervisor 注入独立 capability 的 IPC 提交 scope 和已批准的业务参数；IPC 不接受 CDP 命令、JavaScript、URL、target ID、路径或认证材料。无 capability 的连接在业务解析前拒绝；不得复制或记录 capability。它阻止没有运行时进程权限的本机调用方，但不能替代操作系统账户隔离。
+
+受控 Chrome 中的“受控会话页”由该服务唯一登记。运营人员需要扫码、核对页面状态或在 Network 中观察 `getappinfo` 时，应从控制台点击“查看受控会话页”；检查外层会话和建立 Frame 都使用这同一页面。系统不会接管任意人工新开标签，也不会显示 target ID、完整 URL、Cookie 或 token。若该页显示扫码、token 在验证中消失，或 Frame 前复读 token 失败，控制台会显示会话未就绪，不能以历史检查成功继续处理来源操作。
 - 会话服务按 AppID 维护一个 ACTIVE 及零到多个 RETIRING lease。新 lease 完整验证后才发布；旧 lease 仅在退役等待结束且请求访问归零后关闭它自己的 HOME/PLUGIN tab。因为 Chrome 已由 Supervisor 管理，受控 target 可以回收至零 tab；手动打开的未知 tab 永不接管、使用或关闭。
-- 首次部署执行 `mkdir -p runtime && cp .env.example runtime/.env`。日常 AI/OCR 和人工处置授权均从系统配置首页的 Pipeline 保存；`runtime/.env` 仅用于后台不可用时的运维恢复。
-- AI/OCR 凭据只通过 `AI_*`、`OCR_*` 运行时配置注入。系统配置首页保存时已有密钥不会回显；轮换后由 Pipeline 重启 AI Worker。
+- 首次部署执行 `mkdir -p runtime && cp .env.example runtime/.env`。日常 AI/OCR 和人工处置授权均从系统配置首页的“按服务管理”保存；`runtime/.env` 仅用于后台不可用时的运维恢复。
+- AI/OCR 凭据只通过 `AI_*`、`OCR_*` 运行时配置注入。系统配置首页保存时已有密钥不会回显；轮换后由服务卡重启 AI Worker。
 - 运行配置保存后的重启提示使用与 Pipeline 一致的中文服务名；按提示定位对应节点并点击“重启”，无需识别内部 service key。
-- `SESSION_REPAIR_ENABLED`、`SESSION_KEEPALIVE_ENABLED` 只需重启“游戏圈会话服务”和“自动调度器”；不重启 Web 或 AI 自动处置 Worker。
+- `SESSION_REPAIR_ENABLED` 只需重启“游戏圈会话服务”和“自动调度器”；会话保活的启停和节奏在“自动任务生产者”保存后由下一轮 Scheduler 自动加载，无需重启。
 - 启用自动修复后，当前 scope 的 HOME 或 Frame 丢失会触发候选 lease 替换；候选验证成功才发布新 Frame。损坏 lease 不会阻止重建，也不会在重复检查中积累未发布 HOME。
 - 会话服务启动、建立 Frame、检查外层会话、自动修复和保活使用明确的建立意图：健康 lease 会复用已登记 HOME/Frame，不会因重复点击创建空闲 HOME；已确认损坏时，候选失败显示“Frame 未就绪”，不得沿用旧的“Frame 有效”文案。
 - session Worker 替换期间若 Chrome generation 在限定时间未就绪，Supervisor 保留 replacement Chrome 并记录可重试的启动失败；后续调和只等待该实例，除非它已退出，不会反复关闭并重开浏览器。
@@ -59,9 +61,9 @@ Compress-Archive -Path $items.FullName -DestinationPath ../wechat-operation.zip 
 | 触发条件 | 系统操作者 | 运营人员动作 | 预期结果 |
 | --- | --- | --- | --- |
 | 受控 Chrome 被关闭或 session Worker 被替换 | Supervisor 将其视为 session owner 更换：重新启动受控 Chrome，再启动游戏圈会话服务；服务自动建立 HOME 与当前游戏 Frame。 | 无；等待状态从“建立中”收敛。 | 外层会话与 Frame 均有效时，来源任务可继续使用新 lease。 |
-| 外层会话失效、显示“需扫码登录” | 会话服务登记唯一登录等待，不自动创建或聚焦登录页。 | 在“受控 Chrome 会话”点击“打开登录页”，完成扫码。 | 会话服务复用该 HOME 建立 Frame；成功前不会发布 lease。 |
+| 外层会话失效、显示“需扫码登录” | 会话服务登记唯一登录等待，不自动创建或聚焦登录页；扫码后复用同一 HOME 建立 Frame。 | 仅点击一次“打开登录页”并完成扫码，等待状态收敛；恢复中不重复点击。 | 成功前不会发布 lease；晚到的重复打开请求不会创建额外 HOME。 |
 | 外层有效但 Frame 未就绪 | 会话服务仅投影未就绪，不隐式恢复。 | 点击顶部 Frame 状态或“建立当前游戏 Frame”。 | 建立并最小只读验证成功后，Frame 显示有效。 |
-| 需要确认外层会话 | 会话服务只检查 HOME，不切换游戏、不建立候选 Frame。 | 在“受控 Chrome 会话”点击“检查外层会话”。 | 保留既有 Frame 状态；Frame 已有效时仍提供保活入口。 |
+| 需要确认外层会话 | 会话服务只检查 HOME，不切换游戏、不建立候选 Frame。 | 在“按服务管理 → 游戏圈访问”点击“检查外层会话”。 | 保留既有 Frame 状态；Frame 已有效时仍提供保活入口。 |
 | 需要主动刷新来源身份 | 游戏圈会话服务消费手动保活 Job，以候选会话执行刷新。 | 在“游戏圈会话服务”点击“保活当前游戏 Frame”。 | 只有新 lease 发布才成功；失败按有限重试记录 Job，旧 lease 继续可用。 |
 | 需要更换业务游戏 | 当前操作游戏节点更新全局 scope，并请求对应 Frame 建立。 | 在“当前操作游戏”选择游戏并点击“切换并建立 Frame”。 | 后续任务使用新 scope；已经开始的 Job 保持其冻结 scope。 |
 
@@ -70,7 +72,7 @@ Compress-Archive -Path $items.FullName -DestinationPath ../wechat-operation.zip 
 1. 使用已授权、明确可查看的样本帖子点击“同步状态与指标”，确认单帖显示“状态未知”“已确认未禁言”“当前游戏禁言”“全局禁言”或“当前游戏及全局禁言”之一；禁言管理会额外显示已明确设置自动续期意图、但正在等待 Worker 重新核验的作者。
 2. 对同一作者的另一篇已同步帖子，确认禁言管理的“历史帖子”只返回当前游戏上下文的关联原创帖；切换游戏不得看到其他游戏的本地禁言。
 3. 真实禁言属于高风险写操作：仅可对运营负责人明确授权的测试账号执行一次，记录目标帖子与操作者的内部工单关联。确认审计中仅有一次写入，随后详情回读最多四次、总等待不超过 20 秒；不得以重试方式补发写请求。写接口失败时即使状态已变化也必须保留 `ACTION_FAILED`。
-4. “标记为自动续期”仅是本服务按“作者 + 当前游戏”维护的永久禁言意图：该操作只同步写入本地标记，不立即调用上游平台。禁言维护 Worker 每 12 小时仅处理距离到期不足 5 天或当前游戏禁言时间为 0 的已标记作者；先以用户详情回读，若有效期仍至少 5 天则跳过，否则必要时按“解除 → 回读 → 禁言 30 天 → 回读”续期。取消自动续期只停止续期，不会解除当前上游禁言。禁言管理的“刷新禁言列表用户状态”只入队一个只读任务，逐位刷新自动续期或仍有效禁言的列表作者；“扫描全量帖子作者，补充被禁言用户”则按作者去重扫描全量帖子，并只将仍禁言作者加入列表，不设置自动续期。两者均不执行禁言或解除。系统配置中的“执行一次”只入队；Worker 未运行时任务保持等待。
+4. “标记为自动续期”仅是本服务按“作者 + 当前游戏”维护的永久禁言意图：该操作只同步写入本地标记，不立即调用上游平台。禁言维护 Worker 由自动任务生产者的受限定时规则入队（默认每日 00:00、12:00），仅处理距离到期不足 5 天或当前游戏禁言时间为 0 的已标记作者；先以用户详情回读，若有效期仍至少 5 天则跳过，否则必要时按“解除 → 回读 → 禁言 30 天 → 回读”续期。取消自动续期只停止续期，不会解除当前上游禁言。禁言管理的“刷新禁言列表用户状态”只入队一个只读任务，逐位刷新自动续期或仍有效禁言的列表作者；“扫描全量帖子作者，补充被禁言用户”则按作者去重扫描全量帖子，并只将仍禁言作者加入列表，不设置自动续期。两者均不执行禁言或解除。系统配置中的“执行一次”只入队；Worker 未运行时任务保持等待。
 
 ### 一次性历史作者状态回填
 
@@ -86,7 +88,7 @@ uv run python manage.py enqueue_author_mute_status_backfill
 
 ## 任务恢复
 
-- Job 类型、生产者、消费者与调度时间表见[系统总览](system-overview.md)。所有 Worker 均由 Supervisor 启停；不要手工运行会话服务绕过 capability 注入。`run_ingestion_worker` 保留为实时命令的兼容别名。
+- Job 类型、生产者、消费者与调度时间表见[系统总览](system-overview.md)。所有 Worker 均由 Supervisor 启停；不要手工运行会话服务绕过 capability 注入。Supervisor 重启会先停止运行态中可确认身份的既有 Web/Worker，再按持久化 `desired` 恢复；不要在此期间手工拉起同职责进程。`run_ingestion_worker` 保留为实时命令的兼容别名。
 - 视频 Worker 默认关闭。工具安装、受控样本预检、ASR 降级和停止/回滚步骤见[视频审核手册](video-review-runbook.md)。失败时保持关闭，视频任务记录脱敏状态；仅空文字输入且媒体证据不足时进入重点人工核验。
 - SQLite 中每个 Worker 职责都只能运行一个实例。实时采集和人工补采分别串行处理所属任务：长时间历史补采或范围互动刷新不会使后续 15 分钟采集、状态巡检积压。AI 审核 Worker 独立消费 OCR/AI 队列，不会被任一采集队列阻塞。
 - 契约变更或会话失效会保留已脱敏错误摘要。修复后重新排队，不应修改数据库中的会话字段。
@@ -97,7 +99,7 @@ uv run python manage.py enqueue_author_mute_status_backfill
 | 现象 | 首先检查 | 恢复方式 |
 | --- | --- | --- |
 | 没有新增帖子 | Pipeline 中游戏圈会话服务、受控 Chrome 会话、Scheduler 与实时采集 Worker 是否运行 | 先恢复游戏圈会话服务与受控 Chrome 登录，再在 Pipeline 重启帖子采集 Worker；停机超过 30 分钟时在“帖子采集 Worker”创建历史补采。 |
-| 顶部“外层会话”或“Frame”状态异常 | 先看文案：`需扫码登录`、`Chrome 未启动`、`Frame 未就绪` 或 `状态待检查` | 只有“需扫码登录”可点击，并只在受控 Chrome 打开固定公众平台登录页后手动扫码；`Frame 未就绪` 使用“建立当前游戏 Frame”，其余状态不打开登录页。若 Chrome 未启动，在 Supervisor 中重启游戏圈会话服务；不要手工启动浏览器或在工作台浏览器直接登录。 |
+| 顶部“外层会话”或“Frame”状态异常 | 先看文案：`正在恢复会话`、`需扫码登录`、`Chrome 未启动`、`Frame 未就绪` 或 `状态待检查` | “正在恢复会话”表示服务保留了自身新建的登录路由 target，先等待平台自动回到 Home；可点击入口将该 target 前台显示，只有稳定停留在扫码页时才需人工扫码。`Frame 未就绪` 使用“建立当前游戏 Frame”，其余状态不打开登录页。若 Chrome 未启动，在 Supervisor 中重启游戏圈会话服务；不要手工启动浏览器或在工作台浏览器直接登录。 |
 | 来源任务提示等待会话刷新 | `game_circle_session` 服务、当前操作游戏和刷新 Job 的脱敏摘要 | 保持该服务运行；它会先从新 HOME 自动重建。仅摘要为“需要人工扫码”时，才在受控 Chrome 中扫码后重新创建/等待刷新任务；不得重放人工写操作。 |
 | 任务长期 `PENDING` | 任务的 `task_type` 与 Pipeline 对应 Worker | 在 Pipeline 启动帖子采集 Worker（会同时启动两个采集服务）或 AI Worker；不要并行启动第二个相同职责实例。 |
 | 任务 `FAILED` | 系统配置与追溯台“后台任务”的脱敏 `error_summary` 与 checkpoint | 修复会话、配置或上游契约后重新入队；不要修改会话字段。 |
@@ -109,7 +111,7 @@ AI 自动沉底或屏蔽成功后，运营人员必须在内容管理的“AI �
 
 ## 自动采集调度
 
-自动调度仅针对系统配置中已选择的“当前操作游戏”，由 Supervisor 托管；不应另行执行常驻 Scheduler 命令。完整时间表见[系统总览](system-overview.md)。同一时间槽会复用已有任务；SQLite 部署仍只能运行一个 Scheduler Worker。`--once` 仅用于排障或验证当前时间槽。
+自动调度仅针对系统配置中已选择的“当前操作游戏”，由 Supervisor 托管；不应另行执行常驻 Scheduler 命令。运营人员在系统配置台“自动任务生产者”中独立暂停/恢复生产者或规则，并在规则管理弹窗中新增、调整或删除运行时点：定时规则只填写 `HH:MM`，间隔规则只填写分钟数，系统按模板反推并保存受限表达式。调度统一使用中国标准时间，保存后最多 30 秒生效。删除规则只停止未来自动入队，仍保留已入队 Job 与逻辑槽审计；暂停也不取消已有或人工 Job。完整时间表见[系统总览](system-overview.md)。SQLite 部署仍只能运行一个 Scheduler Worker；`--once` 仅用于排障或验证当前时间槽，若 Scheduler 正在运行会因专用锁拒绝执行。
 
 ### 漏采处理
 
@@ -126,6 +128,12 @@ uv run python manage.py enqueue_ingestion --appid wx6d2454a8afcd9706 --hours 6
 ## 运营分析互动刷新
 
 运营人员可在 `/reports/` 的“运营分析”中选择最多 31 个北京时间自然日，并点击“刷新本范围数据”。该操作只入队 `METRICS_REFRESH_WINDOW`，不会在 Web 请求内连接 Chrome。人工补采 Worker 按 `topic_id` 保存 checkpoint，成功帖子新增互动快照；原平台已删除的帖子会计入跳过数，传输或契约异常会记录失败帖子样本并继续处理其余帖子。再次手动触发同一范围会创建新任务并重新尝试失败帖子。刷新不修改帖子正文、媒体、投票、审核状态或任何上游状态。
+
+## 一次性作者状态回填
+
+`uv run python manage.py enqueue_author_mute_status_backfill` 只创建或恢复 `AUTHOR_MUTE_STATUS_BACKFILL_V2`，由人工补采 Worker 消费。任务对已有作者身份按当前游戏去重读取固定作者详情，并补齐昵称和禁言状态；只有本地缺少作者身份时才读取帖子详情。已删除且缺少作者身份的帖子会以脱敏计数跳过，不会推断“未禁言”。
+
+V2 检查点只保存范围、帖子游标、处理/跳过/失败计数和有限失败类别，不保存作者用户 ID、昵称、原始来源响应或认证信息。部署 V2 前必须确认没有待执行或运行中的旧 `AUTHOR_MUTE_STATUS_BACKFILL`；旧类型不被新版 Worker 认领，也没有 checkpoint 迁移路径。
 
 ## PostgreSQL 迁移阈值
 

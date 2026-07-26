@@ -1,5 +1,5 @@
 <header id="header" class="topbar{% if request.resolver_match.namespace == 'admin' %} admin-topbar{% endif %}">
-  <a class="brand" href="{% url 'operations-dashboard' %}"><span>O</span> 游戏圈运营</a>
+  <a class="brand" href="{% url 'operations-dashboard' %}"><span class="brand-icon" aria-hidden="true">{% include "posts/includes/lucide_icon.html" with name="orbit" %}</span> 游戏圈运营</a>
   <nav aria-label="主导航">
     <a {% if request.resolver_match.url_name == 'operations-dashboard' %}class="active"{% endif %} href="{% url 'operations-dashboard' %}">内容管理</a>
     <a {% if request.resolver_match.url_name == 'ai-operation-reviews' %}class="active"{% endif %} href="{% url 'ai-operation-reviews' %}">AI 操作复审</a>
@@ -8,6 +8,7 @@
   </nav>
   {% if request.user.is_authenticated %}
   <div class="topbar-actions">
+    <button class="operations-theme-toggle" type="button" data-operations-theme-toggle aria-label="切换至深色配色" aria-pressed="false" title="切换页面配色"><span class="operations-theme-toggle-sun" aria-hidden="true">{% include "posts/includes/lucide_icon.html" with name="sun" %}</span><span class="operations-theme-toggle-moon" aria-hidden="true">{% include "posts/includes/lucide_icon.html" with name="moon" %}</span></button>
     <form class="cdp-login-status is-checking" data-cdp-login-status method="post" action="{% url 'open-controlled-login' %}" title="正在读取受控微信外层会话状态">{% csrf_token %}<input type="hidden" name="return_to" value="{{ request.get_full_path }}"><button type="submit" disabled aria-live="polite"><span class="cdp-mode">会话</span><i></i><b data-cdp-login-label>检测中</b></button></form>
     <form class="cdp-frame-status is-checking" data-cdp-frame-status method="post" action="{% url 'build-current-game-frame' %}" title="正在读取当前操作游戏的来源 Frame 状态">{% csrf_token %}<input type="hidden" name="return_to" value="{{ request.get_full_path }}"><button type="submit" disabled aria-live="polite"><span class="cdp-mode">Frame</span><i></i><b data-cdp-frame-label>检测中</b></button></form>
     <div class="account">{{ request.user.username }} <a href="{% url 'admin:logout' %}">退出</a></div>

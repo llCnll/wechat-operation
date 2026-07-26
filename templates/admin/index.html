@@ -6,143 +6,47 @@
 
 {% block content %}
 <section class="console-hero console-hero-compact">
-  <div>
-    <p>SYSTEM CONFIGURATION</p>
+  <div class="console-hero-copy">
+    <div class="console-hero-kicker"><span class="console-lucide" aria-hidden="true">{% include "posts/includes/lucide_icon.html" with name="orbit" %}</span><p>SYSTEM CONFIGURATION</p></div>
     <h1>系统配置与追溯台</h1>
     <span>维护审核策略与受控游戏目录；采集、审核、AI 和操作记录只用于追溯核验。</span>
   </div>
 </section>
 
-<section class="console-pipeline {% if admin_console.pipeline_ready %}is-ready{% endif %}">
+<section class="console-runtime-console {% if admin_console.runtime_console.readiness.core_review_ready %}is-ready{% endif %}">
   <div class="console-pipeline-heading">
     <div>
-      <p>INITIALIZATION PIPELINE</p>
-      <h2>初始化与运行状态</h2>
-      {% if admin_console.pipeline_ready %}
-      <span>核心审核能力已就绪。可展开查看诊断与可选能力。</span>
+      <p><span class="console-lucide" aria-hidden="true">{% include "posts/includes/lucide_icon.html" with name="panel-top" %}</span> RUNTIME OVERVIEW</p>
+      <h2>运行概览</h2>
+      {% if admin_console.runtime_console.readiness.core_review_ready %}
+      <span>核心审核能力已就绪；可按流程确认恢复路径，或按服务进行诊断与维护。</span>
       {% else %}
-      <span>下一步：{{ admin_console.first_blocked_pipeline_node.label }} · {{ admin_console.first_blocked_pipeline_node.next_step }}</span>
+      <span>下一步：{{ admin_console.runtime_console.first_blocked.label }} · {{ admin_console.runtime_console.first_blocked.action_label }}</span>
       {% endif %}
     </div>
-    <time>检查于 {{ admin_console.pipeline_checked_at|date:"m-d H:i:s" }}</time>
+    <time>检查于 {{ admin_console.runtime_console.checked_at|date:"m-d H:i:s" }}</time>
   </div>
-  {% if admin_console.supervisor_error %}
-  <div class="console-pipeline-alert">{{ admin_console.supervisor_error }}。请在终端启动 `uv run python -m service_supervisor`。</div>
-  {% endif %}
-  <details class="console-pipeline-details" {% if not admin_console.pipeline_ready %}open{% endif %}>
-    <summary>{% if admin_console.pipeline_ready %}查看运行诊断与可选配置{% else %}查看初始化步骤与配置{% endif %}</summary>
-  <div class="console-pipeline-grid">
-    {% for node in admin_console.pipeline %}
-    <article class="console-pipeline-node {% if node.ready %}is-ready{% else %}is-blocked{% endif %}{% if node.optional %} is-optional{% endif %}">
-      <div class="console-pipeline-node-heading">
-        <div class="console-pipeline-node-state">
-          <span class="console-pipeline-node-step">{{ forloop.counter|stringformat:"02d" }}</span>
-          <span>{% if node.key == "active_game_scope" %}{% if node.ready %}已配置{% else %}待选择{% endif %}{% elif node.ready %}已就绪{% elif node.optional %}可选{% else %}待处理{% endif %}</span>
-        </div>
-        <div class="console-pipeline-node-indicators">
-          <i aria-hidden="true"></i>
-          {% if node.key == "controlled_chrome" or node.key == "game_circle_session" or node.key == "controlled_chrome_session" or node.key == "ocr" or node.key == "video_extraction" or node.key == "writes" or node.key == "ai_moderation" or node.key == "mute_maintenance" %}
-          <button class="console-pipeline-info" type="button" aria-describedby="pipeline-info-{{ node.key }}" aria-label="查看{{ node.label }}说明">i<span id="pipeline-info-{{ node.key }}" class="console-pipeline-tooltip" role="tooltip">{{ node.description }}</span></button>
-          {% endif %}
-        </div>
-      </div>
-      <strong>{{ node.label }}</strong>
-      <small>{{ node.reason }}</small>
-      {% if node.key != "active_game_scope" %}<span class="console-pipeline-node-check">
-        <span>检测 {{ node.checked_at|date:"Y-m-d H:i:s" }}</span>
-        <span>下一步：{{ node.next_step }}</span>
-      </span>{% endif %}
-      {% if node.key == "ai" %}
-      <button type="button" data-config-dialog="ai" aria-haspopup="dialog">配置 AI 审核</button>
-      {% elif node.key == "ocr" %}
-      <button type="button" class="is-quiet" data-config-dialog="ocr" aria-haspopup="dialog">配置 OCR</button>
-      {% elif node.key == "video_extraction" %}
-      <div class="console-service-actions">
-        <button type="button" class="is-quiet" data-config-dialog="video" aria-haspopup="dialog">配置视频审核</button>
-        {% if node.running %}
-        <form method="post" action="{% url 'supervisor-control-service' service=node.service action='restart' %}">{% csrf_token %}<input type="hidden" name="return_to" value="/admin/"><button type="submit">重启</button></form>
-        <form method="post" action="{% url 'supervisor-control-service' service=node.service action='stop' %}">{% csrf_token %}<input type="hidden" name="return_to" value="/admin/"><button class="is-quiet" type="submit">停止</button></form>
-        {% else %}
-        <form method="post" action="{% url 'supervisor-control-service' service=node.service action='start' %}">{% csrf_token %}<input type="hidden" name="return_to" value="/admin/"><button type="submit">启动</button></form>
-        {% endif %}
-        <button class="is-quiet" type="button" data-supervisor-logs="{% url 'supervisor-service-logs' service=node.service %}" data-supervisor-log-label="{{ node.label }}">日志</button>
-      </div>
-      {% elif node.key == "writes" %}
-      <button type="button" class="is-quiet" data-config-dialog="writes" aria-haspopup="dialog">管理授权</button>
-      {% elif node.key == "policy" %}
-      <a href="{% url 'admin:reviews_policyversion_changelist' %}">管理策略</a>
-      {% elif node.key == "controlled_chrome_session" %}
-      {% if node.session_service_running %}
-      <div class="console-service-actions">
-        <form method="post" action="{% url 'open-controlled-login' %}">{% csrf_token %}<input type="hidden" name="return_to" value="/admin/"><button type="submit">打开登录页</button></form>
-        <form method="post" action="{% url 'check-outer-session' %}">{% csrf_token %}<input type="hidden" name="return_to" value="/admin/"><button class="is-quiet" type="submit">检查外层会话</button></form>
-      </div>
-      {% endif %}
-      {% elif node.key == "active_game_scope" %}
-      <div class="console-active-game-actions">
-        <details class="console-active-game-switch" {% if not admin_console.active_game_scope %}open{% endif %}>
-          <summary>更换操作游戏</summary>
-          <form method="post" action="{% url 'set-active-game-scope' %}">{% csrf_token %}<input type="hidden" name="return_to" value="/admin/"><label>操作游戏<select name="appid" required>{% for game in admin_console.manual_ingestion_games %}<option value="{{ game.appid }}" {% if game.appid == admin_console.manual_ingestion_default_appid %}selected{% endif %}>{{ game.name }}</option>{% endfor %}</select></label><button type="submit">切换并建立 Frame</button></form>
-          <form method="post" action="{% url 'sync-managed-game-catalog' %}">{% csrf_token %}<input type="hidden" name="return_to" value="/admin/"><button class="is-quiet" type="submit">刷新可管理游戏目录</button></form>
-        </details>
-      </div>
-      {% elif node.key == "ingestion" %}
-      <details class="console-ingestion-details" {% if not node.ready %}open{% endif %}>
-        <summary>管理采集</summary>
-        <div class="console-ingestion-details-content">
-          <div class="console-service-actions">
-            <button type="button" class="is-quiet" data-config-dialog="manual-ingestion" aria-haspopup="dialog">创建历史补采</button>
-            {% if node.running %}
-            <form method="post" action="{% url 'supervisor-control-ingestion-workers' action='restart' %}">{% csrf_token %}<input type="hidden" name="return_to" value="/admin/"><button type="submit">重启两个 Worker</button></form>
-            <form method="post" action="{% url 'supervisor-control-ingestion-workers' action='stop' %}">{% csrf_token %}<input type="hidden" name="return_to" value="/admin/"><button class="is-quiet" type="submit">停止两个 Worker</button></form>
-            {% else %}
-            <form method="post" action="{% url 'supervisor-control-ingestion-workers' action='start' %}">{% csrf_token %}<input type="hidden" name="return_to" value="/admin/"><button type="submit">启动两个 Worker</button></form>
-            {% endif %}
-          </div>
-          <div class="console-ingestion-subservices">
-            {% for service in node.subservices %}
-            <div><span class="{% if service.running %}is-running{% else %}is-stopped{% endif %}">{{ service.label }}</span><button class="is-quiet" type="button" data-supervisor-logs="{% url 'supervisor-service-logs' service=service.service %}" data-supervisor-log-label="{{ service.label }}">日志</button></div>
-            {% endfor %}
-          </div>
-        </div>
-      </details>
-      {% elif node.key == "mute_maintenance" %}
-      <div class="console-service-actions">
-        {% if node.running %}
-        <form method="post" action="{% url 'supervisor-control-service' service=node.service action='restart' %}">{% csrf_token %}<input type="hidden" name="return_to" value="/admin/"><button type="submit">重启</button></form>
-        <form method="post" action="{% url 'supervisor-control-service' service=node.service action='stop' %}">{% csrf_token %}<input type="hidden" name="return_to" value="/admin/"><button class="is-quiet" type="submit">停止</button></form>
-        {% else %}
-        <form method="post" action="{% url 'supervisor-control-service' service=node.service action='start' %}">{% csrf_token %}<input type="hidden" name="return_to" value="/admin/"><button type="submit">启动</button></form>
-        {% endif %}
-        <form method="post" action="{% url 'enqueue-permanent-mute-renewal' %}">{% csrf_token %}<input type="hidden" name="return_to" value="/admin/"><button class="is-quiet" type="submit">执行一次</button></form>
-        <button class="is-quiet" type="button" data-supervisor-logs="{% url 'supervisor-service-logs' service=node.service %}" data-supervisor-log-label="{{ node.label }}">日志</button>
-      </div>
-      {% elif node.service %}
-      <div class="console-service-actions">
-        {% if node.service == "web" %}
-        <form method="post" action="{% url 'supervisor-control-service' service=node.service action='restart' %}">{% csrf_token %}<input type="hidden" name="return_to" value="/admin/"><button type="submit">重启 Web</button></form>
-        {% else %}
-        {% if node.running %}
-        <form method="post" action="{% url 'supervisor-control-service' service=node.service action='restart' %}">{% csrf_token %}<input type="hidden" name="return_to" value="/admin/"><button type="submit">重启</button></form>
-        <form method="post" action="{% url 'supervisor-control-service' service=node.service action='stop' %}">{% csrf_token %}<input type="hidden" name="return_to" value="/admin/"><button class="is-quiet" type="submit">停止</button></form>
-        {% else %}
-        <form method="post" action="{% url 'supervisor-control-service' service=node.service action='start' %}">{% csrf_token %}<input type="hidden" name="return_to" value="/admin/"><button type="submit">启动</button></form>
-        {% endif %}
-        {% endif %}
-        <button class="is-quiet" type="button" data-supervisor-logs="{% url 'supervisor-service-logs' service=node.service %}" data-supervisor-log-label="{{ node.label }}">日志</button>
-      </div>
-      {% if node.key == "game_circle_session" %}
-      <div class="console-service-actions">
-        <form method="post" action="{% url 'enqueue-session-keepalive' %}">{% csrf_token %}<input type="hidden" name="return_to" value="/admin/"><button type="submit">保活当前游戏 Frame</button></form>
-        <details class="console-active-game-switch"><summary>可选自动维护</summary><form method="post" action="{% url 'save-runtime-configuration' %}">{% csrf_token %}<input type="hidden" name="return_to" value="/admin/"><input type="hidden" name="config_scope" value="session_maintenance"><label><input name="SESSION_REPAIR_ENABLED" type="checkbox" value="true" {% if admin_console.runtime_config.session_repair_enabled == "true" %}checked{% endif %}> 自动修复 Frame</label><label><input name="SESSION_KEEPALIVE_ENABLED" type="checkbox" value="true" {% if admin_console.runtime_config.session_keepalive_enabled == "true" %}checked{% endif %}> 每四小时自动保活</label><button class="is-quiet" type="submit">保存维护设置</button></form></details>
-      </div>
-      {% endif %}
-      {% endif %}
-    </article>
-    {% endfor %}
+  {% if admin_console.supervisor_error %}<div class="console-pipeline-alert">{{ admin_console.supervisor_error }}。请在终端启动 `uv run python -m service_supervisor`。</div>{% endif %}
+  <section class="console-work-scope" aria-labelledby="work-scope-title">
+    <div class="console-runtime-section-heading"><div><p><span class="console-lucide" aria-hidden="true">{% include "posts/includes/lucide_icon.html" with name="gamepad" %}</span> WORK SCOPE</p><h3 id="work-scope-title">当前操作游戏</h3></div><span>{{ admin_console.runtime_console.work_scope.description }}</span></div>
+    <div class="console-work-scope-current"><span>当前范围</span><strong>{{ admin_console.runtime_console.work_scope.name|default:"尚未选择游戏" }}</strong></div>
+    <details class="console-active-game-switch" {% if not admin_console.runtime_console.work_scope.configured %}open{% endif %}><summary>更换操作游戏</summary><form method="post" action="{% url 'set-active-game-scope' %}">{% csrf_token %}<input type="hidden" name="return_to" value="/admin/"><label>操作游戏<select name="appid" required>{% for game in admin_console.manual_ingestion_games %}<option value="{{ game.appid }}" {% if game.appid == admin_console.manual_ingestion_default_appid %}selected{% endif %}>{{ game.name }}</option>{% endfor %}</select></label><button type="submit">切换并建立 Frame</button></form><form method="post" action="{% url 'sync-managed-game-catalog' %}">{% csrf_token %}<input type="hidden" name="return_to" value="/admin/"><button class="is-quiet" type="submit">刷新可管理游戏目录</button></form></details>
+  </section>
+  <div class="console-runtime-tabs">
+    <input class="console-runtime-tab-input" type="radio" name="runtime-view" id="runtime-flow-tab" checked>
+    <label class="console-runtime-tab" for="runtime-flow-tab"><span class="console-lucide" aria-hidden="true">{% include "posts/includes/lucide_icon.html" with name="workflow" %}</span>按运行流程</label>
+    <input class="console-runtime-tab-input" type="radio" name="runtime-view" id="runtime-services-tab">
+    <label class="console-runtime-tab" for="runtime-services-tab"><span class="console-lucide" aria-hidden="true">{% include "posts/includes/lucide_icon.html" with name="servers" %}</span>按服务管理</label>
+    <section class="console-runtime-tab-panel console-runtime-flow" id="runtime-flow-panel" aria-label="按运行流程">
+      <div class="console-runtime-section-heading"><div><p>BY FLOW</p><h3>按运行流程</h3></div><span>仅显示恢复顺序，不重复服务控制。</span></div>
+      <ol>{% for node in admin_console.runtime_console.flow %}<li class="{% if node.ready %}is-ready{% else %}is-blocked{% endif %}"><span>{{ forloop.counter|stringformat:"02d" }}</span><div><strong>{{ node.label }}</strong><small>{{ node.reason }}</small></div>{% if node.recommended %}<a href="#{{ node.anchor }}" data-runtime-service-link>{{ node.action_label }} <span class="console-lucide" aria-hidden="true">{% include "posts/includes/lucide_icon.html" with name="arrow-up-right" %}</span></a>{% endif %}</li>{% endfor %}</ol>
+    </section>
+    <section class="console-runtime-tab-panel console-runtime-services" id="runtime-services-panel" aria-label="按服务管理">
+      {% for group in admin_console.runtime_console.service_groups %}<section class="console-service-group" id="service-{{ group.key }}"><h3>{{ group.label }}</h3><div class="console-service-group-grid">{% for node in group.nodes %}{% include "admin/includes/runtime_service_card.html" %}{% endfor %}</div></section>{% endfor %}
+    </section>
   </div>
-  </details>
 </section>
+
 
 <dialog class="console-log-dialog" data-supervisor-log-dialog aria-labelledby="supervisor-log-title">
   <header><div><p>SERVICE LOG</p><h2 id="supervisor-log-title" data-supervisor-log-title>运行日志</h2></div><button type="button" class="console-dialog-close" data-supervisor-log-close aria-label="关闭">关闭</button></header>
@@ -170,7 +74,7 @@
       <details class="console-video-advanced">
         <summary><span>资源与采样高级配置</span><small>默认值已适配 30 秒视频，通常无需调整</small></summary>
         <div class="console-dialog-fields console-video-advanced-fields">
-          <label>最大时长（秒）<input name="VIDEO_MAX_DURATION_SECONDS" value="{{ admin_console.runtime_config.video_max_duration_seconds }}" min="1" max="60" type="number"></label>
+          <label>最大采样时长（秒）<input name="VIDEO_MAX_DURATION_SECONDS" value="{{ admin_console.runtime_config.video_max_duration_seconds }}" min="1" max="60" type="number"></label>
           <label>最大字节数<input name="VIDEO_MAX_BYTES" value="{{ admin_console.runtime_config.video_max_bytes }}" min="1048576" type="number"></label>
           <label>每帖最大视频数<input name="VIDEO_MAX_PER_POST" value="{{ admin_console.runtime_config.video_max_per_post }}" min="1" max="10" type="number"></label>
           <label>帧最长边（像素）<input name="VIDEO_MAX_FRAME_EDGE" value="{{ admin_console.runtime_config.video_max_frame_edge }}" min="240" max="1920" type="number"></label>
@@ -246,26 +150,71 @@
 
 <section class="console-section">
   <div class="console-section-heading">
+    <div><p>自动化任务</p><h2>自动任务生产者</h2></div>
+    <span>只控制未来自动入队；不会停止 Scheduler 或取消已有任务</span>
+  </div>
+  <div class="console-section-surface console-producer-grid">
+    {% for item in admin_console.scheduled_producers %}
+    <article class="console-producer-card {% if item.producer.enabled %}is-enabled{% else %}is-paused{% endif %}">
+      <header>
+        <div class="console-producer-identity"><i aria-hidden="true"></i><div><strong>{{ item.label }}</strong><span>{% if item.producer.enabled %}自动入队中{% else %}已暂停{% endif %}</span></div></div>
+        <div class="console-producer-actions"><button type="button" class="is-quiet" data-config-dialog="producer-{{ item.producer.pk }}" aria-haspopup="dialog">管理规则</button><form class="console-producer-toggle" method="post" action="{% url 'save-scheduled-producer' producer_id=item.producer.pk %}">{% csrf_token %}<input type="hidden" name="return_to" value="/admin/"><input type="hidden" name="enabled" value="{% if item.producer.enabled %}false{% else %}true{% endif %}"><button type="submit">{% if item.producer.enabled %}暂停{% else %}恢复{% endif %}</button></form></div>
+      </header>
+      <dl class="console-producer-card-summary">
+        <div><dt>规则</dt><dd>{{ item.rules|length }} 条</dd></div>
+        <div><dt>最近自动入队</dt><dd>{{ item.producer.last_enqueued_at|date:"m-d H:i:s"|default:"尚未自动入队" }}</dd></div>
+        <div class="console-producer-card-upcoming"><dt>未来三次触发</dt><dd>{% if item.upcoming_triggers %}<ol>{% for trigger in item.upcoming_triggers %}<li><time datetime="{{ trigger.at|date:'c' }}">{{ trigger.at|date:"m-d H:i" }}</time><span>{{ trigger.label }}</span></li>{% endfor %}</ol>{% else %}暂无启用规则{% endif %}</dd></div>
+        <div class="console-producer-card-check"><dt>最近检查</dt><dd>{% if item.recent_rule %}{{ item.recent_rule.rule.last_checked_at|date:"m-d H:i"|default:"尚未检查" }} · {% if item.recent_rule.last_result %}{{ item.recent_rule.last_result }}{% else %}运行正常{% endif %}{% else %}尚未检查{% endif %}</dd></div>
+      </dl>
+    </article>
+    {% endfor %}
+  </div>
+  {% for item in admin_console.scheduled_producers %}
+  <dialog class="console-config-dialog console-producer-dialog" data-config-dialog-panel="producer-{{ item.producer.pk }}" aria-labelledby="producer-dialog-{{ item.producer.pk }}-title">
+    <header><div><p>自动化任务</p><h2 id="producer-dialog-{{ item.producer.pk }}-title">{{ item.label }} · 规则管理</h2></div><button type="button" class="console-dialog-close" data-config-dialog-close aria-label="关闭">关闭</button></header>
+    <p class="console-dialog-intro">规则只影响未来自动入队；统一使用中国标准时间，不会取消已有任务。</p>
+    <div class="console-producer-dialog-body">
+      {% for item_rule in item.rules %}
+      <section class="console-producer-rule">
+        <div class="console-producer-rule-heading"><div><strong>{{ item_rule.template_label }}</strong><span>自动任务规则</span></div><em>{% if item_rule.rule.enabled %}已启用{% else %}已暂停{% endif %}</em></div>
+        <form id="producer-rule-save-{{ item_rule.rule.pk }}" method="post" action="{% url 'save-scheduled-producer-rule' rule_id=item_rule.rule.pk %}">{% csrf_token %}<input type="hidden" name="return_to" value="/admin/">
+          <section class="console-producer-rule-settings"><h3>规则设置</h3><label class="console-producer-switch"><input name="enabled" type="checkbox" value="true" {% if item_rule.rule.enabled %}checked{% endif %}> 启用此规则</label><div class="console-producer-fields"><label>执行频率<input type="text" value="{{ item_rule.schedule_editor.frequency_label }}" readonly></label>{% if item_rule.is_interval %}<label>{{ item_rule.schedule_editor.value_label }}<input name="interval_minutes" type="number" min="1" value="{{ item_rule.schedule_value }}" required></label>{% else %}<label>{{ item_rule.schedule_editor.value_label }}<input name="schedule_time" type="time" value="{{ item_rule.schedule_value }}" required></label>{% endif %}</div></section>
+        </form>
+        <div class="console-producer-rule-footer"><p>下次触发：<time datetime="{{ item_rule.next_due_at|date:'c' }}">{{ item_rule.next_due_at|date:"Y-m-d H:i" }}</time></p><div class="console-producer-rule-actions"><form method="post" action="{% url 'delete-scheduled-producer-rule' rule_id=item_rule.rule.pk %}">{% csrf_token %}<input type="hidden" name="return_to" value="/admin/"><button class="console-producer-delete-rule" type="submit">删除规则</button></form><button type="submit" form="producer-rule-save-{{ item_rule.rule.pk }}">保存此规则</button></div></div>
+      </section>
+      {% endfor %}
+      <details class="console-producer-add-card">
+        <summary><span><strong>新增规则</strong><small>为此自动任务增加一条未来执行规则</small></span><span class="console-producer-add-icon" aria-hidden="true">{% include "posts/includes/lucide_icon.html" with name="plus" %}</span></summary>
+        <form class="console-producer-add-rule" method="post" action="{% url 'create-scheduled-producer-rule' producer_id=item.producer.pk %}">{% csrf_token %}<input type="hidden" name="return_to" value="/admin/"><span>系统将自动生成并保存受限调度表达式。</span>{% if item.new_rule_templates|length > 1 %}<label>任务类型<select name="rule_type">{% for template in item.new_rule_templates %}<option value="{{ template.key }}">{{ template.label }}</option>{% endfor %}</select></label>{% else %}<label>任务类型<input type="text" value="{{ item.new_rule_templates.0.label }}" readonly></label><input name="rule_type" type="hidden" value="{{ item.new_rule_templates.0.key }}">{% endif %}<label>执行频率<input type="text" value="{{ item.new_rule_schedule_editor.frequency_label }}" readonly></label>{% if item.new_rule_is_interval %}<label>{{ item.new_rule_schedule_editor.value_label }}<input name="interval_minutes" type="number" min="1" required></label>{% else %}<label>{{ item.new_rule_schedule_editor.value_label }}<input name="schedule_time" type="time" required></label>{% endif %}<div class="console-producer-add-actions"><label class="console-producer-switch"><input name="enabled" type="checkbox" value="true" checked> 新规则启用</label><button type="submit">新增规则</button></div></form>
+      </details>
+    </div>
+  </dialog>
+  {% endfor %}
+</section>
+
+<section class="console-section">
+  <div class="console-section-heading">
     <div><p>CONFIGURATION</p><h2>核心配置</h2></div>
     <span>仅此区域允许编辑</span>
   </div>
-  <div class="console-config-grid">
-    <article class="console-card accent console-policy-card {{ admin_console.policy_status.tone }}">
-      <span>审核策略</span>
-      {% if admin_console.active_policy %}
-      <strong>{{ admin_console.active_policy.name }} · {{ admin_console.active_policy.version }}</strong>
-      {% else %}
-      <strong>{{ admin_console.policy_status.label }}</strong>
-      {% endif %}
-      <small>{{ admin_console.policy_status.description }}</small>
-      <div class="console-card-actions">
-        <a href="{% url 'admin:reviews_policyversion_changelist' %}">管理版本</a>
-        <a href="{% url 'admin:reviews_policyrule_changelist' %}">编辑规则</a>
-      </div>
-    </article>
-  </div>
-  {% if admin_console.active_policy_rules %}
-  <details class="console-policy-rules">
+  <div class="console-section-surface console-configuration-surface">
+    <div class="console-config-grid">
+      <article class="console-card accent console-policy-card {{ admin_console.policy_status.tone }}">
+        <span>审核策略</span>
+        {% if admin_console.active_policy %}
+        <strong>{{ admin_console.active_policy.name }} · {{ admin_console.active_policy.version }}</strong>
+        {% else %}
+        <strong>{{ admin_console.policy_status.label }}</strong>
+        {% endif %}
+        <small>{{ admin_console.policy_status.description }}</small>
+        <div class="console-card-actions">
+          <a href="{% url 'admin:reviews_policyversion_changelist' %}">管理版本</a>
+          <a href="{% url 'admin:reviews_policyrule_changelist' %}">编辑规则</a>
+        </div>
+      </article>
+    </div>
+    {% if admin_console.active_policy_rules %}
+    <details class="console-policy-rules">
     <summary class="console-policy-rules-summary">
       <div>
         <p>ACTIVE RULES</p>
@@ -289,8 +238,9 @@
       </article>
       {% endfor %}
     </div>
-  </details>
-  {% endif %}
+    </details>
+    {% endif %}
+  </div>
 </section>
 
 <section class="console-section">
@@ -298,7 +248,7 @@
     <div><p>RUNTIME HEALTH</p><h2>运行健康</h2></div>
     <span>只读概览，不在此处执行任务</span>
   </div>
-  <div class="console-health-grid">
+  <div class="console-section-surface console-health-grid">
     <a class="console-health-card" href="{% url 'admin:jobs_backgroundjob_changelist' %}?status__exact=PENDING">
       <span>待执行任务</span><strong>{{ admin_console.pending_job_count }}</strong><small>等待对应 Worker 认领</small>
     </a>
@@ -316,7 +266,7 @@
     <div><p>READ ONLY TRACE</p><h2>数据追溯</h2></div>
     <span>只读，不在此处执行审核或处置</span>
   </div>
-  <div class="console-trace-grid">
+  <div class="console-section-surface console-trace-grid">
     <article class="console-trace-card">
       <div><p>CONTENT RECORDS</p><h3>帖子与互动</h3><span>核验原创判定、正文、媒体、投票与互动快照。</span></div>
       <div class="console-trace-links"><a href="{% url 'admin:posts_originalpost_changelist' %}">原创帖子</a><a href="{% url 'admin:posts_candidatepost_changelist' %}">候选帖子</a></div>

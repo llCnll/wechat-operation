@@ -115,6 +115,7 @@ class GameCircleLoginRuntimeState(models.Model):
         BROWSER_UNAVAILABLE = "BROWSER_UNAVAILABLE", "Chrome 不可用"
         BOOTSTRAPPING = "BOOTSTRAPPING", "正在检查"
         LOGIN_PENDING = "LOGIN_PENDING", "需要扫码"
+        LOGIN_REQUIRED = "LOGIN_REQUIRED", "需要重新登录"
         OUTER_READY = "OUTER_READY", "外层会话有效"
 
     class FrameState(models.TextChoices):
@@ -125,7 +126,7 @@ class GameCircleLoginRuntimeState(models.Model):
 
     class Action(models.TextChoices):
         CHECK_LOGIN = "CHECK_LOGIN", "检查登录态"
-        OPEN_LOGIN = "OPEN_LOGIN", "打开登录页"
+        OPEN_LOGIN = "OPEN_LOGIN", "查看受控会话页"
         BUILD_FRAME = "BUILD_FRAME", "建立当前游戏 Frame"
         KEEPALIVE = "KEEPALIVE", "保活当前游戏 Frame"
 
@@ -150,9 +151,11 @@ class GameCircleLoginRuntimeState(models.Model):
     login_state = models.CharField(max_length=20, choices=LoginState.choices, default=LoginState.UNKNOWN)
     outer_state = models.CharField(max_length=24, choices=OuterState.choices, default=OuterState.UNKNOWN)
     frame_state = models.CharField(max_length=16, choices=FrameState.choices, default=FrameState.UNKNOWN)
+    frame_scope_version = models.PositiveBigIntegerField(null=True, blank=True)
     available_actions = models.JSONField(default=list)
     login_wait_until = models.DateTimeField(null=True, blank=True)
     checked_at = models.DateTimeField(null=True, blank=True)
+    outer_verified_at = models.DateTimeField(null=True, blank=True)
     last_ready_at = models.DateTimeField(null=True, blank=True)
     error_category = models.CharField(
         max_length=32, choices=ErrorCategory.choices, default=ErrorCategory.NONE
@@ -194,6 +197,7 @@ class OriginalPost(models.Model):
     recommend_status = models.IntegerField(null=True, blank=True)
     source_appid = models.CharField(max_length=128, blank=True)
     author_openid = models.CharField(max_length=255, blank=True, db_index=True)
+    author_nick_name = models.CharField(max_length=255, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 

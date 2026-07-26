@@ -29,6 +29,127 @@
 
 历史基线也由发布清单维护：`1.0.0` 对应历史提交 `2d522bd932e760094bbe81fb2477f2da1462e359`；`1.0.1` 的原提交 `2905bcb04509e2ffae3877ee1a2aabcc026fa190` 因作者信息重写，当前历史提交为 `12a5a17168a27ee3088b18e708389c4a6c117510`。后续发布使用不可移动的 `v<version>` tag。
 
+## 分支与提升策略
+
+`main` 是唯一的生产发布分支，也是 GitHub Release 和部署端点拉取的唯一来源；它始终对应一个已经发布、可由 tag 精确定位的版本。禁止直接推送 `main`，也禁止将未准备版本号和发布清单的 `develop` 直接合入 `main`。
+
+### `feature/*` 到 `develop`
+
+`develop` 仅是日常集成分支：它汇集已完成评审的 feature，不触发部署、正式 tag、GitHub Release 或生产升级，也不作为 CI 状态门禁。所有 feature 从最新 `develop` 创建，并以 Pull Request 合回 `develop`：
+
+- 每个 feature PR 必须选择 **Squash and merge**，因此在 `develop` 上恰好留下一个提交；五个 feature 合入后，应有五个可回溯的 squash 提交。
+- 提交标题遵循 [AGENTS.md](../../AGENTS.md) 的规范；PR 模板中的“变更摘要”成为 squash 提交正文。
+- 摘要说明用户或系统行为变化、数据库/配置/服务/升级影响、验证结果以及风险和回滚方式；无影响项明确写“无”。涉及高风险能力时，摘要必须写明隔离范围和最小验证方式。
+
+### 非发布端点同步
+
+跟随 `develop` 或 `feature/*` 的端点没有发布版本状态。每次 `git pull`、`git switch`、`git checkout` 或其他操作使其代码提交变化后，必须在运行任何 `uv run` 项目命令、Django 管理命令、启动 Supervisor 或重启服务前执行：
+
+```bash
+uv sync --locked --all-groups
+```
+
+该命令成功后才能继续运行或重启服务；失败时停止排障，不得由 Supervisor、Web 或 Worker 自动安装依赖。这一约束只准备与 `uv.lock` 一致的本地环境，不创建版本、tag、发布清单或 `runtime/release-state.json`，也不替代 `main` 的 `upgrade_plan`、`upgrade_ack` 和发布清单流程。
+
+`releases/<version>.yaml` 的 `changes` 只记录平台功能更新：`feat`、`fix`、`hotfix`、`perf` 和 `security` 的实际用户或运行行为变化。它既是升级清单的一部分，也是 GitHub Release 的“平台功能更新”唯一来源。`docs`、`ci`、`build`、`chore`、`refactor`、`style` 和 `test` 不写入 `changes`；若某项重构或维护实际改变了用户或运行行为，必须使用 `feat` 或 `fix` 标题。维护型发布没有平台功能变化时，显式写 `changes: []`，Release 页显示“本版本没有平台功能更新”。
+
+GitHub 不能按目标分支单独强制 merge method：为保留发布后的 `main -> develop` 正常回灌，仓库仍需保留 merge commit。因此“feature 必须 squash”由 PR 审阅流程执行；验证目标是合入后的 Git 历史每个 feature 只有一个 squash 提交，而不是 GitHub 界面只显示一种合并按钮。
+
+### GitHub CLI 操作
+
+先安装 GitHub CLI 并完成一次登录：
+
+```console
+gh auth login
+```
+
+CLI 可创建、检查和合并 Pull Request，分支本身仍须用 `git push` 推送；它不会绕过必需检查或分支保护。仅当用户已明确授权创建对应 PR 或执行发布时，Agent 才可推送 feature 或 release 分支。个人仓库使用单个 GitHub 身份，不设置必需审批；feature 完成后由 Agent 创建、自审并 squash 合入 `develop`：
+
+```console
+git push -u origin feature/<name>
+```
+
+#### Agent 创建和自审 PR
+
+本仓库的 feature、release 和回灌 PR 均由 Agent 使用同一个 GitHub 身份创建、自审和合并。由于不是独立身份审阅，流程不将自审称为“审批”，也不配置 GitHub 的必需审批。`.github/PULL_REQUEST_TEMPLATE.md` 只定义正文结构，GitHub CLI 不会替 Agent 判断或补全其中的内容。Agent 必须先检查实际 diff、执行过的验证和风险结论，再填写全部字段；未知或不适用的项明确写“无”，不得提交模板占位符、猜测结果或把未执行的命令写成“通过”。
+
+涉及上游写入、会话、权限或敏感数据时，必须写明隔离范围和可复现的最小验证方式。涉及发布时，还必须说明版本、发布清单和 `changes` 的取值；`changes: []` 应明确说明为“无平台功能更新”。Agent 可以推送自己的功能或发布分支、创建 PR、报告验证结果并执行合并；不得直接推送或强推 `main`、`develop`、已发布 tag。
+
+Agent 必须以 `.github/PULL_REQUEST_TEMPLATE.md` 为唯一正文结构，依据实际 diff、验证和风险结论填充后，保存到**工作区外**的临时文件。创建完成后删除该临时文件，避免把 PR 正文或潜在敏感信息留在仓库中。
+
+```console
+gh pr create --base develop --head "feature/<name>" --title "feat(<scope>): <简短中文摘要>" --body-file "<完整填写后的临时 Markdown 文件路径>"
+```
+
+创建 release 或回灌 PR 时沿用同一正文约定，并将 `--base`、`--head`、标题和合并策略替换为本节后续对应命令。Agent 完成自审，确认正文完整、提交标题与内容一致后，才执行相应合并。
+
+#### Agent 自审和合并 PR
+
+Agent 必须审查实际 diff、PR 正文与验证证据，并记录自审结论和未覆盖的风险；不能仅因标题或模板完整就合并。高风险能力的最小验证是：确认 PR 所述隔离范围与 diff 一致，并复核正文中的最小验证命令和结果。合并前用 GitHub CLI 查询并记录 PR 状态：
+
+```console
+gh pr view <PR 编号或 URL> --json isDraft,baseRefName,headRefName,mergeStateStatus,statusCheckRollup
+```
+
+feature 合并前最小验证是：目标分支为 `develop`、来源分支是对应的 `feature/*`、PR 不是草稿、无合并冲突，且正文完整。`main` 还必须确认目标分支为 `main`、来源分支为匹配版本的 `release/v<version>`，并确认 `Release protocol / release-source` 与 `Release protocol / validate` 成功。确认后按目标分支使用固定策略合并：
+
+```console
+gh pr merge <feature PR 编号或 URL> --squash --delete-branch
+gh pr merge <release PR 编号或 URL> --merge --delete-branch
+gh pr merge <main 回灌 PR 编号或 URL> --merge
+```
+
+`develop` 不要求 CI 状态。若 `main` 的必需检查尚未满足且希望 GitHub 在检查通过后自动合并，Agent 可对 release PR 添加 `--auto --merge`；feature 与回灌不使用 `--auto`。不得以 `--admin` 绕过保护规则。
+
+准备好版本号、发布清单和发布前验证后，在用户已授权发布的前提下推送并创建 `release/v<version> -> main` PR；随后按上文固定策略以普通 merge 合入 `main`：
+
+```console
+git push -u origin release/v<version>
+gh pr create --base main --head release/v<version> --title "release: 准备 v<version>"
+```
+
+`main` 发布成功后，创建回灌 PR；随后按上文固定策略以普通 merge 回到 `develop`，不得删除 `main`：
+
+```console
+gh pr create --base develop --head main --title "chore: 回灌 main 到 develop"
+```
+
+### `release/v<version>` 到 `main`
+
+每次正式发布按以下提升路径进行，而不是在 `main` 合并后再补准备发布信息：
+
+1. 从已验证的 `develop` 创建短期 `release/v<version>` 分支并冻结其功能范围。
+2. 只用功能相关的 squash 提交生成 `changes` 草稿：
+
+   ```bash
+   git log --first-parent --no-merges --extended-regexp --grep='^(feat|fix|hotfix|perf|security)(\([^)]+\))?: ' --format='- %s%n%b' v<上一版本>..develop
+   ```
+
+   该命令只汇总提交标题和正文，不能替代发布清单；必须结合实际代码、迁移、配置和服务变更，人工写入 `releases/<version>.yaml`。没有功能相关提交时写 `changes: []`。发布清单仍是升级动作的唯一事实来源。
+3. 在 `release/v<version>` 更新版本号、`uv.lock` 和 `releases/<version>.yaml`，执行发布前最小验证。
+4. 创建 `release/v<version> -> main` 的发布 PR。`Release protocol` 的 `release-source` 校验会要求分支名与 `pyproject.toml` 中的版本严格匹配；PR 合入 `main` 后才创建 tag、源码附件和 GitHub Release。Release 页面按以下顺序展示：
+
+   1. **平台功能更新**：直接渲染该版本发布清单的 `changes`。
+   2. **工程与文档维护**：按时间正序收录 `docs`、`ci`、`build`、`chore`、`refactor`、`style` 和 `test` 提交标题。
+   3. **完整提交记录**：链接到上一个 tag 与当前 tag 的 GitHub compare 页面。
+
+   非平台提交仍随 release 分支交付，只是不进入发布清单的 `changes` 或端点升级动作。首次发布没有上一个 tag 时，不显示“完整提交记录”。
+5. 发布工作流成功后，将 `main` 正常合回 `develop`，仅用于带回发布提交、tag 对应版本和紧急修复；不要 squash 回灌，避免丢失发布祖先关系。
+
+正式发布由 **`main` 合入已准备好的发布分支** 触发；`develop` 只承担集成。紧急修复从 `main` 创建 `hotfix/*`，完成修复后仍经匹配版本的 `release/v<version>` 进入 `main`，随后再合回 `develop`。
+
+### GitHub 仓库设置（可选强化）
+
+个人私有仓库以本手册前文的 Agent 约定为基础，不将 GitHub 分支保护作为流程前置条件，且**不设置必需审批**。
+
+若当前 GitHub 套餐支持私有仓库的分支保护，可额外配置下列规则作为技术强化；它们不改变上述单账号流程：
+
+- `develop`：要求 Pull Request；启用 squash merge，并将 squash 默认消息设为 Pull Request 标题与描述。验证结果记录在 PR 模板中，但不要求 `develop` 产生或等待 CI 状态。
+- `main`：要求 Pull Request、`Release protocol / release-source` 与 `Release protocol / validate`；禁止直接推送。来源分支仍须精确为 `release/v<pyproject.toml 中的版本>`。
+- 不允许删除或强制推送 `main`、`develop` 及任何已发布的 `v*` tag；对管理员和拥有分支保护绕过权限的身份也应用上述规则。Agent 不得使用 `gh pr merge --admin`。
+
+最小验证：由 Agent 创建一个仅改文档的 `feature/*` PR，使用 `gh pr view` 确认分支、草稿和冲突状态后以 squash 合入；检查 `develop` 新增恰好一个非 merge 提交且摘要完整。再创建一个包含完整版本清单、名称与版本匹配的 `release/v<version>` PR，确认 `release-source` 和 `validate` 均通过后以普通 merge 合入 `main`，并确认生成指向该提交的 `v<version>` tag。不得用生产端点或上游写入操作验证分支策略。
+
 ## 发布新版本
 
 在准备合并到 `main` 的发布分支上执行：
@@ -40,7 +161,7 @@ uv run python manage.py validate_releases
 uv run pytest -q tests/test_release_protocol.py
 
 git add pyproject.toml uv.lock releases/<version>.yaml <相关文件>
-git commit -m "release: prepare v<version>"
+git commit -m "release: 准备 v<version>"
 git push origin <发布分支>
 ```
 

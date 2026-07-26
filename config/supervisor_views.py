@@ -11,11 +11,20 @@ from django.shortcuts import redirect
 from django.utils import timezone
 from django.views.decorators.http import require_GET, require_POST
 
+from config.game_circle_ipc import GameCircleIpcClient, GameCircleIpcError
 from config.runtime_config import affected_services, display_service_names, update_runtime_config
 from config.supervisor import SupervisorClient, SupervisorUnavailableError
-from config.game_circle_ipc import GameCircleIpcClient, GameCircleIpcError
 from jobs.game_circle_keepalive import enqueue_keepalive
+from jobs.models import ScheduledProducerRuleConfig
 from jobs.permanent_mute import enqueue_permanent_mute_renewal
+from jobs.scheduled_producers import (
+    DEFINITION_BY_KEY,
+    create_rule_configuration,
+    delete_rule_configuration,
+    schedule_description_for_rule,
+    update_producer_enabled,
+    update_rule_configuration,
+)
 from posts.game_catalog import active_game_appid, set_active_game, sync_authorized_managed_games
 from posts.ingestion_jobs import SHANGHAI, enqueue_manual_ingestion_window
 from posts.models import ManagedGame
@@ -117,7 +126,9 @@ def set_active_game_scope(request):
     except (ValueError, GameCircleIpcError) as exc:
         messages.error(request, str(exc))
     else:
-        messages.success(request, f"当前操作游戏已更新（范围版本 {scope.scope_version}）；正在建立对应 Frame。")
+        messages.success(
+            request, f"当前操作游戏已更新（范围版本 {scope.scope_version}）；正在建立对应 Frame。"
+        )
     return redirect(_return_to(request))
 
 
@@ -203,10 +214,16 @@ def save_runtime_configuration(request):
     values = {key: value for key, value in request.POST.items()}
     if request.POST.get("config_scope") == "writes":
         for key in (
-            "ENABLE_UPSTREAM_WRITES", "ENABLE_SINK_WRITES", "ENABLE_BLOCK_WRITES",
-            "ENABLE_MUTE_WRITES", "ENABLE_UNMUTE_WRITES", "ENABLE_RESTORE_WRITES",
-            "ENABLE_AI_AUTOMATED_MODERATION", "ENABLE_AI_SINK_WRITES", "ENABLE_AI_BLOCK_WRITES",
-            "SESSION_REPAIR_ENABLED", "SESSION_KEEPALIVE_ENABLED",
+            "ENABLE_UPSTREAM_WRITES",
+            "ENABLE_SINK_WRITES",
+            "ENABLE_BLOCK_WRITES",
+            "ENABLE_MUTE_WRITES",
+            "ENABLE_UNMUTE_WRITES",
+            "ENABLE_RESTORE_WRITES",
+            "ENABLE_AI_AUTOMATED_MODERATION",
+            "ENABLE_AI_SINK_WRITES",
+            "ENABLE_AI_BLOCK_WRITES",
+            "SESSION_REPAIR_ENABLED",
         ):
             values.setdefault(key, "false")
     if request.POST.get("config_scope") == "video":
@@ -215,7 +232,6 @@ def save_runtime_configuration(request):
         values.setdefault("ASR_ENABLED", "false")
     if request.POST.get("config_scope") == "session_maintenance":
         values.setdefault("SESSION_REPAIR_ENABLED", "false")
-        values.setdefault("SESSION_KEEPALIVE_ENABLED", "false")
     try:
         changed = update_runtime_config(values)
     except ValueError as exc:
@@ -226,8 +242,68 @@ def save_runtime_configuration(request):
         messages.info(request, "运行配置没有变化。")
     elif services:
         messages.success(
-            request, f"配置已保存；请重启 {'、'.join(display_service_names(services))} 以加载新配置。"
+            request,
+            f"配置已保存；请重启 {'、'.join(display_service_names(services))} 以加载新配置。",
         )
     else:
         messages.success(request, "配置已保存。")
+    return redirect(_return_to(request))
+
+
+@staff_member_required
+@require_POST
+def save_scheduled_producer(request, producer_id: int):
+    enabled = request.POST.get("enabled", "false").lower() in {"1", "true", "on", "yes"}
+    try:
+        producer = update_producer_enabled(producer_id=producer_id, enabled=enabled)
+    except ValueError as exc:
+        messages.error(request, str(exc))
+    else:
+        state = "启用" if producer.enabled else "暂停"
+        messages.success(
+            request,
+            f"{DEFINITION_BY_KEY[producer.producer_key].label}已{state}；下轮自动调度生效。",
+        )
+    return redirect(_return_to(request))
+
+
+@staff_member_required
+@require_POST
+def save_scheduled_producer_rule(request, rule_id: int):
+    try:
+        rule = update_rule_configuration(rule_id=rule_id, values=request.POST)
+    except (ValueError, TypeError) as exc:
+        messages.error(request, str(exc))
+    else:
+        messages.success(
+            request,
+            f"{DEFINITION_BY_KEY[rule.producer.producer_key].label}·{schedule_description_for_rule(rule)}已保存；下轮自动调度生效。",
+        )
+    return redirect(_return_to(request))
+
+
+@staff_member_required
+@require_POST
+def create_scheduled_producer_rule(request, producer_id: int):
+    try:
+        rule = create_rule_configuration(producer_id=producer_id, values=request.POST)
+    except (ValueError, TypeError) as exc:
+        messages.error(request, str(exc))
+    else:
+        messages.success(
+            request,
+            f"已新增{DEFINITION_BY_KEY[rule.producer.producer_key].label}·{schedule_description_for_rule(rule)}；下轮自动调度生效。",
+        )
+    return redirect(_return_to(request))
+
+
+@staff_member_required
+@require_POST
+def delete_scheduled_producer_rule(request, rule_id: int):
+    try:
+        delete_rule_configuration(rule_id=rule_id)
+    except ScheduledProducerRuleConfig.DoesNotExist:
+        messages.error(request, "该规则不存在或已删除。")
+    else:
+        messages.success(request, "规则已删除；已入队任务不受影响。")
     return redirect(_return_to(request))
