@@ -22,6 +22,7 @@ from reviews.adapters import (
 )
 from reviews.models import (
     OperationAudit,
+    OperationExecutionSource,
     PolicyRule,
     PolicyVersion,
     RecommendedAction,
@@ -689,7 +690,7 @@ def test_sink_marks_the_exact_preflight_target_state_as_already_applied(monkeypa
 
 
 @pytest.mark.django_db
-def test_sink_keeps_a_different_non_normal_state_pending_without_a_write(monkeypatch):
+def test_sink_overwrites_an_upstream_blocked_state(monkeypatch):
     monkeypatch.setattr(runtime, "enable_upstream_writes", True)
     monkeypatch.setattr(runtime, "enable_sink_writes", True)
     post = OriginalPost.objects.create(topic_id=213, content_id="sink-blocked")
@@ -706,12 +707,15 @@ def test_sink_keeps_a_different_non_normal_state_pending_without_a_write(monkeyp
     class Source:
         writes = 0
 
+        states = iter((4, 8))
+
         def get_post_metrics(self, topic_id):
-            return {"data": {"topic": {"topic_id": topic_id, "status": 4}}}
+            return {"data": {"topic": {"topic_id": topic_id, "status": next(self.states)}}}
 
         def perform_confirmed_operation(self, **kwargs):
             self.writes += 1
-            raise AssertionError("非正常帖子不得重复发送沉底请求")
+            assert kwargs["action"] == RecommendedAction.SINK
+            return {"errcode": 0}
 
     source = Source()
     audit = execute_confirmed_operation(
@@ -722,7 +726,91 @@ def test_sink_keeps_a_different_non_normal_state_pending_without_a_write(monkeyp
         source=source,
     )
 
-    assert audit.result_code == "SKIPPED_UPSTREAM_NOT_NORMAL"
+    assert audit.result_code == "OK"
+    assert source.writes == 1
+    post.refresh_from_db()
+    assert post.status == 8
+
+
+@pytest.mark.django_db
+def test_block_overwrites_an_upstream_sunk_state(monkeypatch):
+    monkeypatch.setattr(runtime, "enable_upstream_writes", True)
+    monkeypatch.setattr(runtime, "enable_block_writes", True)
+    post = OriginalPost.objects.create(topic_id=214, content_id="block-sunk")
+    CandidatePost.objects.create(
+        topic_id=post.topic_id, content_id=post.content_id, origin_type=OriginType.ORIGINAL
+    )
+    _, task = persist_assessment(
+        post,
+        AssessmentOutput(
+            content_category="OTHER", recommended_action="BLOCK", overall_confidence=0.9
+        ),
+    )
+
+    class Source:
+        writes = 0
+        states = iter((8, 4))
+
+        def get_post_metrics(self, topic_id):
+            return {"data": {"topic": {"topic_id": topic_id, "status": next(self.states)}}}
+
+        def perform_confirmed_operation(self, **kwargs):
+            self.writes += 1
+            assert kwargs["action"] == RecommendedAction.BLOCK
+            return {"errcode": 0}
+
+    source = Source()
+    audit = execute_confirmed_operation(
+        task,
+        user=None,
+        action=RecommendedAction.BLOCK,
+        reason="人工确认",
+        source=source,
+        upstream_payload={"block_reason_code": 1},
+    )
+
+    assert audit.result_code == "OK"
+    assert source.writes == 1
+    post.refresh_from_db()
+    assert post.status == 4
+
+
+@pytest.mark.django_db
+def test_ai_automated_operation_does_not_overwrite_a_changed_moderation_state(monkeypatch):
+    monkeypatch.setattr(runtime, "enable_upstream_writes", True)
+    monkeypatch.setattr(runtime, "enable_sink_writes", True)
+    post = OriginalPost.objects.create(topic_id=215, content_id="ai-sink-blocked")
+    CandidatePost.objects.create(
+        topic_id=post.topic_id, content_id=post.content_id, origin_type=OriginType.ORIGINAL
+    )
+    _, task = persist_assessment(
+        post,
+        AssessmentOutput(
+            content_category="OTHER", recommended_action="SINK", overall_confidence=0.9
+        ),
+    )
+
+    class Source:
+        writes = 0
+
+        def get_post_metrics(self, topic_id):
+            return {"data": {"topic": {"topic_id": topic_id, "status": 4}}}
+
+        def perform_confirmed_operation(self, **_kwargs):
+            self.writes += 1
+            raise AssertionError("AI 自动处置不得覆盖已变化的人工状态")
+
+    source = Source()
+    audit = execute_confirmed_operation(
+        task,
+        user=None,
+        action=RecommendedAction.SINK,
+        reason="AI 风险依据：测试；执行沉底。",
+        source=source,
+        execution_source=OperationExecutionSource.AI_AUTOMATED,
+    )
+
+    assert audit.result_code == "SKIPPED_UPSTREAM_NOT_ACTIONABLE"
     assert source.writes == 0
     post.refresh_from_db()
     assert post.status == 4

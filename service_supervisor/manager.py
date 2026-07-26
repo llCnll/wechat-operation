@@ -6,6 +6,7 @@ import hmac
 import json
 import os
 import secrets
+import signal
 import shutil
 import socket
 import subprocess
@@ -43,6 +44,7 @@ SERVICE_NAMES = (
     "ingestion",
     "backfill_ingestion",
     "metric_sync",
+    "public_opinion_reporting",
     "review",
     "video_extraction",
     "ai_moderation",
@@ -54,6 +56,7 @@ WORKER_NAMES = (
     "ingestion",
     "backfill_ingestion",
     "metric_sync",
+    "public_opinion_reporting",
     "review",
     "video_extraction",
     "ai_moderation",
@@ -72,6 +75,7 @@ SERVICE_SHUTDOWN_ORDER = (
     "video_extraction",
     "review",
     "metric_sync",
+    "public_opinion_reporting",
     "backfill_ingestion",
     "ingestion",
     "mute_maintenance",
@@ -154,6 +158,11 @@ class Supervisor:
             "metric_sync": ServiceDefinition(
                 "metric_sync",
                 (python, manage, "run_metric_worker", "--loop"),
+                frozenset(("start", "stop", "restart", "status", "logs")),
+            ),
+            "public_opinion_reporting": ServiceDefinition(
+                "public_opinion_reporting",
+                (python, manage, "run_public_opinion_reporting_worker", "--loop"),
                 frozenset(("start", "stop", "restart", "status", "logs")),
             ),
             "review": ServiceDefinition(
@@ -336,7 +345,12 @@ class Supervisor:
             self.start_controller()
             self.preflight()
             self._cleanup_chrome_port()
-            for service in ("controlled_chrome", "web", "mute_maintenance"):
+            for service in (
+                "controlled_chrome",
+                "web",
+                "mute_maintenance",
+                "public_opinion_reporting",
+            ):
                 state = self._read_state(service)
                 state["desired"] = True
                 self._write_state(service, state)
@@ -783,6 +797,12 @@ class Supervisor:
 
 def run_supervisor(project_root: Path, runtime_dir: Path) -> int:
     supervisor = Supervisor(project_root, runtime_dir)
+    previous_sigterm_handler = signal.getsignal(signal.SIGTERM)
+
+    def request_graceful_shutdown(_signum, _frame) -> None:
+        raise KeyboardInterrupt
+
+    signal.signal(signal.SIGTERM, request_graceful_shutdown)
     try:
         supervisor.bootstrap()
         supervisor.run_forever()
@@ -796,4 +816,5 @@ def run_supervisor(project_root: Path, runtime_dir: Path) -> int:
         return 0
     finally:
         supervisor.shutdown()
+        signal.signal(signal.SIGTERM, previous_sigterm_handler)
     return 0

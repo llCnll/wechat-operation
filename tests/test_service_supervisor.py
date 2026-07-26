@@ -6,6 +6,7 @@ from unittest.mock import patch
 import httpx
 import pytest
 
+import service_supervisor.manager as supervisor_manager
 from service_supervisor.manager import Supervisor, SupervisorError
 from service_supervisor.runtime import RuntimeStore, SupervisorLeaseGuard, SupervisorLockedError
 
@@ -47,6 +48,37 @@ def test_shutdown_without_the_supervisor_lock_does_not_touch_existing_services(t
     assert calls == []
 
 
+def test_sigterm_runs_the_supervisor_shutdown_path(tmp_path, monkeypatch):
+    events = []
+    registered_handlers = []
+
+    class SignalDrivenSupervisor:
+        def __init__(self, *_args):
+            return None
+
+        def bootstrap(self):
+            events.append("bootstrap")
+
+        def run_forever(self):
+            registered_handlers[0](supervisor_manager.signal.SIGTERM, None)
+
+        def shutdown(self):
+            events.append("shutdown")
+
+    monkeypatch.setattr(supervisor_manager, "Supervisor", SignalDrivenSupervisor)
+    monkeypatch.setattr(supervisor_manager.signal, "getsignal", lambda _signal: "previous")
+    monkeypatch.setattr(
+        supervisor_manager.signal,
+        "signal",
+        lambda _signal, handler: registered_handlers.append(handler),
+    )
+
+    assert supervisor_manager.run_supervisor(Path.cwd(), tmp_path) == 0
+    assert events == ["bootstrap", "shutdown"]
+    assert callable(registered_handlers[0])
+    assert registered_handlers[-1] == "previous"
+
+
 def test_supervisor_control_protocol_rejects_web_start_and_invalid_action(tmp_path):
     supervisor = Supervisor(Path.cwd(), tmp_path)
     supervisor.acquire()
@@ -81,8 +113,9 @@ def test_supervisor_control_server_requires_token_and_reports_status(tmp_path):
             "game_circle_session",
             "ingestion",
             "backfill_ingestion",
-            "metric_sync",
-            "review",
+                "metric_sync",
+                "public_opinion_reporting",
+                "review",
             "video_extraction",
             "ai_moderation",
             "mute_maintenance",
@@ -136,7 +169,7 @@ def test_bootstrap_terminates_identifiable_legacy_services_before_preflight(tmp_
         service: {"desired": False}
         for service in (
             "controlled_chrome", "web", "scheduler", "game_circle_session", "ingestion",
-            "backfill_ingestion", "metric_sync", "review", "video_extraction", "ai_moderation",
+                "backfill_ingestion", "metric_sync", "public_opinion_reporting", "review", "video_extraction", "ai_moderation",
             "mute_maintenance",
         )
     }
@@ -199,7 +232,7 @@ def test_reconcile_replaces_session_owner_when_controlled_chrome_is_lost(tmp_pat
         service: {"desired": False}
         for service in (
             "controlled_chrome", "web", "scheduler", "game_circle_session", "ingestion",
-            "backfill_ingestion", "metric_sync", "review", "video_extraction", "ai_moderation",
+                "backfill_ingestion", "metric_sync", "public_opinion_reporting", "review", "video_extraction", "ai_moderation",
             "mute_maintenance",
         )
     }
@@ -410,7 +443,7 @@ def test_shutdown_stops_services_in_dependency_order_without_clearing_desired(tm
     supervisor.shutdown()
 
     assert calls == [
-        "ai_moderation", "video_extraction", "review", "metric_sync", "backfill_ingestion",
+        "ai_moderation", "video_extraction", "review", "metric_sync", "public_opinion_reporting", "backfill_ingestion",
         "ingestion", "mute_maintenance", "scheduler", "game_circle_session",
         "controlled_chrome", "web",
     ]

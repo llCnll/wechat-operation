@@ -74,6 +74,7 @@ SERVICE_DISPLAY_NAMES = {
     "ingestion": "实时采集 Worker",
     "backfill_ingestion": "人工补采 Worker",
     "metric_sync": "指标同步 Worker",
+    "public_opinion_reporting": "舆情报告 Worker",
     "review": "AI 审核 Worker",
     "video_extraction": "视频审核 Worker",
     "ai_moderation": "AI 自动处置 Worker",
