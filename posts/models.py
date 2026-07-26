@@ -149,10 +149,20 @@ class GameCircleLoginRuntimeState(models.Model):
 
     id = models.PositiveSmallIntegerField(primary_key=True, default=1, editable=False)
     login_state = models.CharField(max_length=20, choices=LoginState.choices, default=LoginState.UNKNOWN)
-    outer_state = models.CharField(max_length=24, choices=OuterState.choices, default=OuterState.UNKNOWN)
-    frame_state = models.CharField(max_length=16, choices=FrameState.choices, default=FrameState.UNKNOWN)
+    outer_state = models.CharField(
+        max_length=24,
+        choices=OuterState.choices,
+        default=OuterState.UNKNOWN,
+        db_default=OuterState.UNKNOWN,
+    )
+    frame_state = models.CharField(
+        max_length=16,
+        choices=FrameState.choices,
+        default=FrameState.UNKNOWN,
+        db_default=FrameState.UNKNOWN,
+    )
     frame_scope_version = models.PositiveBigIntegerField(null=True, blank=True)
-    available_actions = models.JSONField(default=list)
+    available_actions = models.JSONField(default=list, db_default=[])
     login_wait_until = models.DateTimeField(null=True, blank=True)
     checked_at = models.DateTimeField(null=True, blank=True)
     outer_verified_at = models.DateTimeField(null=True, blank=True)
@@ -191,13 +201,13 @@ class OriginalPost(models.Model):
     title = models.CharField(max_length=500, blank=True)
     content_html = models.TextField(blank=True)
     content_text = models.TextField(blank=True)
-    ballot_text = models.TextField(blank=True)
+    ballot_text = models.TextField(blank=True, db_default="")
     publish_time = models.DateTimeField(null=True, blank=True)
     status = models.IntegerField(null=True, blank=True)
     recommend_status = models.IntegerField(null=True, blank=True)
     source_appid = models.CharField(max_length=128, blank=True)
-    author_openid = models.CharField(max_length=255, blank=True, db_index=True)
-    author_nick_name = models.CharField(max_length=255, blank=True)
+    author_openid = models.CharField(max_length=255, blank=True, db_index=True, db_default="")
+    author_nick_name = models.CharField(max_length=255, blank=True, db_default="")
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -214,7 +224,7 @@ class AuthorMuteStatus(models.Model):
     nick_name = models.CharField(max_length=255, blank=True)
     local_muted_until = models.DateTimeField(null=True, blank=True)
     global_muted_until = models.DateTimeField(null=True, blank=True)
-    permanent_mute_enabled = models.BooleanField(default=False)
+    permanent_mute_enabled = models.BooleanField(default=False, db_default=False)
     permanent_mute_set_at = models.DateTimeField(null=True, blank=True)
     permanent_mute_set_by = models.ForeignKey(
         settings.AUTH_USER_MODEL,
@@ -254,7 +264,12 @@ class AuthorMuteStatus(models.Model):
 class PostMedia(models.Model):
     post = models.ForeignKey(OriginalPost, on_delete=models.CASCADE, related_name="media")
     url = models.URLField(max_length=1000)
-    media_type = models.CharField(max_length=16, choices=MediaType.choices, default=MediaType.IMAGE)
+    media_type = models.CharField(
+        max_length=16,
+        choices=MediaType.choices,
+        default=MediaType.IMAGE,
+        db_default=MediaType.IMAGE,
+    )
     width = models.PositiveIntegerField(null=True, blank=True)
     height = models.PositiveIntegerField(null=True, blank=True)
     is_gif = models.BooleanField(default=False)

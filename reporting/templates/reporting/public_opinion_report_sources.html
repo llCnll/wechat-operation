@@ -1,0 +1,11 @@
+{% extends "posts/operations_base.html" %}
+{% load static %}
+
+{% block title %}锁定来源 #{{ report.pk }} | 舆情报告{% endblock %}
+{% block extra_head %}<link href="{% static 'reporting/public_opinion_reports.css' %}" rel="stylesheet">{% endblock %}
+
+{% block content %}
+<section class="masthead compact-head opinion-head"><div><p class="eyebrow">LOCKED REPORT SOURCES</p><h1>报告 #{{ report.pk }} 的锁定来源</h1><p>以下内容是首次执行时的历史输入，不代表帖子当前状态或当前 AI 结论。</p></div><div class="opinion-head-actions"><a href="{% url 'public-opinion-report-detail' report.pk %}?appid={{ appid }}">返回报告</a></div></section>
+<section class="opinion-sources"><p class="opinion-note">来源锁定于 {{ report.source_locked_at|date:'Y-m-d H:i:s' }}，保留至 {{ report.retention_until|date:'Y-m-d' }}。文本仅用于报告追溯，不会导出至 Word。</p>{% for source in page %}<article><header><div><b>#{{ source.topic_id }}</b><span>{{ source.publish_time|date:'Y-m-d H:i:s' }}</span></div><a href="{% url 'operations-post-detail' source.topic_id %}">查看当前帖子</a></header><dl><div><dt>内容指纹</dt><dd>{{ source.content_fingerprint }}</dd></div><div><dt>锁定 AI 类别</dt><dd>{{ source.ai_category|default:'未覆盖' }}</dd></div><div><dt>锁定情绪</dt><dd>{{ source.ai_sentiment|default:'未覆盖' }}</dd></div></dl><h2>{{ source.title|default:'（无标题）' }}</h2>{% if source.content_text %}<pre>{{ source.content_text }}</pre>{% endif %}{% if source.ballot_text %}<p class="opinion-ballot">投票：{{ source.ballot_text }}</p>{% endif %}</article>{% empty %}<p class="opinion-empty">没有锁定的本期来源。</p>{% endfor %}</section>
+{% if page.has_other_pages %}<nav class="opinion-pagination">{% if page.has_previous %}<a href="?appid={{ appid }}&page={{ page.previous_page_number }}">上一页</a>{% endif %}<span>第 {{ page.number }} / {{ page.paginator.num_pages }} 页</span>{% if page.has_next %}<a href="?appid={{ appid }}&page={{ page.next_page_number }}">下一页</a>{% endif %}</nav>{% endif %}
+{% endblock %}
