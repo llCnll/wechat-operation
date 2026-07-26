@@ -1,7 +1,7 @@
 from datetime import timedelta
 from contextlib import contextmanager
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import call, patch
 
 import pytest
 from django.contrib.auth import get_user_model
@@ -182,6 +182,26 @@ def test_dashboard_explicitly_marks_missing_author_mute_observation_as_unknown()
 
 
 @pytest.mark.django_db
+def test_dashboard_displays_only_the_local_author_nickname_projection():
+    user = get_user_model().objects.create_user(username="author-display", password="test-password")
+    post = OriginalPost.objects.create(
+        topic_id=981,
+        content_id="author-display",
+        source_appid="wx6d2454a8afcd9706",
+        content_text="待审核",
+        author_nick_name="展示作者",
+    )
+    client = Client()
+    client.force_login(user)
+
+    response = client.get(f"/?topic={post.topic_id}")
+
+    assert response.status_code == 200
+    assert response.content.decode().count("展示作者") >= 2
+    assert "作者未知" not in response.content.decode()
+
+
+@pytest.mark.django_db
 def test_dashboard_marks_active_author_mute_with_a_distinct_indicator():
     user = get_user_model().objects.create_user(username="mute-active", password="test-password")
     now = timezone.now()
@@ -347,11 +367,11 @@ def test_invalid_cdp_login_control_only_opens_controlled_chrome(mock_call):
 
     assert response.status_code == 302
     assert response.url == "/reports/"
-    mock_call.assert_called_once_with("OPEN_CONTROLLED_LOGIN")
+    assert mock_call.call_args_list == [call("OPEN_CONTROLLED_LOGIN"), call("CHECK_LOGIN")]
 
 
 @pytest.mark.django_db
-@patch("posts.views.GameCircleIpcClient.call", return_value={"status": "LOGIN_NOT_REQUIRED"})
+@patch("posts.views.GameCircleIpcClient.call", side_effect=[{"status": "CONTROLLED_SESSION_PAGE_OPENED"}, {"status": "CHECK_COMPLETED"}])
 def test_login_control_reports_a_recovered_session_without_claiming_it_opened_a_page(mock_call):
     user = get_user_model().objects.create_user(username="cdp-login-ready", password="test-password")
     client = Client()
@@ -360,8 +380,8 @@ def test_login_control_reports_a_recovered_session_without_claiming_it_opened_a_
     response = client.post("/auth/open-login/", {"return_to": "/admin/"}, follow=True)
 
     assert response.status_code == 200
-    assert "外层会话已恢复，当前游戏 Frame 正在建立或已可用。" in response.content.decode()
-    mock_call.assert_called_once_with("OPEN_CONTROLLED_LOGIN")
+    assert "已打开受控会话页并完成状态检查" in response.content.decode()
+    assert mock_call.call_args_list == [call("OPEN_CONTROLLED_LOGIN"), call("CHECK_LOGIN")]
 
 
 @pytest.mark.django_db

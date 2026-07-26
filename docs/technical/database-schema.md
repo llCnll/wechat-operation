@@ -59,6 +59,7 @@
 | `recommend_status` | 整数，可空 | 原平台推荐状态原值，当前未确认稳定枚举。 |
 | `source_appid` | 字符串，最长 128，可留空 | 所属小游戏 AppID。 |
 | `author_openid` | 字符串，最长 255，可留空、有索引 | 管理详情返回的作者用户 ID；仅用于禁言状态和同作者历史原创帖关联。 |
+| `author_nick_name` | 字符串，最长 255，可留空 | 经帖子详情或作者详情确认的最近作者昵称投影；仅用于内容管理显示，不参与作者搜索。 |
 | `created_at` | 日期时间，自动写入 | 首次入库时间。 |
 | `updated_at` | 日期时间，自动更新 | 最近同步时间。 |
 
@@ -446,7 +447,7 @@ AI 评估中的单项风险证据，可保存多段命中内容。
 | `PERMANENT_MUTE_RENEWAL` | 由自动任务生产者按受限定时规则为当前游戏临近到期或禁言时间为 0 的永久标记续期；不处理全局禁言或其他游戏。 | 禁言维护 Worker（Supervisor 服务 `mute_maintenance`） |
 | `AUTHOR_MUTE_STATUS_REFRESH` | 手动刷新当前游戏禁言列表作者的禁言时间；冻结列表判断时刻与作者集合并逐位读取用户详情，不执行上游写操作；同一范围仅保留一个活跃任务。 | 禁言维护 Worker（Supervisor 服务 `mute_maintenance`） |
 | `POST_AUTHOR_MUTE_STATUS_SYNC` | 扫描当前游戏全量帖子作者；按作者去重读取用户详情，只将仍禁言作者补充到禁言管理，不设置永久禁言；同一范围仅保留一个活跃任务。 | 禁言维护 Worker（Supervisor 服务 `mute_maintenance`） |
-| `AUTHOR_MUTE_STATUS_BACKFILL` | 一次性补全历史原创帖作者禁言状态。 | 人工补采 Worker（Supervisor 服务 `backfill_ingestion`） |
+| `AUTHOR_MUTE_STATUS_BACKFILL_V2` | 一次性补全历史原创帖作者昵称与禁言状态；已知作者按游戏去重读取作者详情。旧 `AUTHOR_MUTE_STATUS_BACKFILL` 不由新版 Worker 认领。 | 人工补采 Worker（Supervisor 服务 `backfill_ingestion`） |
 | `METRIC_DAILY_SYNC` / `METRIC_WEEKLY_SYNC` / `METRIC_BACKFILL` | 游戏圈日/周聚合指标同步或人工范围回填；当前工作区已实现、待发布。 | 指标快照 Worker（Supervisor 服务 `metric_sync`） |
 
 ## `reporting_gamecirclemetricsnapshot`（游戏圈指标快照，待发布）
@@ -489,4 +490,4 @@ Supervisor 不新增数据库表。它在 `runtime/supervisor/` 保存独占锁�
 
 以下表由 Django 认证、会话、后台和迁移机制维护，不是内容运营业务模型：`auth_user`、`auth_group`、`auth_permission`、`auth_user_groups`、`auth_user_user_permissions`、`auth_group_permissions`、`django_session`、`django_admin_log`、`django_content_type`、`django_migrations`。
 
-业务表仅以外键引用 `auth_user` 的本地后台用户。系统不将浏览器 Cookie、会话令牌、完整已认证 URL、运营者身份标识或评论正文写入任意数据库表。管理详情返回的发帖作者用户 ID例外：它仅保存在 `posts_originalpost.author_openid` 与 `posts_authormutestatus.openid`，用于禁言状态和同作者历史原创帖关联；不得进入普通报表、通用搜索索引、日志或导出。
+业务表仅以外键引用 `auth_user` 的本地后台用户。系统不将浏览器 Cookie、会话令牌、完整已认证 URL、运营者身份标识或评论正文写入任意数据库表。管理详情返回的发帖作者用户 ID例外：它仅保存在 `posts_originalpost.author_openid` 与 `posts_authormutestatus.openid`，用于禁言状态和同作者历史原创帖关联；不得进入普通报表、通用搜索索引、日志或导出。作者昵称仅保存为 `posts_originalpost.author_nick_name` 和禁言状态投影中的最小显示字段。

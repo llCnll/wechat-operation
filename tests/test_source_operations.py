@@ -131,6 +131,14 @@ def test_author_detail_uses_the_fixed_user_query_contract(monkeypatch):
     ]
 
 
+def test_author_detail_rejects_an_unbounded_identity_before_source_access(monkeypatch):
+    client = object.__new__(CdpGameCircleClient)
+    monkeypatch.setattr(client, "_get", lambda *_args: pytest.fail("unexpected source read"))
+
+    with pytest.raises(SourceContractError, match="作者用户 ID 无效"):
+        client.get_author_detail("x" * 256)
+
+
 def test_management_detail_deleted_error_is_mapped_to_business_deletion(monkeypatch):
     client = object.__new__(CdpGameCircleClient)
     client._last_request_at = 0.0
@@ -230,6 +238,16 @@ def test_bounded_management_detail_read_restores_the_default_timeout(monkeypatch
     monkeypatch.setattr(client, "get_post_metrics", lambda _topic_id: {"data": {"topic": {}}})
 
     client.get_post_metrics_with_timeout(321, timeout_seconds=3)
+
+    assert client.frame.timeout == 15
+
+
+def test_bounded_author_detail_read_restores_the_default_timeout(monkeypatch):
+    client = object.__new__(CdpGameCircleClient)
+    client.frame = type("Frame", (), {"timeout": 15})()
+    monkeypatch.setattr(client, "get_author_detail", lambda _openid: {"data": {"user": {}}})
+
+    client.get_author_detail_with_timeout("author", timeout_seconds=3)
 
     assert client.frame.timeout == 15
 

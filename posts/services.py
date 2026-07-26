@@ -57,15 +57,30 @@ def _sync_author_mute_observation(
         local_until = _future_timestamp(block_info.get("block_end_time"), observed_at=observed_at)
     global_until = _future_timestamp(creator.get("global_block_end_time"), observed_at=observed_at)
 
-    if post is not None and post.author_openid != openid:
-        post.author_openid = openid
-        post.save(update_fields=["author_openid", "updated_at"])
-
     state = AuthorMuteStatus.objects.select_for_update().filter(
         openid=openid, source_appid=source_appid
     ).first()
     if state is not None and state.source_requested_at > requested_at:
         return state
+
+    if post is not None:
+        post_updates = []
+        if post.author_openid != openid:
+            post.author_openid = openid
+            post_updates.append("author_openid")
+        if nick_name and post.author_nick_name != nick_name:
+            post.author_nick_name = nick_name
+            post_updates.append("author_nick_name")
+        if post_updates:
+            post.save(update_fields=[*post_updates, "updated_at"])
+    if nick_name:
+        OriginalPost.objects.filter(
+            source_appid=source_appid,
+            author_openid=openid,
+        ).exclude(author_nick_name=nick_name).update(
+            author_nick_name=nick_name,
+            updated_at=observed_at,
+        )
     active = local_until is not None or global_until is not None
     if state is None:
         if not active and not create_if_inactive:
@@ -134,6 +149,7 @@ def sync_author_mute_status_from_user_detail(
     payload: dict[str, Any],
     *,
     source_appid: str,
+    expected_openid: str,
     source_requested_at=None,
     post: OriginalPost | None = None,
     create_if_inactive: bool = True,
@@ -145,6 +161,11 @@ def sync_author_mute_status_from_user_detail(
         return None
     if not isinstance(user, dict) or not source_appid:
         return None
+    observed_openid = user.get("openid")
+    if not isinstance(expected_openid, str) or not expected_openid:
+        raise SourceContractError("作者身份校验参数无效")
+    if observed_openid != expected_openid:
+        raise SourceContractError("作者详情响应身份不一致")
     return _sync_author_mute_observation(
         creator=user,
         source_appid=source_appid,

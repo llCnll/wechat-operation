@@ -13,7 +13,7 @@ from jobs.adapters import SourceBusinessDeletedError, SourceContractError, Sourc
 from jobs.models import BackgroundJob
 from jobs.services import JobDeferred
 from jobs.task_types import (
-    AUTHOR_MUTE_STATUS_BACKFILL_TASK,
+    AUTHOR_MUTE_STATUS_BACKFILL_V2_TASK,
     LEGACY_INGEST_WINDOW_TASK,
     MANUAL_INGEST_WINDOW_TASK,
     METRICS_REFRESH_WINDOW_TASK,
@@ -250,5 +250,5 @@ BACKFILL_INGESTION_WORKER_HANDLERS = {
     LEGACY_INGEST_WINDOW_TASK: ingest_window_handler,
     MANUAL_INGEST_WINDOW_TASK: ingest_window_handler,
     METRICS_REFRESH_WINDOW_TASK: refresh_metrics_window_handler,
-    AUTHOR_MUTE_STATUS_BACKFILL_TASK: author_mute_status_backfill_handler,
+    AUTHOR_MUTE_STATUS_BACKFILL_V2_TASK: author_mute_status_backfill_handler,
 }

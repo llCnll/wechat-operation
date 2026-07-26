@@ -42,6 +42,8 @@ def _lease(appid="game-a"):
 
 
 def _verified_outer(page, outer, token="outer-token"):
+    if hasattr(outer, "__dict__") and not hasattr(outer, "read_usable_outer_token"):
+        outer.read_usable_outer_token = lambda: token
     current_appid = (
         outer.wait_for_readable_current_game()
         if hasattr(outer, "wait_for_readable_current_game")
@@ -167,7 +169,7 @@ def test_login_pending_is_unique_and_exposes_only_fixed_projection(monkeypatch):
             return "browser"
 
         def create_target(self, _url, *, background):
-            assert background is False
+            assert background is True
             return "private-target"
 
         def target_exists(self, target_id):
@@ -184,28 +186,31 @@ def test_login_pending_is_unique_and_exposes_only_fixed_projection(monkeypatch):
     service = GameCircleSessionService()
     monkeypatch.setattr("config.game_circle_service.CdpBrowser", Browser)
 
-    assert service.open_login_page()["status"] == "LOGIN_PAGE_OPENED"
-    assert service.open_login_page()["status"] == "LOGIN_PAGE_REUSED"
-    state = GameCircleLoginRuntimeState.objects.get(pk=1)
-    assert state.outer_state == GameCircleLoginRuntimeState.OuterState.LOGIN_PENDING
-    assert state.frame_state == GameCircleLoginRuntimeState.FrameState.UNREADY
-    assert state.available_actions == [GameCircleLoginRuntimeState.Action.OPEN_LOGIN]
+    assert service.open_login_page()["status"] == "CONTROLLED_SESSION_PAGE_OPENED"
+    assert service.open_login_page()["status"] == "CONTROLLED_SESSION_PAGE_OPENED"
     assert "private-target" not in str(service.runtime_status())
 
 
 @pytest.mark.django_db
-def test_open_login_page_never_creates_a_target_outside_the_authorized_runtime_state(monkeypatch):
+def test_open_login_page_opens_the_observable_controlled_session_page(monkeypatch):
     GameCircleLoginRuntimeState.objects.create(
         outer_state=GameCircleLoginRuntimeState.OuterState.UNKNOWN,
         frame_state=GameCircleLoginRuntimeState.FrameState.UNREADY,
     )
     service = GameCircleSessionService()
-    monkeypatch.setattr(
-        "config.game_circle_service.CdpBrowser",
-        lambda: pytest.fail("an unauthorized login command must not inspect or create a target"),
-    )
+    class Browser:
+        def browser_generation(self):
+            return "browser"
+        def target_exists(self, _target_id):
+            return False
+        def create_target(self, _url, *, background):
+            assert background is True
+            return "controlled-home"
+        def activate_target(self, target_id):
+            assert target_id == "controlled-home"
 
-    assert service.open_login_page() == {"status": "LOGIN_RECOVERY_IN_PROGRESS"}
+    monkeypatch.setattr("config.game_circle_service.CdpBrowser", Browser)
+    assert service.open_login_page() == {"status": "CONTROLLED_SESSION_PAGE_OPENED"}
 
 
 @pytest.mark.django_db
@@ -242,7 +247,7 @@ def test_unverified_bootstrap_failure_projects_unknown_outer_state(monkeypatch):
 
 
 @pytest.mark.django_db
-def test_open_login_page_after_outer_recovery_is_a_target_free_noop(monkeypatch):
+def test_open_login_page_after_outer_recovery_remains_observable(monkeypatch):
     GameCircleLoginRuntimeState.objects.create(
         outer_state=GameCircleLoginRuntimeState.OuterState.OUTER_READY,
         frame_state=GameCircleLoginRuntimeState.FrameState.BUILDING,
@@ -250,12 +255,61 @@ def test_open_login_page_after_outer_recovery_is_a_target_free_noop(monkeypatch)
     )
     service = GameCircleSessionService()
 
-    monkeypatch.setattr(
-        "config.game_circle_service.CdpBrowser",
-        lambda: pytest.fail("a recovered session must not create or inspect a login target"),
-    )
+    class Browser:
+        def browser_generation(self):
+            return "browser"
+        def target_exists(self, _target_id):
+            return False
+        def create_target(self, _url, *, background):
+            assert background is True
+            return "controlled-home"
+        def activate_target(self, target_id):
+            assert target_id == "controlled-home"
 
-    assert service.open_login_page() == {"status": "LOGIN_NOT_REQUIRED"}
+    monkeypatch.setattr("config.game_circle_service.CdpBrowser", Browser)
+    assert service.open_login_page() == {"status": "CONTROLLED_SESSION_PAGE_OPENED"}
+
+
+@pytest.mark.django_db
+def test_open_controlled_session_page_reuses_the_current_lease_home(monkeypatch):
+    scope = ExecutionScope("game-a", 1)
+    service = GameCircleSessionService()
+    service._browser_generation = "browser"
+    service._leases[scope.target_appid] = [_lease()]
+
+    class Browser:
+        def browser_generation(self):
+            return "browser"
+        def target_exists(self, target_id):
+            return target_id == "home"
+        def create_target(self, *_args, **_kwargs):
+            pytest.fail("a live lease HOME must be the observable session page")
+        def activate_target(self, target_id):
+            assert target_id == "home"
+
+    monkeypatch.setattr("config.game_circle_service.CdpBrowser", Browser)
+    monkeypatch.setattr("config.game_circle_service.current_execution_scope", lambda **_kwargs: scope)
+
+    assert service.open_login_page() == {"status": "CONTROLLED_SESSION_PAGE_OPENED"}
+
+
+def test_ensure_home_keeps_login_pending_page_ahead_of_idle_page(monkeypatch):
+    service = GameCircleSessionService()
+    service._owned_targets = {
+        "idle": OwnedTarget("idle", "HOME_IDLE", service.owner_epoch),
+        "pending": OwnedTarget("pending", "LOGIN_PENDING", service.owner_epoch),
+    }
+    closed = []
+
+    class Browser:
+        def target_exists(self, target_id):
+            return target_id in {"idle", "pending"}
+        def close_target(self, target_id):
+            closed.append(target_id)
+
+    assert service._ensure_home(Browser()) == "pending"
+    assert closed == ["idle"]
+    assert set(service._owned_targets) == {"pending"}
 
 
 @pytest.mark.django_db
@@ -326,7 +380,7 @@ def test_bootstrap_publishes_only_after_frame_identity_and_minimum_read(monkeypa
 
 
 @pytest.mark.django_db
-def test_bootstrap_scan_required_creates_no_frame_and_requires_explicit_login(monkeypatch):
+def test_bootstrap_scan_route_holds_the_candidate_for_bounded_session_recovery(monkeypatch):
     created = []
 
     class Browser:
@@ -338,7 +392,7 @@ def test_bootstrap_scan_required_creates_no_frame_and_requires_explicit_login(mo
             return "home"
 
         def target_exists(self, _target_id):
-            return False
+            return True
 
         def close_target(self, _target_id):
             return None
@@ -354,10 +408,78 @@ def test_bootstrap_scan_required_creates_no_frame_and_requires_explicit_login(mo
     service.bootstrap(scope=ExecutionScope("game-a", 1), intent=BootstrapIntent.ESTABLISH_FRAME)
 
     assert created == [True]
-    assert service._login_pending is None
+    assert service._login_pending is not None
+    assert service._login_pending.target_id == "home"
+    assert service._owned_targets["home"].role == "LOGIN_PENDING"
     state = GameCircleLoginRuntimeState.objects.get(pk=1)
-    assert state.outer_state == GameCircleLoginRuntimeState.OuterState.LOGIN_REQUIRED
+    assert state.outer_state == GameCircleLoginRuntimeState.OuterState.LOGIN_PENDING
     assert state.frame_state == GameCircleLoginRuntimeState.FrameState.UNREADY
+
+
+@pytest.mark.django_db
+def test_bootstrap_outer_rejection_holds_the_candidate_for_bounded_session_recovery(monkeypatch):
+    class Browser:
+        def browser_generation(self):
+            return "browser"
+
+        def create_target(self, _url, *, background):
+            assert background is True
+            return "home"
+
+        def target_exists(self, _target_id):
+            return True
+
+        def close_target(self, _target_id):
+            return None
+
+    service = GameCircleSessionService()
+    monkeypatch.setattr("config.game_circle_service.CdpBrowser", Browser)
+    monkeypatch.setattr(
+        service,
+        "_outer_session",
+        lambda _home: (_ for _ in ()).throw(OuterLoginExpiredError("expired")),
+    )
+
+    result = service.bootstrap(scope=ExecutionScope("game-a", 1), intent=BootstrapIntent.ESTABLISH_FRAME)
+
+    assert result.terminal is False
+    assert service._login_pending is not None
+    assert service._owned_targets["home"].role == "LOGIN_PENDING"
+    assert GameCircleLoginRuntimeState.objects.get(pk=1).outer_state == GameCircleLoginRuntimeState.OuterState.LOGIN_PENDING
+
+
+@pytest.mark.django_db
+def test_open_login_activates_the_recoverable_candidate_instead_of_creating_another_tab(monkeypatch):
+    service = GameCircleSessionService()
+    service._browser_generation = "browser"
+    service._owned_targets["candidate-home"] = OwnedTarget(
+        "candidate-home", "LOGIN_PENDING", service.owner_epoch
+    )
+    service._login_pending = _LoginPending(
+        "candidate-home", "browser", timezone.now() + timedelta(minutes=1)
+    )
+    GameCircleLoginRuntimeState.objects.create(
+        outer_state=GameCircleLoginRuntimeState.OuterState.LOGIN_PENDING,
+        frame_state=GameCircleLoginRuntimeState.FrameState.UNREADY,
+        available_actions=[GameCircleLoginRuntimeState.Action.OPEN_LOGIN],
+    )
+
+    class Browser:
+        def browser_generation(self):
+            return "browser"
+
+        def target_exists(self, target_id):
+            return target_id == "candidate-home"
+
+        def activate_target(self, target_id):
+            assert target_id == "candidate-home"
+
+        def create_target(self, *_args, **_kwargs):
+            pytest.fail("recoverable candidate must be reused")
+
+    monkeypatch.setattr("config.game_circle_service.CdpBrowser", Browser)
+
+    assert service.open_login_page() == {"status": "CONTROLLED_SESSION_PAGE_OPENED"}
 
 
 @pytest.mark.django_db
@@ -502,6 +624,9 @@ def test_login_wait_defers_outer_verification_for_ten_seconds_after_scan_disappe
     class Outer:
         def __init__(self, _page):
             return None
+
+        def is_login_page(self):
+            return False
 
         def scan_required(self):
             return False
@@ -1293,6 +1418,34 @@ def test_managed_game_directory_expiry_projects_login_required(monkeypatch):
 
     assert raised.value.category == "SESSION_UNAVAILABLE"
     assert GameCircleLoginRuntimeState.objects.get(pk=1).outer_state == GameCircleLoginRuntimeState.OuterState.LOGIN_REQUIRED
+
+
+@pytest.mark.django_db
+def test_managed_game_directory_unready_session_never_projects_outer_ready(monkeypatch):
+    service = GameCircleSessionService()
+
+    class Browser:
+        def browser_generation(self):
+            return "browser"
+
+        def create_target(self, _url, *, background):
+            assert background is True
+            return "home"
+
+    class Page:
+        def close(self):
+            return None
+
+    monkeypatch.setattr("config.game_circle_service.CdpBrowser", Browser)
+    monkeypatch.setattr(service, "_outer_session", lambda _home: _token_unready_outer(Page(), object()))
+
+    with pytest.raises(GameCircleIpcError) as raised:
+        service.list_managed_games()
+
+    state = GameCircleLoginRuntimeState.objects.get(pk=1)
+    assert raised.value.category == "SESSION_UNAVAILABLE"
+    assert state.outer_state == GameCircleLoginRuntimeState.OuterState.UNKNOWN
+    assert state.error_category == GameCircleLoginRuntimeState.ErrorCategory.OUTER_SESSION_UNREADY
 
 
 @pytest.mark.django_db

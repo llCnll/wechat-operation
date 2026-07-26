@@ -159,21 +159,19 @@ def _escalated_review_dashboard_url(request, review: AiOperationReview) -> str:
 @login_required
 @require_POST
 def open_controlled_login(request):
-    """Request the session service to open its fixed unauthenticated login page."""
+    """Activate the service-owned page used for login and session observation."""
     try:
-        result = GameCircleIpcClient().call("OPEN_CONTROLLED_LOGIN")
+        ipc = GameCircleIpcClient()
+        result = ipc.call("OPEN_CONTROLLED_LOGIN")
+        ipc.call("CHECK_LOGIN")
     except GameCircleIpcError as exc:
         messages.error(request, str(exc))
     else:
         status = result.get("status") if isinstance(result, dict) else ""
-        if status == "LOGIN_NOT_REQUIRED":
-            messages.info(request, "外层会话已恢复，当前游戏 Frame 正在建立或已可用。")
-        elif status in {"LOGIN_RECOVERY_IN_PROGRESS", "LOGIN_NOT_AVAILABLE"}:
-            messages.info(request, "会话正在检查或恢复中，无需重复打开登录页。")
-        elif status == "LOGIN_PAGE_REUSED":
-            messages.info(request, "登录页已打开，请继续使用微信扫码确认。")
+        if status == "CONTROLLED_SESSION_PAGE_OPENED":
+            messages.info(request, "已打开受控会话页并完成状态检查；请在该页面查看登录状态或完成扫码。")
         else:
-            messages.info(request, "已在受控 Chrome 打开登录页，请使用微信扫码确认。")
+            messages.info(request, "受控会话页已检查；请在该页面确认登录状态。")
     return redirect(_safe_dashboard_return_url(request))
 
 

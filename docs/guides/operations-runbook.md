@@ -43,6 +43,8 @@ Compress-Archive -Path $items.FullName -DestinationPath ../wechat-operation.zip 
 
 - Chrome CDP 仅由 Supervisor 启动的受控 Chrome 使用；它采用独立 profile 且只监听固定的 `127.0.0.1:9222`，不保存 Cookie、令牌或运营者身份标识。Supervisor 以 CDP browser generation 判断 Chrome 健康，不能以启动器 PID 变化判定浏览器死亡；启动时优先请求 CDP 关闭旧浏览器，端口仍占用才终止监听进程。不得将其他浏览器或本机程序绑定到该端口。管理详情中的发帖作者用户 ID仅可按产品定义保存到原创帖和作者禁言状态，用于禁言管理与历史关联，不得写入日志或导出。
 - `game_circle_session` 是唯一持有 CDP、outer token、来源身份 token 与系统自建 target 的常驻服务。Web、采集、指标、AI、回填与一次性任务只通过固定、仅监听 `127.0.0.1`、且由 Supervisor 注入独立 capability 的 IPC 提交 scope 和已批准的业务参数；IPC 不接受 CDP 命令、JavaScript、URL、target ID、路径或认证材料。无 capability 的连接在业务解析前拒绝；不得复制或记录 capability。它阻止没有运行时进程权限的本机调用方，但不能替代操作系统账户隔离。
+
+受控 Chrome 中的“受控会话页”由该服务唯一登记。运营人员需要扫码、核对页面状态或在 Network 中观察 `getappinfo` 时，应从控制台点击“查看受控会话页”；检查外层会话和建立 Frame 都使用这同一页面。系统不会接管任意人工新开标签，也不会显示 target ID、完整 URL、Cookie 或 token。若该页显示扫码、token 在验证中消失，或 Frame 前复读 token 失败，控制台会显示会话未就绪，不能以历史检查成功继续处理来源操作。
 - 会话服务按 AppID 维护一个 ACTIVE 及零到多个 RETIRING lease。新 lease 完整验证后才发布；旧 lease 仅在退役等待结束且请求访问归零后关闭它自己的 HOME/PLUGIN tab。因为 Chrome 已由 Supervisor 管理，受控 target 可以回收至零 tab；手动打开的未知 tab 永不接管、使用或关闭。
 - 首次部署执行 `mkdir -p runtime && cp .env.example runtime/.env`。日常 AI/OCR 和人工处置授权均从系统配置首页的“按服务管理”保存；`runtime/.env` 仅用于后台不可用时的运维恢复。
 - AI/OCR 凭据只通过 `AI_*`、`OCR_*` 运行时配置注入。系统配置首页保存时已有密钥不会回显；轮换后由服务卡重启 AI Worker。
@@ -97,7 +99,7 @@ uv run python manage.py enqueue_author_mute_status_backfill
 | 现象 | 首先检查 | 恢复方式 |
 | --- | --- | --- |
 | 没有新增帖子 | Pipeline 中游戏圈会话服务、受控 Chrome 会话、Scheduler 与实时采集 Worker 是否运行 | 先恢复游戏圈会话服务与受控 Chrome 登录，再在 Pipeline 重启帖子采集 Worker；停机超过 30 分钟时在“帖子采集 Worker”创建历史补采。 |
-| 顶部“外层会话”或“Frame”状态异常 | 先看文案：`需扫码登录`、`Chrome 未启动`、`Frame 未就绪` 或 `状态待检查` | 只有“需扫码登录”可点击，并只在受控 Chrome 打开固定公众平台登录页后手动扫码；`Frame 未就绪` 使用“建立当前游戏 Frame”，其余状态不打开登录页。若 Chrome 未启动，在 Supervisor 中重启游戏圈会话服务；不要手工启动浏览器或在工作台浏览器直接登录。 |
+| 顶部“外层会话”或“Frame”状态异常 | 先看文案：`正在恢复会话`、`需扫码登录`、`Chrome 未启动`、`Frame 未就绪` 或 `状态待检查` | “正在恢复会话”表示服务保留了自身新建的登录路由 target，先等待平台自动回到 Home；可点击入口将该 target 前台显示，只有稳定停留在扫码页时才需人工扫码。`Frame 未就绪` 使用“建立当前游戏 Frame”，其余状态不打开登录页。若 Chrome 未启动，在 Supervisor 中重启游戏圈会话服务；不要手工启动浏览器或在工作台浏览器直接登录。 |
 | 来源任务提示等待会话刷新 | `game_circle_session` 服务、当前操作游戏和刷新 Job 的脱敏摘要 | 保持该服务运行；它会先从新 HOME 自动重建。仅摘要为“需要人工扫码”时，才在受控 Chrome 中扫码后重新创建/等待刷新任务；不得重放人工写操作。 |
 | 任务长期 `PENDING` | 任务的 `task_type` 与 Pipeline 对应 Worker | 在 Pipeline 启动帖子采集 Worker（会同时启动两个采集服务）或 AI Worker；不要并行启动第二个相同职责实例。 |
 | 任务 `FAILED` | 系统配置与追溯台“后台任务”的脱敏 `error_summary` 与 checkpoint | 修复会话、配置或上游契约后重新入队；不要修改会话字段。 |
@@ -126,6 +128,12 @@ uv run python manage.py enqueue_ingestion --appid wx6d2454a8afcd9706 --hours 6
 ## 运营分析互动刷新
 
 运营人员可在 `/reports/` 的“运营分析”中选择最多 31 个北京时间自然日，并点击“刷新本范围数据”。该操作只入队 `METRICS_REFRESH_WINDOW`，不会在 Web 请求内连接 Chrome。人工补采 Worker 按 `topic_id` 保存 checkpoint，成功帖子新增互动快照；原平台已删除的帖子会计入跳过数，传输或契约异常会记录失败帖子样本并继续处理其余帖子。再次手动触发同一范围会创建新任务并重新尝试失败帖子。刷新不修改帖子正文、媒体、投票、审核状态或任何上游状态。
+
+## 一次性作者状态回填
+
+`uv run python manage.py enqueue_author_mute_status_backfill` 只创建或恢复 `AUTHOR_MUTE_STATUS_BACKFILL_V2`，由人工补采 Worker 消费。任务对已有作者身份按当前游戏去重读取固定作者详情，并补齐昵称和禁言状态；只有本地缺少作者身份时才读取帖子详情。已删除且缺少作者身份的帖子会以脱敏计数跳过，不会推断“未禁言”。
+
+V2 检查点只保存范围、帖子游标、处理/跳过/失败计数和有限失败类别，不保存作者用户 ID、昵称、原始来源响应或认证信息。部署 V2 前必须确认没有待执行或运行中的旧 `AUTHOR_MUTE_STATUS_BACKFILL`；旧类型不被新版 Worker 认领，也没有 checkpoint 迁移路径。
 
 ## PostgreSQL 迁移阈值
 
