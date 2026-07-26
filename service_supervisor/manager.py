@@ -6,6 +6,7 @@ import hmac
 import json
 import os
 import secrets
+import signal
 import shutil
 import socket
 import subprocess
@@ -796,6 +797,12 @@ class Supervisor:
 
 def run_supervisor(project_root: Path, runtime_dir: Path) -> int:
     supervisor = Supervisor(project_root, runtime_dir)
+    previous_sigterm_handler = signal.getsignal(signal.SIGTERM)
+
+    def request_graceful_shutdown(_signum, _frame) -> None:
+        raise KeyboardInterrupt
+
+    signal.signal(signal.SIGTERM, request_graceful_shutdown)
     try:
         supervisor.bootstrap()
         supervisor.run_forever()
@@ -809,4 +816,5 @@ def run_supervisor(project_root: Path, runtime_dir: Path) -> int:
         return 0
     finally:
         supervisor.shutdown()
+        signal.signal(signal.SIGTERM, previous_sigterm_handler)
     return 0

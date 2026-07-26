@@ -221,13 +221,14 @@ uv run python manage.py upgrade_plan --json
 
 按 `upgrade_plan` 输出逐项执行：
 
-1. `database=migrate`：运行 `uv run python manage.py migrate`。
-2. `static=collectstatic`：运行 `uv run python manage.py collectstatic --noinput`，或按清单重启整个 Supervisor，使其执行启动预检。
-3. 每项 `once_jobs`：使用清单给出的 `enqueue` 命令入队，保持指定 Worker 运行，再执行 `upgrade_plan --json`，直到任务 `complete=true`。
-4. `restart.mode=supervisor`：停止当前 Supervisor 后执行 `uv run python -m service_supervisor`；`restart.mode=services`：仅重启清单列出的服务。
-5. 逐条完成 `verification` 命令和健康检查。
+1. 若 `database=migrate` 或 `restart.mode=supervisor`：先停止当前 Supervisor 并等待其全部受管服务退出。不得在旧 Web 或 Worker 仍运行时执行迁移。
+2. `database=migrate`：运行 `uv run python manage.py migrate`。
+3. `static=collectstatic`：运行 `uv run python manage.py collectstatic --noinput`，或由后续完整 Supervisor 启动执行预检。
+4. `restart.mode=supervisor`：执行 `uv run python -m service_supervisor`；`restart.mode=services`：仅重启清单列出的服务。
+5. 每项 `once_jobs`：使用清单给出的 `enqueue` 命令入队，保持指定 Worker 运行，再执行 `upgrade_plan --json`，直到任务 `complete=true`。
+6. 逐条完成 `verification` 命令和健康检查。
 
-当发布包含 Django 数据迁移时，发布清单必须声明 `database=migrate` 与 `restart.mode=supervisor`。若发布不新增一次性 Job 或长期 Worker，应明确将 `once_jobs` 置为空并沿用既有 Supervisor 服务；执行 `migrate` 后重启既有 Supervisor 即可加载 Web 与 Worker 的同一套代码。
+当发布包含 Django 数据迁移时，发布清单必须声明 `database=migrate` 与 `restart.mode=supervisor`。先停止完整 Supervisor、确认旧服务退出、执行 `migrate`，再启动 Supervisor，以确保 Web、Worker 和数据库模式处于同一版本。数据库默认值仅作为异常部署交错时的兼容兜底，不替代上述升级顺序。若发布不新增一次性 Job 或长期 Worker，应明确将 `once_jobs` 置为空并沿用既有 Supervisor 服务。
 
 当发布新增或调整游戏圈会话 IPC、`GameCircleLoginRuntimeState` 或 `game_circle_session` 的常驻职责时，必须声明 `database=migrate`（如有迁移）和 `restart.mode=supervisor`。会话服务重启会主动丢弃内存中的短期 lease/Access 并重新探测；升级过程不得复制 `runtime/supervisor/game-circle-session.json`、Cookie、token 或未完成的人工写请求。人工写审计为“待回读确认”时，先回读确认状态，绝不自动重放。
 

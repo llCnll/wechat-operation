@@ -6,6 +6,7 @@ from unittest.mock import patch
 import httpx
 import pytest
 
+import service_supervisor.manager as supervisor_manager
 from service_supervisor.manager import Supervisor, SupervisorError
 from service_supervisor.runtime import RuntimeStore, SupervisorLeaseGuard, SupervisorLockedError
 
@@ -45,6 +46,37 @@ def test_shutdown_without_the_supervisor_lock_does_not_touch_existing_services(t
     supervisor.shutdown()
 
     assert calls == []
+
+
+def test_sigterm_runs_the_supervisor_shutdown_path(tmp_path, monkeypatch):
+    events = []
+    registered_handlers = []
+
+    class SignalDrivenSupervisor:
+        def __init__(self, *_args):
+            return None
+
+        def bootstrap(self):
+            events.append("bootstrap")
+
+        def run_forever(self):
+            registered_handlers[0](supervisor_manager.signal.SIGTERM, None)
+
+        def shutdown(self):
+            events.append("shutdown")
+
+    monkeypatch.setattr(supervisor_manager, "Supervisor", SignalDrivenSupervisor)
+    monkeypatch.setattr(supervisor_manager.signal, "getsignal", lambda _signal: "previous")
+    monkeypatch.setattr(
+        supervisor_manager.signal,
+        "signal",
+        lambda _signal, handler: registered_handlers.append(handler),
+    )
+
+    assert supervisor_manager.run_supervisor(Path.cwd(), tmp_path) == 0
+    assert events == ["bootstrap", "shutdown"]
+    assert callable(registered_handlers[0])
+    assert registered_handlers[-1] == "previous"
 
 
 def test_supervisor_control_protocol_rejects_web_start_and_invalid_action(tmp_path):

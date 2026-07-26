@@ -32,6 +32,7 @@ class GameCircleMetricSnapshot(models.Model):
         max_length=24,
         choices=MetricPublicationState.choices,
         default=MetricPublicationState.VERIFIED,
+        db_default=MetricPublicationState.VERIFIED,
     )
     captured_at = models.DateTimeField()
     latest_job = models.ForeignKey(

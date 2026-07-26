@@ -128,13 +128,13 @@ class VideoExtraction(models.Model):
     media = models.ForeignKey(PostMedia, on_delete=models.CASCADE, related_name="video_extractions")
     media_fingerprint = models.CharField(max_length=64)
     extractor_version = models.CharField(max_length=64, default="v1")
-    attempt = models.PositiveIntegerField(default=1)
+    attempt = models.PositiveIntegerField(default=1, db_default=1)
     status = models.CharField(
         max_length=20, choices=VideoExtractionStatus.choices, default=VideoExtractionStatus.PENDING
     )
     duration_ms = models.PositiveIntegerField(null=True, blank=True)
     duration_limit_seconds = models.PositiveIntegerField(null=True, blank=True)
-    sampled_intervals_ms = models.JSONField(blank=True, default=list)
+    sampled_intervals_ms = models.JSONField(blank=True, default=list, db_default=[])
     frame_count = models.PositiveIntegerField(default=0)
     error_summary = models.CharField(max_length=500, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
@@ -201,7 +201,7 @@ class PolicyRule(models.Model):
     priority = models.PositiveSmallIntegerField(default=50)
     exceptions = models.JSONField(default=list, blank=True)
     enabled = models.BooleanField(default=True)
-    auto_execution_enabled = models.BooleanField(default=False)
+    auto_execution_enabled = models.BooleanField(default=False, db_default=False)
 
     class Meta:
         verbose_name = "审核策略规则"
@@ -251,8 +251,8 @@ class RiskEvidence(models.Model):
     label = models.CharField(max_length=100)
     confidence = models.FloatField()
     evidence = models.JSONField(default=list)
-    ocr_source_refs = models.JSONField(default=list, blank=True)
-    media_source_refs = models.JSONField(default=list, blank=True)
+    ocr_source_refs = models.JSONField(default=list, blank=True, db_default=[])
+    media_source_refs = models.JSONField(default=list, blank=True, db_default=[])
 
     class Meta:
         verbose_name = "风险证据"
@@ -268,7 +268,7 @@ class ReviewTask(models.Model):
         max_length=32, choices=ReviewStatus.choices, default=ReviewStatus.PENDING
     )
     needs_focus = models.BooleanField(default=False)
-    focus_reasons = models.JSONField(default=list, blank=True)
+    focus_reasons = models.JSONField(default=list, blank=True, db_default=[])
     final_action = models.CharField(max_length=32, choices=RecommendedAction.choices, blank=True)
     reviewed_by = models.ForeignKey(
         settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL
@@ -294,10 +294,10 @@ class ReplyDraft(models.Model):
     adopted = models.BooleanField(default=False)
     adopted_with_edits = models.BooleanField(default=False)
     suppressed_reason = models.CharField(max_length=500, blank=True)
-    faq_rule_id = models.CharField(max_length=100, blank=True)
-    faq_version = models.CharField(max_length=100, blank=True)
-    style_variants = models.JSONField(default=list, blank=True)
-    selected_style = models.CharField(max_length=16, blank=True)
+    faq_rule_id = models.CharField(max_length=100, blank=True, db_default="")
+    faq_version = models.CharField(max_length=100, blank=True, db_default="")
+    style_variants = models.JSONField(default=list, blank=True, db_default=[])
+    selected_style = models.CharField(max_length=16, blank=True, db_default="")
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
@@ -323,15 +323,17 @@ class OperationAudit(models.Model):
         max_length=24,
         choices=OperationExecutionSource.choices,
         default=OperationExecutionSource.HUMAN,
+        db_default=OperationExecutionSource.HUMAN,
     )
     mute_trigger = models.CharField(
         max_length=24,
         choices=MuteOperationTrigger.choices,
         blank=True,
         default="",
+        db_default="",
         help_text="仅用于禁言相关操作的来源投影，不保存认证材料或上游响应。",
     )
-    automation_snapshot = models.JSONField(default=dict, blank=True)
+    automation_snapshot = models.JSONField(default=dict, blank=True, db_default={})
     executed_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
