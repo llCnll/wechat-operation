@@ -21,7 +21,7 @@
     <form method="post" action="{% url 'supervisor-control-service' service=node.service action='start' %}">{% csrf_token %}<input type="hidden" name="return_to" value="/admin/"><button type="submit">启动服务</button></form>
     {% endif %}
     {% if node.running and "OPEN_LOGIN" in node.session_actions %}
-    <form method="post" action="{% url 'open-controlled-login' %}">{% csrf_token %}<input type="hidden" name="return_to" value="/admin/"><button class="is-quiet" type="submit">打开登录页</button></form>
+    <form method="post" action="{% url 'open-controlled-login' %}">{% csrf_token %}<input type="hidden" name="return_to" value="/admin/"><button class="is-quiet" type="submit">查看受控会话页</button></form>
     {% endif %}
     {% if node.running %}
     <form method="post" action="{% url 'check-outer-session' %}">{% csrf_token %}<input type="hidden" name="return_to" value="/admin/"><button class="is-quiet" type="submit">检查外层会话</button></form>

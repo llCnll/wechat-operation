@@ -48,6 +48,8 @@ def browser_login_status(request):
         GameCircleLoginRuntimeState.OuterState.LOGIN_REQUIRED: "微信登录态已失效，请重新扫码",
         GameCircleLoginRuntimeState.OuterState.BROWSER_UNAVAILABLE: "受控 Chrome 未启动",
     }
+    if state.error_category == GameCircleLoginRuntimeState.ErrorCategory.OUTER_SESSION_UNREADY:
+        reasons[state.outer_state] = "受控会话页未保持可用登录上下文，请查看页面后重新检查"
     return JsonResponse(
         {
             "valid": valid,

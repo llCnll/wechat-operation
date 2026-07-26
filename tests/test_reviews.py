@@ -805,7 +805,9 @@ def test_unverified_operation_has_no_enabled_capability(monkeypatch):
 def test_confirmed_mute_reads_back_only_block_deadlines(monkeypatch):
     monkeypatch.setattr(runtime, "enable_upstream_writes", True)
     monkeypatch.setattr(runtime, "enable_mute_writes", True)
-    post = OriginalPost.objects.create(topic_id=207, content_id="review-207")
+    post = OriginalPost.objects.create(
+        topic_id=207, content_id="review-207", source_appid="wx-test", author_openid="mute-author"
+    )
     CandidatePost.objects.create(
         topic_id=207, content_id="review-207", origin_type=OriginType.ORIGINAL
     )
@@ -819,23 +821,22 @@ def test_confirmed_mute_reads_back_only_block_deadlines(monkeypatch):
     class Source:
         reads = 0
 
-        def get_post_metrics(self, topic_id):
+        def get_author_detail(self, openid):
+            assert openid == "mute-author"
             self.reads += 1
             block_end_time = 0 if self.reads == 1 else 2_000_000_000
             return {
                 "data": {
-                    "topic": {
-                        "topic_id": topic_id,
-                        "status": 1,
-                        "appid": "wx-test",
-                        "creater": {
-                            "block_info": {"appid": "wx-test", "block_end_time": block_end_time},
-                            "global_block_end_time": 0,
-                            "openid": "must-not-be-audited",
-                        },
+                    "user": {
+                        "block_info": {"appid": "wx-test", "block_end_time": block_end_time},
+                        "global_block_end_time": 0,
+                        "openid": openid,
                     }
                 }
             }
+
+        def get_post_metrics(self, _topic_id):
+            pytest.fail("已知作者禁言核验不得读取帖子详情")
 
         def perform_confirmed_operation(self, *, topic_id, action, payload):
             assert action == RecommendedAction.MUTE
@@ -861,7 +862,9 @@ def test_confirmed_mute_reads_back_only_block_deadlines(monkeypatch):
 def test_confirmed_unmute_requires_active_local_mute_and_reads_back_release(monkeypatch):
     monkeypatch.setattr(runtime, "enable_upstream_writes", True)
     monkeypatch.setattr(runtime, "enable_unmute_writes", True)
-    post = OriginalPost.objects.create(topic_id=210, content_id="review-unmute")
+    post = OriginalPost.objects.create(
+        topic_id=210, content_id="review-unmute", source_appid="wx-test", author_openid="unmute-author"
+    )
     CandidatePost.objects.create(
         topic_id=210, content_id="review-unmute", origin_type=OriginType.ORIGINAL
     )
@@ -876,23 +879,22 @@ def test_confirmed_unmute_requires_active_local_mute_and_reads_back_release(monk
         reads = 0
         writes = 0
 
-        def get_post_metrics(self, topic_id):
+        def get_author_detail(self, openid):
+            assert openid == "unmute-author"
             self.reads += 1
             block_end_time = 2_000_000_000 if self.reads == 1 else 0
             return {
                 "data": {
-                    "topic": {
-                        "topic_id": topic_id,
-                        "status": 2,
-                        "appid": "wx-test",
-                        "creater": {
-                            "block_info": {"appid": "wx-test", "block_end_time": block_end_time},
-                            "global_block_end_time": 2_000_000_000,
-                            "openid": "unmute-author",
-                        },
+                    "user": {
+                        "block_info": {"appid": "wx-test", "block_end_time": block_end_time},
+                        "global_block_end_time": 2_000_000_000,
+                        "openid": openid,
                     }
                 }
             }
+
+        def get_post_metrics(self, _topic_id):
+            pytest.fail("已知作者禁言核验不得读取帖子详情")
 
         def perform_confirmed_operation(self, *, topic_id, action, payload):
             assert action == RecommendedAction.UNMUTE
@@ -929,7 +931,9 @@ def test_confirmed_unmute_requires_active_local_mute_and_reads_back_release(monk
 def test_unmute_does_not_call_upstream_when_local_mute_is_inactive(monkeypatch):
     monkeypatch.setattr(runtime, "enable_upstream_writes", True)
     monkeypatch.setattr(runtime, "enable_unmute_writes", True)
-    post = OriginalPost.objects.create(topic_id=211, content_id="unmute-inactive")
+    post = OriginalPost.objects.create(
+        topic_id=211, content_id="unmute-inactive", source_appid="wx-test", author_openid="unmute-author"
+    )
     CandidatePost.objects.create(
         topic_id=211, content_id="unmute-inactive", origin_type=OriginType.ORIGINAL
     )
@@ -943,20 +947,18 @@ def test_unmute_does_not_call_upstream_when_local_mute_is_inactive(monkeypatch):
     class Source:
         writes = 0
 
-        def get_post_metrics(self, topic_id):
+        def get_author_detail(self, openid):
             return {
                 "data": {
-                    "topic": {
-                        "topic_id": topic_id,
-                        "status": 2,
-                        "appid": "wx-test",
-                        "creater": {
-                            "block_info": {"appid": "wx-test", "block_end_time": 0},
-                            "openid": "unmute-author",
-                        },
+                    "user": {
+                        "block_info": {"appid": "wx-test", "block_end_time": 0},
+                        "openid": openid,
                     }
                 }
             }
+
+        def get_post_metrics(self, _topic_id):
+            pytest.fail("已知作者禁言核验不得读取帖子详情")
 
         def perform_confirmed_operation(self, **kwargs):
             self.writes += 1
@@ -996,21 +998,20 @@ def test_mute_rejects_when_preflight_author_differs_from_saved_value(monkeypatch
     class Source:
         writes = 0
 
-        def get_post_metrics(self, topic_id):
+        def get_author_detail(self, openid):
+            assert openid == "old-author"
             return {
                 "data": {
-                    "topic": {
-                        "topic_id": topic_id,
-                        "status": 2,
-                        "appid": "wx-test",
-                        "creater": {
-                            "openid": "new-author",
-                            "block_info": {"appid": "wx-test", "block_end_time": 0},
-                            "global_block_end_time": 0,
-                        },
+                    "user": {
+                        "openid": "new-author",
+                        "block_info": {"appid": "wx-test", "block_end_time": 0},
+                        "global_block_end_time": 0,
                     }
                 }
             }
+
+        def get_post_metrics(self, _topic_id):
+            pytest.fail("身份不一致时不得回退读取帖子详情")
 
         def perform_confirmed_operation(self, **kwargs):
             self.writes += 1
@@ -1026,9 +1027,9 @@ def test_mute_rejects_when_preflight_author_differs_from_saved_value(monkeypatch
     )
     post.refresh_from_db()
     assert audit.result_code == "ACTION_FAILED"
-    assert audit.error_summary.endswith("ValueError")
+    assert audit.error_summary.endswith("SourceContractError")
     assert source.writes == 0
-    assert post.author_openid == "new-author"
+    assert post.author_openid == "old-author"
 
 
 @pytest.mark.django_db
@@ -1038,7 +1039,7 @@ def test_mute_reads_at_bounded_delays_without_repeating_write(monkeypatch):
     delays = []
     monkeypatch.setattr("reviews.services.sleep", delays.append)
     post = OriginalPost.objects.create(
-        topic_id=214, content_id="mute-delayed", source_appid="wx-test"
+        topic_id=214, content_id="mute-delayed", source_appid="wx-test", author_openid="delayed-author"
     )
     CandidatePost.objects.create(
         topic_id=214, content_id="mute-delayed", origin_type=OriginType.ORIGINAL
@@ -1054,23 +1055,21 @@ def test_mute_reads_at_bounded_delays_without_repeating_write(monkeypatch):
         reads = 0
         writes = 0
 
-        def get_post_metrics(self, topic_id):
+        def get_author_detail(self, openid):
             self.reads += 1
             end = 2_000_000_000 if self.reads == 3 else 0
             return {
                 "data": {
-                    "topic": {
-                        "topic_id": topic_id,
-                        "status": 2,
-                        "appid": "wx-test",
-                        "creater": {
-                            "openid": "delayed-author",
-                            "block_info": {"appid": "wx-test", "block_end_time": end},
-                            "global_block_end_time": 0,
-                        },
+                    "user": {
+                        "openid": openid,
+                        "block_info": {"appid": "wx-test", "block_end_time": end},
+                        "global_block_end_time": 0,
                     }
                 }
             }
+
+        def get_post_metrics(self, _topic_id):
+            pytest.fail("已知作者禁言核验不得读取帖子详情")
 
         def perform_confirmed_operation(self, **kwargs):
             self.writes += 1
@@ -1102,25 +1101,22 @@ def test_mute_readback_never_exceeds_the_twenty_second_budget(monkeypatch):
         clock[0] += seconds
 
     monkeypatch.setattr("reviews.services.sleep", advance_sleep)
-    post = OriginalPost.objects.create(topic_id=216, content_id="mute-readback-budget")
+    post = OriginalPost.objects.create(
+        topic_id=216, content_id="mute-readback-budget", source_appid="wx-test", author_openid="budget-author"
+    )
 
     class Source:
         timeout_values = []
 
-        def get_post_metrics_with_timeout(self, topic_id, *, timeout_seconds):
+        def get_author_detail_with_timeout(self, openid, *, timeout_seconds):
             self.timeout_values.append(timeout_seconds)
             clock[0] += timeout_seconds
             return {
                 "data": {
-                    "topic": {
-                        "topic_id": topic_id,
-                        "status": 2,
-                        "appid": "wx-test",
-                        "creater": {
-                            "openid": "budget-author",
-                            "block_info": {"appid": "wx-test", "block_end_time": 0},
-                            "global_block_end_time": 0,
-                        },
+                    "user": {
+                        "openid": openid,
+                        "block_info": {"appid": "wx-test", "block_end_time": 0},
+                        "global_block_end_time": 0,
                     }
                 }
             }
@@ -1137,12 +1133,106 @@ def test_mute_readback_never_exceeds_the_twenty_second_budget(monkeypatch):
 
 
 @pytest.mark.django_db
+def test_deleted_post_with_known_author_can_still_read_back_author_state(monkeypatch):
+    monkeypatch.setattr("reviews.services.sleep", lambda _seconds: None)
+    post = OriginalPost.objects.create(
+        topic_id=217,
+        content_id="deleted-author-readback",
+        source_appid="wx-test",
+        author_openid="deleted-author",
+        status=128,
+    )
+
+    class Source:
+        def get_author_detail(self, openid):
+            assert openid == post.author_openid
+            return {
+                "data": {
+                    "user": {
+                        "openid": openid,
+                        "nick_name": "已确认作者",
+                        "block_info": {"appid": "wx-test", "block_end_time": 2_000_000_000},
+                        "global_block_end_time": 0,
+                    }
+                }
+            }
+
+        def get_post_metrics(self, _topic_id):
+            pytest.fail("删除帖的已知作者状态读取不得回退到帖子详情")
+
+    state = _read_mute_state_with_verification(
+        Source(), post, action=RecommendedAction.MUTE, expected_end_time=1
+    )
+
+    post.refresh_from_db()
+    assert state["local_block_end_time"] == 2_000_000_000
+    assert post.author_nick_name == "已确认作者"
+
+
+@pytest.mark.django_db
+def test_deleted_post_with_known_author_can_execute_mute_without_candidate(monkeypatch):
+    monkeypatch.setattr(runtime, "enable_upstream_writes", True)
+    monkeypatch.setattr(runtime, "enable_mute_writes", True)
+    monkeypatch.setattr("reviews.services.sleep", lambda _seconds: None)
+    post = OriginalPost.objects.create(
+        topic_id=218,
+        content_id="deleted-author-mute",
+        source_appid="wx-test",
+        author_openid="deleted-author",
+        status=POST_STATUS_DELETED,
+    )
+    _, task = persist_assessment(
+        post,
+        AssessmentOutput(
+            content_category="OTHER", recommended_action="MUTE", overall_confidence=0.9
+        ),
+    )
+
+    class Source:
+        reads = 0
+
+        def get_author_detail(self, openid):
+            assert openid == "deleted-author"
+            self.reads += 1
+            block_end_time = 0 if self.reads == 1 else 2_000_000_000
+            return {
+                "data": {
+                    "user": {
+                        "openid": openid,
+                        "block_info": {"appid": "wx-test", "block_end_time": block_end_time},
+                        "global_block_end_time": 0,
+                    }
+                }
+            }
+
+        def get_post_metrics(self, _topic_id):
+            pytest.fail("删除帖作者禁言不得读取帖子详情")
+
+        def perform_confirmed_operation(self, *, topic_id, action, payload):
+            assert topic_id == post.topic_id
+            assert action == RecommendedAction.MUTE
+            assert payload["author_openid"] == post.author_openid
+            return {"errcode": 0, "errmsg": "ok"}
+
+    audit = execute_confirmed_operation(
+        task,
+        user=None,
+        action=RecommendedAction.MUTE,
+        reason="人工确认",
+        source=Source(),
+        upstream_payload={"mute_days": 1, "block_reason_code": 1},
+    )
+
+    assert audit.result_code == "OK"
+
+
+@pytest.mark.django_db
 def test_mute_keeps_action_failed_when_write_raises_even_if_readback_matches(monkeypatch):
     monkeypatch.setattr(runtime, "enable_upstream_writes", True)
     monkeypatch.setattr(runtime, "enable_mute_writes", True)
     monkeypatch.setattr("reviews.services.sleep", lambda _seconds: None)
     post = OriginalPost.objects.create(
-        topic_id=215, content_id="mute-write-failed", source_appid="wx-test"
+        topic_id=215, content_id="mute-write-failed", source_appid="wx-test", author_openid="failed-author"
     )
     CandidatePost.objects.create(
         topic_id=215, content_id="mute-write-failed", origin_type=OriginType.ORIGINAL
@@ -1158,23 +1248,21 @@ def test_mute_keeps_action_failed_when_write_raises_even_if_readback_matches(mon
         reads = 0
         writes = 0
 
-        def get_post_metrics(self, topic_id):
+        def get_author_detail(self, openid):
             self.reads += 1
             end = 0 if self.reads == 1 else 2_000_000_000
             return {
                 "data": {
-                    "topic": {
-                        "topic_id": topic_id,
-                        "status": 2,
-                        "appid": "wx-test",
-                        "creater": {
-                            "openid": "failed-author",
-                            "block_info": {"appid": "wx-test", "block_end_time": end},
-                            "global_block_end_time": 0,
-                        },
+                    "user": {
+                        "openid": openid,
+                        "block_info": {"appid": "wx-test", "block_end_time": end},
+                        "global_block_end_time": 0,
                     }
                 }
             }
+
+        def get_post_metrics(self, _topic_id):
+            pytest.fail("已知作者禁言核验不得读取帖子详情")
 
         def perform_confirmed_operation(self, **kwargs):
             self.writes += 1

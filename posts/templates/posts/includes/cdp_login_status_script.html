@@ -18,7 +18,7 @@
         indicator.classList.toggle("is-actionable", canOpenLogin);
         indicator.classList.remove("is-checking");
         button.disabled = !canOpenLogin;
-        label.textContent = valid ? "会话有效" : canOpenLogin ? "需扫码登录" : status.state === "UNAVAILABLE" ? "Chrome 未启动" : "状态待检查";
+        label.textContent = valid ? "会话有效" : status.state === "LOGIN_PENDING" ? "正在恢复会话" : canOpenLogin ? "查看受控会话页" : status.state === "UNAVAILABLE" ? "Chrome 未启动" : "状态待检查";
         indicator.title = status.reason || (valid ? "受控 Chrome 会话有效" : "受控 Chrome 会话不可用");
         const frameValid = response.ok && status.frame_valid === true;
         const canRecoverFrame = response.ok && status.frame_can_recover === true;

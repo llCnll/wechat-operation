@@ -16,7 +16,11 @@
 
 ### Requirement: 会话所有权与浏览器生命周期
 
-Supervisor SHALL 是受控 Chrome 的唯一进程所有者；`game_circle_session` SHALL 是 CDP、认证材料与 service-owned target 的唯一使用者和登记者。Supervisor SHALL 在 session Worker 启动前启动 Chrome；替换 session Worker 前 SHALL 先终止 Chrome，并在新 browser generation 就绪后启动新 Worker。target 所有权 SHALL 仅存在于当前 session owner 内存中；手动打开或无法证明归属的页面不得被接管、关闭或作为来源页面。
+Supervisor SHALL 是受控 Chrome 的唯一进程所有者；`game_circle_session` SHALL 是 CDP、认证材料与 service-owned target 的唯一使用者和登记者。部署 SHALL 保留 `127.0.0.1:9222` 仅供本项目受控 Chrome 使用的约束。Supervisor 运行期间，Chrome 健康 SHALL 由该固定回环 CDP 端点可连接且返回的 `browser_generation` 与当前已确认 generation 一致共同证明；启动器 PID 或业务子 PID 仅可用于诊断或正常关闭的辅助终止，不得单独作为 Chrome 退出、接管或替换的依据。target 所有权 SHALL 仅存在于当前 session owner 内存中；手动打开或无法证明归属的页面不得被接管、关闭或作为来源页面。
+
+每次 Supervisor bootstrap 在启动新 Chrome 前 SHALL 先通过 `127.0.0.1:9222` 的 CDP `Browser.close` 请求关闭浏览器并等待端口释放；端口仍被监听时，才终止该监听 PID 并再次等待。此清理不需要推断监听进程归属，且不得处理该固定端口之外的浏览器或端口；CDP 不可用且无法定位监听 PID、无法终止或释放监听端口时，Supervisor MUST NOT 启动新 Chrome 或 session Worker，并 SHALL 返回固定脱敏失败状态。CDP 请求连接在浏览器退出前断开时，系统 SHALL 以端口是否释放判断关闭结果。Supervisor 异常终止时不要求立即关闭 Chrome。
+
+替换 session Worker 前，Supervisor SHALL 终止当前受控 Chrome 并在新的 browser generation 就绪后启动新 Worker。一次配对替换 SHALL 只创建一个候选 Chrome；候选 generation 未就绪时，后续调和只可等待和核验同一候选，不得反复终止、重建 Chrome 或启动新的 session Worker。候选明确退出或 generation 检查连续失败三次后，Supervisor SHALL 停止自动恢复、记录固定脱敏熔断状态，并要求运营人员显式重启；一次成功 generation 确认 SHALL 清零连续失败计数。
 
 #### Scenario: session Worker 重启
 
@@ -25,11 +29,26 @@ Supervisor SHALL 是受控 Chrome 的唯一进程所有者；`game_circle_sessio
 - **THEN** 新 Worker SHALL 仅在新 generation 中创建自己的 HOME、Frame 和登录等待
 - **THEN** 新 Worker MUST NOT 枚举、识别、复用或关闭前任 owner 的 target
 
+#### Scenario: Chrome 启动器 PID 交接但 generation 未变
+- **WHEN** 保存的 Chrome 启动器 PID 不再可用，但 `127.0.0.1:9222` 可连接且 CDP `browser_generation` 仍与已确认 generation 一致
+- **THEN** Supervisor SHALL 将受控 Chrome 视为健康，不得替换 Chrome 或 session Worker
+- **THEN** 它 SHALL 仅更新诊断状态，且不得把 PID 变化记录为浏览器异常退出
+
 #### Scenario: 受控 Chrome 意外退出
 
-- **WHEN** Supervisor 发现期望运行的受控 Chrome 已退出且游戏圈会话服务仍为 desired
+- **WHEN** Supervisor 无法确认当前 `127.0.0.1:9222` 的 CDP generation，且游戏圈会话服务仍为 desired
 - **THEN** Supervisor SHALL 将其作为会话 owner 更换，启动新 Chrome generation 后替换游戏圈会话服务
 - **THEN** 新会话服务 SHALL 为当前操作游戏重新执行 Bootstrap；不得继续投影旧 generation 的 lease 为可用
+
+#### Scenario: Supervisor 异常退出后重新启动
+- **WHEN** Supervisor 异常退出且遗留 Chrome 仍监听 `127.0.0.1:9222`，随后新的 Supervisor 完成独占锁获取
+- **THEN** 新 Supervisor SHALL 在启动任何新 Chrome 或 session Worker 前先请求 CDP `Browser.close`，端口仍被监听时才终止监听 PID，并等待端口释放
+- **THEN** 它 SHALL 创建新 generation 和新 session owner，不得复用遗留 Chrome、其 target 或其来源会话状态
+
+#### Scenario: Browser.close 连接在关闭期间断开
+- **WHEN** Supervisor 向 `127.0.0.1:9222` 发送 CDP `Browser.close` 后连接在响应前断开
+- **THEN** 它 SHALL 在受限时间内检查该端口是否已释放，释放时 SHALL 将关闭视为成功
+- **THEN** 端口仍被监听时才可进入监听 PID 终止兜底，不得立即把连接断开报告为 Chrome 清理失败
 
 #### Scenario: 会话服务重启请求
 
@@ -39,10 +58,15 @@ Supervisor SHALL 是受控 Chrome 的唯一进程所有者；`game_circle_sessio
 
 #### Scenario: Chrome replacement 未在限定时间就绪
 
-- **WHEN** Supervisor 在替换 session owner 时未能确认新的 Chrome generation
+- **WHEN** Supervisor 在替换 session owner 时未能确认候选 Chrome generation
 - **THEN** Supervisor SHALL 保持控制面和其他服务运行，并记录固定脱敏失败状态
-- **THEN** 后续 reconcile SHALL 重试同一 replacement Chrome 的依赖恢复；除非该 Chrome 已退出，不得重复终止并重启它
+- **THEN** 后续 reconcile SHALL 只重试同一候选 Chrome 的依赖恢复；除非该候选已确认退出，不得重复终止并重开浏览器或启动新的 session Worker
 - **THEN** 系统不得启动新的 session Worker 或退出 Supervisor 主循环
+
+#### Scenario: 连续 Chrome 恢复失败熔断
+- **WHEN** 候选 Chrome generation 的就绪检查或候选进程退出连续失败三次
+- **THEN** Supervisor SHALL 将该配对恢复置为熔断状态，停止自动启动 Chrome 和 session Worker，并报告固定脱敏原因
+- **THEN** 运营人员显式重启 Chrome 或会话服务后 SHALL 开始一个新恢复周期；任一成功 generation 确认 SHALL 清零失败计数
 
 ### Requirement: SessionBootstrap 建立主线
 
@@ -68,7 +92,7 @@ Supervisor SHALL 是受控 Chrome 的唯一进程所有者；`game_circle_sessio
 
 ### Requirement: 人工登录页与脱敏边界
 
-系统 SHALL 最多维护一个未到期的 `LOGIN_PENDING` 页面。仅运营人员明确请求时 MAY 显示或激活该页；重复请求 SHALL 复用页面且不得创建或聚焦第二页。系统不得持久化或输出 target ID、认证材料、完整 URL、二维码、账号身份或原始来源响应。
+系统 SHALL 最多维护一个当前 owner 的受控会话页；该页同时承担人工登录等待与外层会话观察。仅运营人员明确请求“查看受控会话页”时系统 MAY 创建或激活该页；重复请求 SHALL 复用页面且不得创建或聚焦第二页。系统不得持久化或输出 target ID、认证材料、完整 URL、二维码、账号身份或原始来源响应。手动外层检查、outer token 读取和 Frame 建立 SHALL 复用该受控会话页，不得另建不可观察 HOME。
 
 #### Scenario: 扫码完成
 
@@ -81,6 +105,11 @@ Supervisor SHALL 是受控 Chrome 的唯一进程所有者；`game_circle_sessio
 - **WHEN** 登录窗口到期、已登记 target 丢失或 Chrome generation 改变
 - **THEN** 系统 SHALL 清除等待状态并仅关闭该 owner 的未发布 target
 - **THEN** 系统 MUST NOT 自动创建下一张登录页或接管未知 tab
+
+#### Scenario: 运营人员观察会话请求
+- **WHEN** 运营人员激活受控会话页后提交外层检查
+- **THEN** `getappinfo` SHALL 在该同一页面执行
+- **THEN** 系统不得将另一张后台 HOME 的结果作为该页面的会话结论
 
 ### Requirement: 来源调用与 lease 连续性
 
@@ -190,7 +219,7 @@ Supervisor SHALL 是受控 Chrome 的唯一进程所有者；`game_circle_sessio
 
 ### Requirement: 外层登录态验证与 Frame lease 边界
 
-系统 SHALL 仅在 service-owned HOME 的 `getappinfo` 返回 HTTP 200、`errcode=0` 且带非空 AppID 时投影外层会话有效，并记录独立的成功验证时间。URL token、页面可打开或 target 存在均不得单独证明登录有效。已验证的登录态过期 SHALL 投影为需要重新登录和 Frame 未就绪，并使同一 browser generation 的 ACTIVE lease 失去新 access 资格；未知或暂时错误不得误报扫码或废弃 lease。
+系统 SHALL 仅在当前 owner 的受控会话页于同一次稳定验证中满足以下全部条件时投影外层会话有效：页面不是固定扫码页、验证前后 URL token 均可读取、`getappinfo` 返回 HTTP 200、`errcode=0` 且带非空 AppID。URL token、页面可打开、target 存在或一次孤立 HTTP 成功均不得单独证明登录有效。Frame 建立 SHALL 在调用 `binduseridentity` 前再次从同一受控会话页读取 outer token；该读取失败、token 消失或页面变为扫码页时，系统 SHALL 投影外层会话未就绪和 Frame 未就绪，且不得保留 `OUTER_READY`。已验证的登录态过期 SHALL 投影为需要重新登录和 Frame 未就绪，并使同一 browser generation 的 ACTIVE lease 失去新 access 资格；未知或暂时错误不得误报扫码或废弃 lease。
 
 正常 outer token 刷新不得废弃已发布 Frame lease；新 lease 发布后，旧 lease 仅按访问计数和退役延迟关闭。外层仍有效时的来源身份拒绝或 Frame target 丢失 SHALL 只废弃对应 lease，不得反推外层登录态过期。
 
@@ -205,6 +234,16 @@ Supervisor SHALL 是受控 Chrome 的唯一进程所有者；`game_circle_sessio
 - **WHEN** Keepalive 获得新的 outer token，且 `getappinfo` 持续成功
 - **THEN** 系统 MUST NOT 因 token 值变化拒绝旧 Frame lease
 - **THEN** 旧 lease SHALL 仅按既有退役规则关闭
+
+#### Scenario: 验证后会话页跳回扫码页
+- **WHEN** `getappinfo` 返回成功后，同一受控会话页的 token 消失、路由变为扫码页或 Frame 前 token 复读失败
+- **THEN** 系统 SHALL 覆盖此前成功投影为外层会话未就绪或需要登录，并将 Frame 投影为未就绪
+- **THEN** 系统 MUST NOT 调用 `binduseridentity`、发布 lease 或执行来源帖子查询
+
+#### Scenario: Frame 最小读取验证
+- **WHEN** 同一受控会话页完成稳定外层验证且存在当前操作游戏
+- **THEN** 系统 SHALL 使用仅存在于会话服务内存中的 outer token 建立插件 Frame、绑定来源身份并完成最小只读帖子查询
+- **THEN** 只有该查询成功后才可将当前 scope 的 Frame 投影为有效
 
 ### Requirement: 外层会话探测与来源认证反馈
 

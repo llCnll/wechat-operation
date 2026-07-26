@@ -27,6 +27,7 @@ from posts.services import (
     refresh_post_status_and_metrics,
     store_post_metrics,
     sync_author_mute_status,
+    sync_author_mute_status_from_user_detail,
 )
 
 
@@ -265,6 +266,7 @@ def test_author_mute_sync_normalizes_and_clears_expired_statuses():
     assert state.local_muted_until is not None
     assert state.global_muted_until is not None
     assert post.author_openid == "author-1"
+    assert post.author_nick_name == "作者"
 
     state = sync_author_mute_status(
         post, _author_detail(local_end=0, global_end=0), source_requested_at=timezone.now()
@@ -292,6 +294,9 @@ def test_author_mute_sync_creates_unmuted_observation_and_updates_nickname():
     assert state.nick_name == "新昵称"
     assert state.last_source_post == second
     assert first.author_openid == second.author_openid == "author-1"
+    first.refresh_from_db()
+    second.refresh_from_db()
+    assert first.author_nick_name == second.author_nick_name == "新昵称"
     assert state.local_muted_until is None
     assert state.global_muted_until is None
 
@@ -346,4 +351,34 @@ def test_author_mute_sync_does_not_create_observation_without_openid():
     payload = _author_detail()
     del payload["data"]["topic"]["creater"]["openid"]
     assert sync_author_mute_status(post, payload) is None
+    assert not AuthorMuteStatus.objects.exists()
+
+
+@pytest.mark.django_db
+def test_user_detail_rejects_a_different_author_before_any_projection_write():
+    post = OriginalPost.objects.create(
+        topic_id=191, content_id="author-mismatch", source_appid="wx-game", author_openid="expected"
+    )
+    payload = {
+        "data": {
+            "user": {
+                "openid": "different",
+                "nick_name": "不得写入",
+                "global_block_end_time": 0,
+            }
+        }
+    }
+
+    from jobs.adapters import SourceContractError
+
+    with pytest.raises(SourceContractError, match="身份不一致"):
+        sync_author_mute_status_from_user_detail(
+            payload,
+            expected_openid="expected",
+            source_appid="wx-game",
+            post=post,
+        )
+
+    post.refresh_from_db()
+    assert post.author_nick_name == ""
     assert not AuthorMuteStatus.objects.exists()

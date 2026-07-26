@@ -28,7 +28,7 @@ from posts.models import (
     is_post_deleted,
     is_post_self_visible,
 )
-from posts.services import sync_author_mute_status
+from posts.services import sync_author_mute_status, sync_author_mute_status_from_user_detail
 
 from .adapters import REVIEW_PROMPT_VERSION, AssessmentOutput
 from .models import (
@@ -67,6 +67,14 @@ EXPECTED_OPERATION_STATUS = {
     RecommendedAction.SINK: 8,
     RecommendedAction.BLOCK: 4,
 }
+POST_BOUND_OPERATION_ACTIONS = frozenset(
+    (
+        RecommendedAction.RESTORE,
+        RecommendedAction.SINK,
+        RecommendedAction.BLOCK,
+        RecommendedAction.BLOCK_AND_MUTE,
+    )
+)
 _TARGET_REACHED_OPERATION_RESULT_CODES = frozenset(("OK", "ALREADY_APPLIED"))
 _READBACK_STATE_OPERATION_RESULT_CODES = _TARGET_REACHED_OPERATION_RESULT_CODES | frozenset(
     ("SKIPPED_UPSTREAM_NOT_NORMAL",)
@@ -217,12 +225,37 @@ def _operation_author_openid(payload: dict) -> str:
     return openid
 
 
-def _read_mute_metrics(source, topic_id: int, *, timeout_seconds: float) -> dict:
-    """Use the bounded CDP read when available while keeping test/source adapters compatible."""
-    bounded_read = getattr(source, "get_post_metrics_with_timeout", None)
-    if callable(bounded_read):
-        return bounded_read(topic_id, timeout_seconds=timeout_seconds)
-    return source.get_post_metrics(topic_id)
+def _author_mute_state(payload: dict, *, source_appid: str) -> dict:
+    """Project only mute fields from a response already bound to one author."""
+    try:
+        user = payload["data"]["user"]
+    except (KeyError, TypeError) as exc:
+        raise ValueError("作者状态回读结构无效") from exc
+    if not isinstance(user, dict):
+        raise ValueError("作者状态回读结构无效")
+    block_info = user.get("block_info")
+    local_block_end_time = 0
+    if isinstance(block_info, dict) and block_info.get("appid") == source_appid:
+        try:
+            local_block_end_time = int(block_info.get("block_end_time", 0))
+        except (TypeError, ValueError):
+            local_block_end_time = 0
+    try:
+        global_block_end_time = int(user.get("global_block_end_time", 0))
+    except (TypeError, ValueError):
+        global_block_end_time = 0
+    return {
+        "local_block_end_time": local_block_end_time,
+        "global_block_end_time": global_block_end_time,
+    }
+
+
+def _author_source_appid(post: OriginalPost, source) -> str:
+    """Resolve the frozen game context without asking the source for post details."""
+    appid = post.source_appid or getattr(source, "appid", "")
+    if not isinstance(appid, str) or not appid:
+        raise ValueError("作者状态读取缺少当前游戏范围")
+    return appid
 
 
 def _read_mute_state_with_verification(
@@ -245,13 +278,26 @@ def _read_mute_state_with_verification(
         if remaining <= MUTE_VERIFY_REQUEST_OVERHEAD_SECONDS:
             break
         requested_at = timezone.now()
-        payload = _read_mute_metrics(
-            source,
-            post.topic_id,
-            timeout_seconds=remaining - MUTE_VERIFY_REQUEST_OVERHEAD_SECONDS,
+        expected_openid = post.author_openid
+        if not expected_openid:
+            raise ValueError("禁言状态回读缺少已验证作者身份")
+        source_appid = _author_source_appid(post, source)
+        bounded_read = getattr(source, "get_author_detail_with_timeout", None)
+        if callable(bounded_read):
+            payload = bounded_read(
+                expected_openid,
+                timeout_seconds=remaining - MUTE_VERIFY_REQUEST_OVERHEAD_SECONDS,
+            )
+        else:
+            payload = source.get_author_detail(expected_openid)
+        sync_author_mute_status_from_user_detail(
+            payload,
+            expected_openid=expected_openid,
+            source_appid=source_appid,
+            source_requested_at=requested_at,
+            post=post,
         )
-        sync_author_mute_status(post, payload, source_requested_at=requested_at)
-        latest_state = _operation_state(payload)
+        latest_state = _author_mute_state(payload, source_appid=source_appid)
         if action == RecommendedAction.MUTE:
             if latest_state["local_block_end_time"] >= (expected_end_time or 0):
                 break
@@ -1242,9 +1288,9 @@ def save_reply_draft(
 def create_confirmed_operation(
     task: ReviewTask, *, user, action: str, reason: str, confirmation_key: str | None = None
 ) -> OperationAudit:
-    if is_post_deleted(task.post.status):
-        raise ValueError("帖子已从原平台管理队列删除，不能执行处置")
-    if is_post_self_visible(task.post.status):
+    if is_post_deleted(task.post.status) and action in POST_BOUND_OPERATION_ACTIONS:
+        raise ValueError("帖子已从原平台管理队列删除，不能执行帖子处置")
+    if is_post_self_visible(task.post.status) and action in POST_BOUND_OPERATION_ACTIONS:
         raise ValueError("帖子当前仅自己可见，不能覆盖原平台可见性状态")
     if not is_operation_enabled(action):
         raise PermissionError("上游写操作能力未启用")
@@ -1311,13 +1357,14 @@ def execute_confirmed_operation(
 ) -> OperationAudit:
     """Execute one verified upstream operation with an explicit actor source."""
     payload = _prepare_upstream_payload(action, reason, upstream_payload)
-    if is_post_deleted(task.post.status):
-        raise ValueError("帖子已从原平台管理队列删除，不能执行处置")
-    if is_post_self_visible(task.post.status):
+    if is_post_deleted(task.post.status) and action in POST_BOUND_OPERATION_ACTIONS:
+        raise ValueError("帖子已从原平台管理队列删除，不能执行帖子处置")
+    if is_post_self_visible(task.post.status) and action in POST_BOUND_OPERATION_ACTIONS:
         raise ValueError("帖子当前仅自己可见，不能覆盖原平台可见性状态")
-    candidate = CandidatePost.objects.filter(topic_id=task.post.topic_id).first()
-    if candidate is None or candidate.origin_type != OriginType.ORIGINAL:
-        raise ValueError("操作前原创状态复核失败")
+    if action in POST_BOUND_OPERATION_ACTIONS:
+        candidate = CandidatePost.objects.filter(topic_id=task.post.topic_id).first()
+        if candidate is None or candidate.origin_type != OriginType.ORIGINAL:
+            raise ValueError("操作前原创状态复核失败")
 
     # Commit the confirmation before contacting the upstream service. If the process
     # stops after an upstream write, a repeated confirmation returns this audit rather
@@ -1350,17 +1397,28 @@ def execute_confirmed_operation(
     result_code = "ACTION_FAILED"
     error_summary = "上游操作失败或契约未验证"
     try:
-        before_requested_at = timezone.now()
-        before_payload = source.get_post_metrics(task.post.topic_id)
-        before_state = _operation_state(before_payload)
         stored_author_openid = task.post.author_openid
-        sync_author_mute_status(task.post, before_payload, source_requested_at=before_requested_at)
         current_author_openid = ""
-        if action in {RecommendedAction.MUTE, RecommendedAction.UNMUTE}:
-            current_author_openid = _operation_author_openid(before_payload)
-            if stored_author_openid and stored_author_openid != current_author_openid:
-                raise ValueError("写前作者用户 ID与已同步记录不一致，已拒绝处置")
-            payload["author_openid"] = current_author_openid
+        if action in {RecommendedAction.MUTE, RecommendedAction.UNMUTE} and stored_author_openid:
+            source_appid = _author_source_appid(task.post, source)
+            before_payload = source.get_author_detail(stored_author_openid)
+            sync_author_mute_status_from_user_detail(
+                before_payload,
+                expected_openid=stored_author_openid,
+                source_appid=source_appid,
+                source_requested_at=timezone.now(),
+                post=task.post,
+            )
+            before_state = _author_mute_state(before_payload, source_appid=source_appid)
+            payload["author_openid"] = stored_author_openid
+        else:
+            before_requested_at = timezone.now()
+            before_payload = source.get_post_metrics(task.post.topic_id)
+            before_state = _operation_state(before_payload)
+            sync_author_mute_status(task.post, before_payload, source_requested_at=before_requested_at)
+            if action in {RecommendedAction.MUTE, RecommendedAction.UNMUTE}:
+                current_author_openid = _operation_author_openid(before_payload)
+                payload["author_openid"] = current_author_openid
         expected_status = EXPECTED_OPERATION_STATUS.get(action)
         preflight_result = _preflight_operation_result(action, before_state)
         if preflight_result is not None:

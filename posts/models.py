@@ -126,7 +126,7 @@ class GameCircleLoginRuntimeState(models.Model):
 
     class Action(models.TextChoices):
         CHECK_LOGIN = "CHECK_LOGIN", "检查登录态"
-        OPEN_LOGIN = "OPEN_LOGIN", "打开登录页"
+        OPEN_LOGIN = "OPEN_LOGIN", "查看受控会话页"
         BUILD_FRAME = "BUILD_FRAME", "建立当前游戏 Frame"
         KEEPALIVE = "KEEPALIVE", "保活当前游戏 Frame"
 
@@ -197,6 +197,7 @@ class OriginalPost(models.Model):
     recommend_status = models.IntegerField(null=True, blank=True)
     source_appid = models.CharField(max_length=128, blank=True)
     author_openid = models.CharField(max_length=255, blank=True, db_index=True)
+    author_nick_name = models.CharField(max_length=255, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 

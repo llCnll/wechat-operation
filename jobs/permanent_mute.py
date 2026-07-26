@@ -271,23 +271,15 @@ def _refresh_status(
     *, status: AuthorMuteStatus, source: GameCirclePostClient, scope: ExecutionScope
 ) -> AuthorMuteStatus:
     payload = source.get_author_detail(status.openid)
-    _validate_user_detail_openid(payload, expected_openid=status.openid)
     observed = sync_author_mute_status_from_user_detail(
-        payload, source_requested_at=timezone.now(), source_appid=scope.target_appid
+        payload,
+        expected_openid=status.openid,
+        source_requested_at=timezone.now(),
+        source_appid=scope.target_appid,
     )
     if observed is None or observed.pk != status.pk:
         raise ValueError("作者状态与最新来源身份不一致，已拒绝执行永久禁言")
     return AuthorMuteStatus.objects.get(pk=status.pk)
-
-
-def _validate_user_detail_openid(payload: dict, *, expected_openid: str) -> None:
-    """Reject a provider response for a different user before persisting any projection."""
-    try:
-        observed_openid = payload["data"]["user"]["openid"]
-    except (KeyError, TypeError):
-        raise ValueError("作者用户详情响应缺少用户 ID") from None
-    if observed_openid != expected_openid:
-        raise ValueError("作者状态与最新来源身份不一致，已拒绝更新")
 
 
 def _verified_result(audit: OperationAudit, *, action: str) -> None:
@@ -560,9 +552,9 @@ def _sync_post_author_item(*, job: BackgroundJob, item: OriginalPost, scope: Exe
     """Project one distinct post author, adding only actively muted new authors."""
     with GameCirclePostClient(scope=scope) as source:
         payload = source.get_author_detail(item.author_openid)
-    _validate_user_detail_openid(payload, expected_openid=item.author_openid)
     sync_author_mute_status_from_user_detail(
         payload,
+        expected_openid=item.author_openid,
         source_requested_at=timezone.now(),
         source_appid=scope.target_appid,
         post=item,

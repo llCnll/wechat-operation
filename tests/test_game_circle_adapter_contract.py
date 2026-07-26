@@ -2,7 +2,6 @@ from unittest.mock import Mock
 
 import pytest
 
-from config.cdp import CdpTargetUnavailableError
 from config.game_circle_adapter import (
     ExplicitOuterPage,
     GameCircleContractError,
@@ -180,23 +179,38 @@ def test_outer_scan_probe_only_classifies_visible_login_markers():
     assert GameCircleOuterAdapter(page).scan_required() is False
 
 
-def test_login_diagnosis_waits_for_a_scan_page_after_the_home_context_reloads(monkeypatch):
-    page = Mock()
-    page.body_text.side_effect = [
-        CdpTargetUnavailableError("execution context was destroyed"),
-        "微信扫码登录",
-    ]
-    adapter = GameCircleOuterAdapter(page)
-    monkeypatch.setattr("config.game_circle_adapter.sleep", lambda _seconds: None)
-
-    assert adapter.wait_for_login_diagnosis(timeout_seconds=1) is None
-    assert page.body_text.call_count == 2
-    page.evaluate.assert_not_called()
-
-
 def test_missing_outer_token_has_a_dedicated_non_chrome_failure_type():
     page = Mock()
     page.evaluate.return_value = {"token": None}
 
     with pytest.raises(OuterSessionUnreadyError, match="缺少运行时 token"):
         GameCircleOuterAdapter(page).read_outer_token()
+
+
+def test_stable_outer_session_requires_the_same_page_token_before_and_after_getappinfo():
+    page = Mock()
+    page.evaluate.return_value = {
+        "kind": "response", "status": 200, "errcode": 0, "appid": "game-a",
+        "token": "outer-token", "stable": True,
+    }
+
+    result = GameCircleOuterAdapter(page).wait_for_stable_outer_session(timeout_seconds=1)
+
+    assert result is not None
+    assert result.appid == "game-a"
+    assert result.token == "outer-token"
+    expression = page.evaluate.call_args.args[0]
+    assert "beforeToken === afterToken" in expression
+    assert "getappinfo" in expression
+
+
+def test_stable_outer_session_rejects_a_post_request_page_change(monkeypatch):
+    page = Mock()
+    page.evaluate.return_value = {
+        "kind": "response", "status": 200, "errcode": 0, "appid": "game-a",
+        "token": None, "stable": False,
+    }
+    monkeypatch.setattr("config.game_circle_adapter.sleep", lambda _seconds: None)
+
+    with pytest.raises(OuterSessionUnreadyError, match="页面已变化"):
+        GameCircleOuterAdapter(page).wait_for_stable_outer_session(timeout_seconds=0)

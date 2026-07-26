@@ -95,6 +95,14 @@ DASHBOARD_SORT_OPTIONS = (
 
 BATCH_AI_ACTIONS = frozenset((RecommendedAction.SINK, RecommendedAction.BLOCK))
 BATCH_AI_LIMIT = 20
+POST_BOUND_UPSTREAM_ACTIONS = frozenset(
+    (
+        RecommendedAction.SINK,
+        RecommendedAction.BLOCK,
+        RecommendedAction.RESTORE,
+        RecommendedAction.BLOCK_AND_MUTE,
+    )
+)
 
 POST_STATUS_FILTER_OPTIONS = (
     ("NORMAL", "正常"),
@@ -159,21 +167,19 @@ def _escalated_review_dashboard_url(request, review: AiOperationReview) -> str:
 @login_required
 @require_POST
 def open_controlled_login(request):
-    """Request the session service to open its fixed unauthenticated login page."""
+    """Activate the service-owned page used for login and session observation."""
     try:
-        result = GameCircleIpcClient().call("OPEN_CONTROLLED_LOGIN")
+        ipc = GameCircleIpcClient()
+        result = ipc.call("OPEN_CONTROLLED_LOGIN")
+        ipc.call("CHECK_LOGIN")
     except GameCircleIpcError as exc:
         messages.error(request, str(exc))
     else:
         status = result.get("status") if isinstance(result, dict) else ""
-        if status == "LOGIN_NOT_REQUIRED":
-            messages.info(request, "外层会话已恢复，当前游戏 Frame 正在建立或已可用。")
-        elif status in {"LOGIN_RECOVERY_IN_PROGRESS", "LOGIN_NOT_AVAILABLE"}:
-            messages.info(request, "会话正在检查或恢复中，无需重复打开登录页。")
-        elif status == "LOGIN_PAGE_REUSED":
-            messages.info(request, "登录页已打开，请继续使用微信扫码确认。")
+        if status == "CONTROLLED_SESSION_PAGE_OPENED":
+            messages.info(request, "已打开受控会话页并完成状态检查；请在该页面查看登录状态或完成扫码。")
         else:
-            messages.info(request, "已在受控 Chrome 打开登录页，请使用微信扫码确认。")
+            messages.info(request, "受控会话页已检查；请在该页面确认登录状态。")
     return redirect(_safe_dashboard_return_url(request))
 
 
@@ -1102,10 +1108,10 @@ def confirm_dashboard_operation(request, topic_id: int, action: str):
     post = get_object_or_404(OriginalPost, topic_id=topic_id)
     redirect_url = _dashboard_return_url(request, post.topic_id)
     action = action.upper()
-    if is_post_deleted(post.status):
-        messages.error(request, "帖子已从原平台管理队列删除，不能执行处置。")
+    if is_post_deleted(post.status) and action in POST_BOUND_UPSTREAM_ACTIONS:
+        messages.error(request, "帖子已从原平台管理队列删除，不能执行帖子处置。")
         return redirect(redirect_url)
-    if is_post_self_visible(post.status) and action != "SKIP":
+    if is_post_self_visible(post.status) and action in POST_BOUND_UPSTREAM_ACTIONS:
         messages.error(request, "帖子当前仅自己可见，不能覆盖原平台可见性状态。")
         return redirect(redirect_url)
     task, _ = ReviewTask.objects.get_or_create(
