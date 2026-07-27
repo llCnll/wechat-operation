@@ -36,7 +36,7 @@ flowchart LR
 
 日常只启动 Supervisor。它托管一个受控 Chrome、一个 Web、一个自动调度器、一个游戏圈会话服务、一个实时采集 Worker、一个人工补采 Worker、一个指标快照 Worker、一个 AI 审核 Worker、一个可选视频提取 Worker 和一个默认停止的 AI 自动处置 Worker；各 Worker 职责严格分离。受控 Chrome 使用独立 profile 和专用 `127.0.0.1:9222` loopback CDP，Supervisor 是其唯一进程所有者。Supervisor 为 Web/Worker 发放短期实例租约：异常退出后它们自行结束；每次新实例启动也会先终止运行态中可确认身份的既有 Web/Worker，再按持久化 `desired` 恢复。Chrome 不参与异常退出自清理；新 Supervisor 启动时先清理专用端口并创建新 generation。Supervisor 为固定本机 IPC 注入独立 capability，SQLite 部署不允许启动同一 Worker 职责的第二个实例。
 
-游戏圈会话服务是唯一的 CDP 所有者。它以 `SessionBootstrap` 统一建立 HOME、当前游戏确认/切换、Frame、身份绑定和最小只读验证；建立 Frame、检查外层会话、修复损坏 Frame 和保活候选是互斥的显式意图。外层会话只由 HOME 内以 `cache: 'no-store'` 调用的 `getappinfo` 成功业务响应证明，缓存响应或 URL token 本身不代表登录有效。保活或切换取得新的 outer token 时，已发布 Frame lease 继续按既有退役规则可用；只有 `getappinfo` 确认外层登录态过期时，同一 Chrome generation 的 Frame lease 才同时失效并要求人工重新扫码。Frame 来源身份也可在外层有效时独立失效，仅影响对应 lease。服务有 ACTIVE lease 时每五分钟只读验证一次外层会话；两秒 Repair 循环只检查 target 完整性，不轮询平台接口。来源请求遇到认证拒绝会由会话服务合并复核，确认无可用会话后固定返回未就绪而不再请求上游。新 lease 发布前旧 lease 持续可用，发布后旧 lease 等待已开始请求结束和最短退役期届满才关闭其自建 target；维护循环会独立执行该回收。每次来源请求由有截止时间、可取消的 SessionAccess 管理。Chrome 健康由固定 CDP 端点和已确认 generation 决定，启动器 PID 交接不会触发替换；若 generation 连续三次无法就绪，Supervisor 熔断自动恢复并要求人工重启。新 owner 不扫描、接管或关闭旧 generation 的 tab；运行态只保存固定状态和数量，不保存 target ID、token 或 URL。
+游戏圈会话服务是唯一的 CDP 所有者。它以 `SessionBootstrap` 统一建立 HOME、当前游戏确认/切换、Frame、身份绑定和最小只读验证；建立 Frame、检查外层会话、修复损坏 Frame 和保活候选是互斥的显式意图。外层会话只由 HOME 内以 `cache: 'no-store'` 调用的 `getappinfo` 成功业务响应证明，缓存响应或 URL token 本身不代表登录有效。保活或切换取得新的 outer token 时，已发布 Frame lease 继续按既有退役规则可用；只有 `getappinfo` 确认外层登录态过期时，同一 Chrome generation 的 Frame lease 才同时失效并要求人工重新扫码。Frame 来源身份也可在外层有效时独立失效，仅影响对应 lease。运行态分别记录最近外层观察与最近成功验证；两秒 Repair 循环的 target 存活检查不得刷新它们。服务有 ACTIVE lease 时每五分钟只读验证一次外层会话；只有外层已验证却没有当前 scope lease 时才以至少 15 秒间隔再次验证并补建 Frame。`LOGIN_PENDING` 是互斥人工恢复状态，检查、建 Frame、保活和自动修复均不会打断它。来源请求遇到认证拒绝会由会话服务合并复核，确认无可用会话后固定返回未就绪而不再请求上游。新 lease 发布前旧 lease 持续可用，发布后旧 lease 等待已开始请求结束和最短退役期届满才关闭其自建 target；维护循环会独立执行该回收。每次来源请求由有截止时间、可取消的 SessionAccess 管理。Chrome 健康由固定 CDP 端点和已确认 generation 决定，启动器 PID 交接不会触发替换；若 generation 连续三次无法就绪，Supervisor 熔断自动恢复并要求人工重启。新 owner 不扫描、接管或关闭旧 generation 的 tab；运行态只保存固定状态和数量，不保存 target ID、token 或 URL。
 
 ```mermaid
 flowchart LR
@@ -243,7 +243,7 @@ cp .env.example runtime/.env
 | `ENABLE_SINK_WRITES`、`ENABLE_BLOCK_WRITES` | 沉底、屏蔽开关。 |
 | `ENABLE_MUTE_WRITES`、`ENABLE_UNMUTE_WRITES` | 禁言、解除禁言开关。 |
 | `ENABLE_RESTORE_WRITES` | 恢复正常开关。 |
-| `SESSION_REPAIR_ENABLED` | 默认 `false`；仅检查 current-owner HOME/Frame，失效时合并一次 Bootstrap。 |
+| `SESSION_REPAIR_ENABLED` | 默认 `false`；检查 current-owner HOME/Frame，且在外层已验证但当前 scope 零 ACTIVE lease 时补建 Frame。登录等待或未验证外层不会触发候选建立；零 lease 失败至少 15 秒后重试。 |
 | 自动任务生产者中的“会话保活” | 默认关闭；在系统配置台启用后按规则创建未来保活 Job，已入队任务保持原队列语义。 |
 
 不要将浏览器 Cookie、令牌、完整跳转 URL、运营者身份标识或未脱敏的作者用户 ID写入 `runtime/.env`、文档或日志。作者用户 ID仅允许保存到原创帖与作者禁言状态表，不进入报表或通用搜索。

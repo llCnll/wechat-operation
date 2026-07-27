@@ -43,6 +43,16 @@ def test_admin_home_is_configuration_and_traceability_console(admin_client, monk
         "config.context_processors.SupervisorClient.status",
         lambda _self: {name: {"running": True, "desired": True} for name in MANAGED_SERVICE_NAMES},
     )
+    GameCircleLoginRuntimeState.objects.create(
+        outer_state=GameCircleLoginRuntimeState.OuterState.OUTER_READY,
+        frame_state=GameCircleLoginRuntimeState.FrameState.READY,
+        available_actions=[
+            GameCircleLoginRuntimeState.Action.CHECK_LOGIN,
+            GameCircleLoginRuntimeState.Action.KEEPALIVE,
+        ],
+        checked_at=timezone.now(),
+        outer_verified_at=timezone.now(),
+    )
 
     response = admin_client.get("/admin/")
 
@@ -297,6 +307,16 @@ def test_runtime_console_only_renders_fixed_csrf_protected_controls(admin_client
         "config.context_processors.SupervisorClient.status",
         lambda _self: {name: {"running": True, "desired": True} for name in MANAGED_SERVICE_NAMES},
     )
+    GameCircleLoginRuntimeState.objects.create(
+        outer_state=GameCircleLoginRuntimeState.OuterState.OUTER_READY,
+        frame_state=GameCircleLoginRuntimeState.FrameState.READY,
+        available_actions=[
+            GameCircleLoginRuntimeState.Action.CHECK_LOGIN,
+            GameCircleLoginRuntimeState.Action.KEEPALIVE,
+        ],
+        checked_at=timezone.now(),
+        outer_verified_at=timezone.now(),
+    )
 
     page = admin_client.get("/admin/").content.decode()
 
@@ -311,7 +331,13 @@ def test_runtime_console_only_renders_fixed_csrf_protected_controls(admin_client
 
 
 @pytest.mark.django_db
-def test_runtime_console_hides_login_page_entry_when_the_outer_session_is_already_ready(admin_client):
+def test_runtime_console_hides_login_page_entry_when_the_outer_session_is_already_ready(
+    admin_client, monkeypatch
+):
+    monkeypatch.setattr(
+        "config.context_processors.SupervisorClient.status",
+        lambda _self: {name: {"running": True, "desired": True} for name in MANAGED_SERVICE_NAMES},
+    )
     GameCircleLoginRuntimeState.objects.create(
         outer_state=GameCircleLoginRuntimeState.OuterState.OUTER_READY,
         frame_state=GameCircleLoginRuntimeState.FrameState.READY,
@@ -327,6 +353,31 @@ def test_runtime_console_hides_login_page_entry_when_the_outer_session_is_alread
     session_card = page.split('id="service-game-circle-session"', 1)[1].split("</article>", 1)[0]
 
     assert 'action="/auth/open-login/"' not in session_card
+    assert 'action="/admin/runtime/session-check/"' in session_card
+    assert 'action="/admin/runtime/session-keepalive/"' in session_card
+    assert 'action="/admin/runtime/current-game-frame/"' not in session_card
+
+
+@pytest.mark.django_db
+def test_runtime_console_hides_conflicting_session_actions_during_login_wait(admin_client, monkeypatch):
+    monkeypatch.setattr(
+        "config.context_processors.SupervisorClient.status",
+        lambda _self: {name: {"running": True, "desired": True} for name in MANAGED_SERVICE_NAMES},
+    )
+    GameCircleLoginRuntimeState.objects.create(
+        outer_state=GameCircleLoginRuntimeState.OuterState.LOGIN_PENDING,
+        frame_state=GameCircleLoginRuntimeState.FrameState.UNREADY,
+        available_actions=[GameCircleLoginRuntimeState.Action.OPEN_LOGIN],
+        checked_at=timezone.now(),
+    )
+
+    page = admin_client.get("/admin/").content.decode()
+    session_card = page.split('id="service-game-circle-session"', 1)[1].split("</article>", 1)[0]
+
+    assert 'action="/auth/open-login/"' in session_card
+    assert 'action="/admin/runtime/session-check/"' not in session_card
+    assert 'action="/admin/runtime/current-game-frame/"' not in session_card
+    assert 'action="/admin/runtime/session-keepalive/"' not in session_card
 
 
 def test_system_configuration_uses_local_lucide_icons_without_emoji_assets():

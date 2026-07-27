@@ -12,11 +12,8 @@ from time import monotonic, sleep
 from urllib.parse import urlencode
 from typing import Any
 
-from config.cdp import CdpMpPage, CdpTargetUnavailableError
+from config.cdp import CdpMpPage
 from config.settings import CONTROLLED_CHROME_CDP_URL
-
-
-SCAN_PAGE_MARKERS = ("扫码登录", "请使用微信扫描", "微信扫一扫")
 
 
 class GameCircleContractError(RuntimeError):
@@ -71,31 +68,22 @@ class GameCircleOuterAdapter:
 
     def read_usable_outer_token(self) -> str:
         value = self.page.evaluate(
-            """(() => { const url = new URL(window.location.href); return {
-              token: url.searchParams.get('token'), loginPath: url.pathname === '/cgi-bin/loginpage'
-            }; })()"""
+            "(() => new URL(window.location.href).searchParams.get('token'))()"
         )
-        token = value.get("token") if isinstance(value, dict) else None
-        if not isinstance(token, str) or not token or (isinstance(value, dict) and value.get("loginPath") is True):
+        if not isinstance(value, str) or not value:
             raise OuterSessionUnreadyError("当前受控会话页缺少运行时 token")
-        return token
+        return value
 
     def read_outer_token(self) -> str:
         return self.read_usable_outer_token()
 
-    def is_login_page(self) -> bool:
-        """Recognize only the fixed public-platform login route, never page copy."""
-        value = self.page.evaluate(
-            "(() => { const url = new URL(window.location.href); return url.pathname === '/cgi-bin/loginpage'; })()"
-        )
-        return value is True
-
-    def scan_required(self) -> bool:
-        text = self.page.body_text()
-        return any(marker in text for marker in SCAN_PAGE_MARKERS)
-
     def wait_for_stable_outer_session(self, *, timeout_seconds: float = 10) -> VerifiedOuterSession | None:
-        """Verify token, request result and post-request page state together."""
+        """Verify a stable token and outer contract, or report a stable no-token page.
+
+        A missing token is intentionally a normal observation rather than a
+        pathname/content heuristic.  The coordinator owns the decision whether
+        that observed HOME is awaiting manual login or merely transient.
+        """
         deadline = monotonic() + timeout_seconds
         last_unready: OuterSessionUnreadyError | None = None
         while True:
@@ -103,7 +91,7 @@ class GameCircleOuterAdapter:
                 """(async () => {
                   const before = new URL(window.location.href);
                   const beforeToken = before.searchParams.get('token');
-                  if (!beforeToken) return {kind: 'missing_token', loginPath: before.pathname === '/cgi-bin/loginpage'};
+                  if (!beforeToken) return {kind: 'missing_token'};
                   const response = await fetch('https://gamemp.weixin.qq.com/cgi-bin/gamewxagsettingwap/getappinfo', {
                     credentials: 'include', cache: 'no-store'
                   });
@@ -114,17 +102,14 @@ class GameCircleOuterAdapter:
                     const payload = JSON.parse(text);
                     return {kind: 'response', status: response.status, errcode: payload.errcode,
                       appid: payload.data && payload.data.app_info && payload.data.app_info.appid,
-                      token: afterToken, stable: Boolean(afterToken) && beforeToken === afterToken
-                        && after.pathname !== '/cgi-bin/loginpage'};
+                      token: afterToken, stable: Boolean(afterToken) && beforeToken === afterToken};
                   } catch (_) { return {kind: 'non_json', status: response.status}; }
                 })()"""
             )
             if not isinstance(value, dict):
                 raise GameCircleContractError("外层会话验证返回结构无效", safe_reason="INVALID_EVALUATION_RESULT")
             if value.get("kind") == "missing_token":
-                if value.get("loginPath") is True and self.scan_required():
-                    return None
-                last_unready = OuterSessionUnreadyError("当前受控会话页缺少运行时 token")
+                return None
             elif value.get("kind") == "response":
                 status, errcode = value.get("status"), value.get("errcode")
                 if status == 401 and errcode in {40001, 40042}:
