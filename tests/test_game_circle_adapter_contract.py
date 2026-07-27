@@ -170,13 +170,23 @@ def test_refresh_direct_failure_boundaries(scan_required, has_token, message):
         validate_refresh_preconditions(scan_required=scan_required, has_outer_token=has_token)
 
 
-def test_outer_scan_probe_only_classifies_visible_login_markers():
+def test_stable_outer_page_without_a_token_is_an_explicit_no_token_observation():
     page = Mock()
-    for text in ("请使用微信扫描二维码登录", "微信扫一扫，选择公众平台账号登录"):
-        page.body_text.return_value = text
-        assert GameCircleOuterAdapter(page).scan_required() is True
-    page.body_text.return_value = "已进入管理首页"
-    assert GameCircleOuterAdapter(page).scan_required() is False
+    page.evaluate.return_value = {"kind": "missing_token"}
+
+    assert GameCircleOuterAdapter(page).wait_for_stable_outer_session(timeout_seconds=1) is None
+    assert "getappinfo" in page.evaluate.call_args.args[0]
+
+
+@pytest.mark.parametrize("entry_url", ["https://mp.weixin.qq.com/", "https://mp.weixin.qq.com/cgi-bin/loginpage"])
+def test_no_token_observation_is_independent_of_the_login_entry_url(entry_url):
+    page = Mock()
+    page.evaluate.return_value = {"kind": "missing_token", "entry": entry_url}
+
+    assert GameCircleOuterAdapter(page).wait_for_stable_outer_session(timeout_seconds=1) is None
+    expression = page.evaluate.call_args.args[0]
+    assert "pathname" not in expression
+    assert "bodyText" not in expression
 
 
 def test_missing_outer_token_has_a_dedicated_non_chrome_failure_type():
