@@ -115,19 +115,17 @@ def author_mute_status_backfill_handler(job: BackgroundJob) -> None:
                         skipped += 1
                     else:
                         payload = client.get_author_detail(post.author_openid)
-                        synced = sync_author_mute_status_from_user_detail(
+                        sync_author_mute_status_from_user_detail(
                             payload,
                             expected_openid=post.author_openid,
                             source_requested_at=requested_at,
                             source_appid=appid,
                             post=post,
                         )
-                        if synced is None:
-                            raise SourceContractError("作者详情响应结构无效")
                         processed += 1
                 else:
                     topic_payload = client.get_post_metrics(post.topic_id)
-                    discovered = sync_author_mute_status(
+                    sync_author_mute_status(
                         post,
                         topic_payload,
                         source_requested_at=requested_at,
@@ -137,15 +135,13 @@ def author_mute_status_backfill_handler(job: BackgroundJob) -> None:
                     if not post.author_openid:
                         raise SourceContractError("帖子详情缺少作者用户 ID")
                     author_payload = client.get_author_detail(post.author_openid)
-                    synced = sync_author_mute_status_from_user_detail(
+                    sync_author_mute_status_from_user_detail(
                         author_payload,
                         expected_openid=post.author_openid,
                         source_requested_at=timezone.now(),
                         source_appid=appid,
                         post=post,
                     )
-                    if discovered is None or synced is None:
-                        raise SourceContractError("作者详情响应结构无效")
                     identity_consistency_verified += 1
                     processed += 1
             except SourceBusinessDeletedError:

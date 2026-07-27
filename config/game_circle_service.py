@@ -1445,7 +1445,10 @@ class GameCircleSessionService:
                             payload = request.params.get("payload")
                             if not request.operation_id or not isinstance(payload, dict):
                                 raise SourceContractError("人工操作请求无效")
-                            return {"payload": client.perform_confirmed_operation(topic_id=int(request.params["topic_id"]), action=str(request.params["action"]), payload=payload)}
+                            topic_id = request.params.get("topic_id")
+                            if topic_id is not None and not isinstance(topic_id, int):
+                                raise SourceContractError("人工操作帖子 ID 无效")
+                            return {"payload": client.perform_confirmed_operation(topic_id=topic_id, action=str(request.params["action"]), payload=payload)}
                     finally:
                         client.close()
                 client = self._metric_client(access)

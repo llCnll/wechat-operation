@@ -333,20 +333,23 @@ AI 评估中的单项风险证据，可保存多段命中内容。
 | `executed_at` | 日期时间，可空 | 实际调用上游的时间。 |
 | `created_at` | 日期时间，自动写入 | 审计记录创建时间。 |
 
+`OperationAudit` 具有互斥目标：帖子范围只关联 `task` 并允许沉底、屏蔽、恢复；作者范围只关联 `author_status` 并允许禁言、解除禁言。两类目标各自限制同一主体最多一条 `EXECUTING` 审计。`resolution_id` 可关联一次 AI 最终处置确认；来源帖子只作追溯，不能成为作者操作前提或并发键。
+
 `result_code` 常见取值包括：`EXECUTING`（确认已持久化，正在执行上游读写）、`OK`（状态回读验证成功）、`ACTION_FAILED`（上游调用或回读失败）、`SKIPPED_UPSTREAM_NOT_NORMAL`（目标已不是正常帖，跳过重复处置）和 `CAPABILITY_DISABLED`（对应上游写能力未启用）。审计用于操作防重和追溯，不作为审核任务状态的强依赖。
 
 ## `reviews_aioperationreview`（AI 操作复审）
 
-每条成功 AI 自动沉底/屏蔽审计对应一条人工事后复审记录。复审不会自动恢复上游状态；异常纠正仍走既有人工二次确认与审计。
+每条成功 AI 自动沉底/屏蔽审计对应一条人工事后复审记录。复审保存最终帖子决定与作者决定；每个需要上游写入的确认额外形成不可变 `AiOperationResolution` 批次并关联该次独立帖子/作者审计。复审不会自动恢复、补偿或重放上游状态。
 
 | 字段 | 类型与约束 | 含义 |
 | --- | --- | --- |
 | `id` | 整数，自增，主键 | 本地记录编号。 |
 | `audit_id` | 一对一外键，指向 `reviews_operationaudit`，保护删除 | 对应 AI 自动操作审计。 |
-| `status` | 字符串，最长 16，枚举，默认 `PENDING` | `PENDING`、`CONFIRMED`、`ESCALATED` 或 `RESTORED`。 |
+| `status` | 字符串，最长 16，枚举，默认 `PENDING` | 当前写入 `PENDING`、`CONFIRMED`、`CORRECTED`；`ESCALATED`、`RESTORED` 仅兼容历史读取。 |
 | `reviewer_id` | 外键，可空，指向 `auth_user`，置空删除 | 完成复审的后台用户。 |
 | `reviewed_at` | 日期时间，可空 | 最近复审时间。 |
 | `reason` | 文本，可留空 | 复审说明或升级原因。 |
+| `final_post_decision` / `final_author_decision` | 字符串，可留空 | 已确认的帖子决定与作者决定；历史记录可为空。 |
 | `created_at` / `updated_at` | 日期时间，自动写入/更新 | 创建和最近更新时间。 |
 
 ## `jobs_backgroundjob`（后台任务）
@@ -437,6 +440,8 @@ AI 评估中的单项风险证据，可保存多段命中内容。
 | `SCHEDULED_INGEST_WINDOW` | Scheduler 创建的 30 分钟断点帖子采集。 | 实时采集 Worker（Supervisor 服务 `ingestion`） |
 | `STATUS_SYNC` | 回读一批待审核帖的上游状态与互动数据。 | 实时采集 Worker（Supervisor 服务 `ingestion`） |
 | `MANUAL_INGEST_WINDOW` | 从系统配置首页创建的指定游戏和最近小时数断点帖子采集。 | 人工补采 Worker（Supervisor 服务 `backfill_ingestion`） |
+| `MANUAL_CURRENT_INGEST_WINDOW` | 自动任务生产者手动运行的固定最近 30 分钟采集；入队时冻结游戏范围。 | 人工补采 Worker（Supervisor 服务 `backfill_ingestion`） |
+| `FILTERED_POST_REFRESH` | 内容管理当前筛选条件的异步状态、指标和作者投影刷新；只保存脱敏筛选谓词与游标。 | 人工补采 Worker（Supervisor 服务 `backfill_ingestion`） |
 | `METRICS_REFRESH_WINDOW` | 人工触发的日期范围原创帖互动回读，只新增浏览、点赞、评论和分享快照；单帖传输或契约失败会记录到 checkpoint 样本并继续。 | 人工补采 Worker（Supervisor 服务 `backfill_ingestion`） |
 | `INGEST_WINDOW` | 升级前遗留的采集任务；新版本不再创建。 | 人工补采 Worker（Supervisor 服务 `backfill_ingestion`） |
 | `OCR_EXTRACT` | 原创帖图片 OCR。 | AI 审核 Worker（Supervisor 服务 `review`） |

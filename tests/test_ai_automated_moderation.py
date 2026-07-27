@@ -1,17 +1,28 @@
 from uuid import uuid4
+from datetime import timedelta
 
 import pytest
 from django.contrib.auth import get_user_model
 from django.test import Client
+from django.utils import timezone
 
 from jobs.models import BackgroundJob
 from jobs.services import JobDeferred
 from posts.game_catalog import set_active_game
-from posts.models import CandidatePost, ManagedGame, MediaType, OriginalPost, OriginType, PostMedia
+from posts.models import (
+    AuthorMuteStatus,
+    CandidatePost,
+    ManagedGame,
+    MediaType,
+    OriginalPost,
+    OriginType,
+    PostMedia,
+)
 from reviews.adapters import REVIEW_PROMPT_VERSION, AssessmentOutput, RiskOutput
 from reviews.automation_tasks import automated_moderation_handler
 from reviews.models import (
     AiOperationReview,
+    AiOperationResolution,
     AiOperationReviewStatus,
     FocusReason,
     OcrExtraction,
@@ -892,6 +903,73 @@ def test_ai_operation_review_tab_and_post_actions(monkeypatch):
 
 
 @pytest.mark.django_db
+def test_corrected_ai_review_displays_verified_final_post_transition():
+    user = get_user_model().objects.create_user("corrected-transition-reviewer")
+    post = OriginalPost.objects.create(
+        topic_id=90051,
+        content_id="corrected-transition",
+        source_appid="wx6d2454a8afcd9706",
+        status=4,
+    )
+    CandidatePost.objects.create(
+        topic_id=post.topic_id, content_id=post.content_id, origin_type=OriginType.ORIGINAL
+    )
+    _, task = persist_assessment(
+        post,
+        AssessmentOutput(content_category="OTHER", recommended_action=RecommendedAction.BLOCK, overall_confidence=0.9),
+    )
+    automated_audit = OperationAudit.objects.create(
+        task=task,
+        operation_id="corrected-transition-ai",
+        idempotency_key="corrected-transition-ai",
+        action=RecommendedAction.BLOCK,
+        reason="AI 自动屏蔽",
+        before_state={"status": 2},
+        after_state={"status": 4},
+        result_code="OK",
+        execution_source=OperationExecutionSource.AI_AUTOMATED,
+    )
+    review = AiOperationReview.objects.create(
+        audit=automated_audit,
+        status=AiOperationReviewStatus.CORRECTED,
+        final_post_decision=RecommendedAction.SINK,
+        final_author_decision="UNCHANGED",
+        reviewer=user,
+        reviewed_at=timezone.now(),
+    )
+    resolution = AiOperationResolution.objects.create(
+        review=review,
+        confirmation_key="corrected-transition-resolution",
+        post_decision=RecommendedAction.SINK,
+        author_decision="UNCHANGED",
+        executor=user,
+        result_code="SUCCEEDED",
+    )
+    OperationAudit.objects.create(
+        task=task,
+        resolution=resolution,
+        operation_id="corrected-transition-sink",
+        idempotency_key="corrected-transition-sink",
+        action=RecommendedAction.SINK,
+        reason="",
+        before_state={"status": 4},
+        after_state={"status": 8},
+        result_code="OK",
+        executor=user,
+        execution_source=OperationExecutionSource.HUMAN,
+    )
+
+    client = Client()
+    client.force_login(user)
+    response = client.get("/ai-operation-reviews/?status=CORRECTED")
+
+    body = response.content.decode()
+    assert response.status_code == 200
+    assert "已人工纠正 · 已屏蔽 → 已沉底" in body
+    assert "AI 原执行 <b>正常 → 已屏蔽</b>" in body
+
+
+@pytest.mark.django_db
 def test_escalating_an_ai_review_opens_its_content_management_task(monkeypatch):
     from config.settings import runtime
 
@@ -1248,6 +1326,16 @@ def test_review_workspace_filters_and_blocks_direct_action_while_pending(monkeyp
         content_text="内容",
         status=2,
         source_appid="wx6d2454a8afcd9706",
+        author_openid="workspace-author",
+        author_nick_name="复审作者",
+    )
+    AuthorMuteStatus.objects.create(
+        openid=post.author_openid,
+        source_appid=post.source_appid,
+        nick_name=post.author_nick_name,
+        local_muted_until=timezone.now() + timedelta(days=30),
+        last_synced_at=timezone.now(),
+        source_requested_at=timezone.now(),
     )
     CandidatePost.objects.create(
         topic_id=post.topic_id, content_id=post.content_id, origin_type=OriginType.ORIGINAL
@@ -1281,6 +1369,9 @@ def test_review_workspace_filters_and_blocks_direct_action_while_pending(monkeyp
     assert page.status_code == 200
     assert "风险证据" in body
     assert "正常 → 已沉底" in body
+    assert "当前作者状态" in body
+    assert "当前游戏禁言" in body
+    assert "作者禁言管理" not in body
     assert "执行与追溯" in body
     assert str(post.topic_id) in body
     assert "review_status=AUTO_EXECUTED_PENDING_REVIEW" in body

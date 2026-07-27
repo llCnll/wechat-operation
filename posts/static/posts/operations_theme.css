@@ -62,6 +62,19 @@ body[data-operations-theme="dark"] :is(.workspace-tabs a:hover,.workspace-tabs a
 body[data-operations-theme="dark"] :is(.metric-chart,.chart-tooltip) { border-color:rgba(220,235,248,.12); background:#090e14; }
 body[data-operations-theme="dark"] :is(.operation-modal,.review-escalate-modal) { border-color:rgba(220,235,248,.18); color:#f1f5f9; background:linear-gradient(145deg,#19212c,#10151d); }
 body[data-operations-theme="dark"] :is(.operation-modal fieldset,.review-escalate-modal fieldset,.operation-modal .operation-footer,.review-escalate-modal .operation-footer) { border-color:rgba(220,235,248,.16); background:#111923; }
+body[data-operations-theme="dark"] :is(.review-author-state,.review-resolution-author-state) { border-color:rgba(220,235,248,.16); border-left-color:#6f818a; background:#111923; }
+body[data-operations-theme="dark"] :is(.review-author-state strong,.review-resolution-author-state strong,.review-author-state>b) { color:#eef4f8; }
+body[data-operations-theme="dark"] :is(.review-author-state span,.review-author-state small,.review-resolution-author-state>span,.review-resolution-author-state small) { color:#a6b1c0; }
+body[data-operations-theme="dark"] :is(.review-author-state,.review-resolution-author-state).is-muted { border-color:rgba(239,184,99,.34); border-left-color:#e6ac48; background:rgba(170,117,29,.14); }
+body[data-operations-theme="dark"] :is(.review-author-state,.review-resolution-author-state).is-muted strong { color:#ffd99b; }
+body[data-operations-theme="dark"] :is(.review-author-state,.review-resolution-author-state).is-clear { border-color:rgba(138,240,198,.28); border-left-color:#8af0c6; background:rgba(138,240,198,.09); }
+body[data-operations-theme="dark"] :is(.review-author-state,.review-resolution-author-state).is-clear strong { color:#8af0c6; }
+body[data-operations-theme="dark"] .review-escalate-modal :is(.review-correction-actions,#review-block-reasons,#review-mute-duration) { border-color:rgba(220,235,248,.16)!important; background:#111923; }
+body[data-operations-theme="dark"] .review-escalate-modal :is(.review-correction-actions label,#review-block-reasons label,#review-mute-duration label) { border-color:rgba(220,235,248,.14); color:#dce7ee; background:#0d131b; }
+body[data-operations-theme="dark"] .review-escalate-modal .review-correction-actions :is(b,small) { color:#dce7ee; }
+body[data-operations-theme="dark"] .review-escalate-modal .review-correction-actions label:has(input:checked) { border-color:rgba(239,184,99,.64); background:rgba(170,117,29,.18); box-shadow:0 0 0 2px rgba(239,184,99,.12); }
+body[data-operations-theme="dark"] .review-escalate-modal #review-mute-duration label:has(input:checked) { border-color:rgba(138,240,198,.5); color:#8af0c6; background:rgba(138,240,198,.09); }
+body[data-operations-theme="dark"] .review-escalate-modal #review-permanent-mute { border-color:rgba(138,240,198,.24); color:#dce7ee; background:rgba(138,240,198,.08); }
 
 /* Mute management has interactive controls nested below the list shell. Keep
    their opened and action states on the same dark surface as the shell. */
@@ -109,7 +122,16 @@ body { min-height:100dvh; background-attachment:fixed; }
 .queue-title { padding:25px 23px 16px; }
 .queue-title h2 { font-size:1.7rem; letter-spacing:-.045em; }
 .batch-action { padding:0 21px 15px; }
-.batch-action button { min-height:58px; border-radius:12px; background:linear-gradient(135deg,#e6f5ed,#f9fffb); box-shadow:0 9px 20px rgba(31,107,85,.07); }
+.batch-action button { border-radius:12px; box-shadow:0 9px 20px rgba(31,107,85,.07); }
+.batch-action-primary { background:linear-gradient(135deg,#1e665c,#214c4d); }
+.batch-action-sync button { background:linear-gradient(135deg,#edf8f3,#f9fffb); }
+body[data-operations-theme="dark"] .batch-action-primary { border-color:#78d5b9; color:#06120e; background:linear-gradient(135deg,#8af0c6,#47b998); box-shadow:0 10px 24px rgba(0,0,0,.22); }
+body[data-operations-theme="dark"] .batch-action-primary small { color:#123a30; }
+body[data-operations-theme="dark"] .batch-action-primary:disabled { border-color:#536e67; color:#c8d7d1; background:#314943; }
+body[data-operations-theme="dark"] .batch-action-primary:disabled small { color:#c8d7d1; }
+body[data-operations-theme="dark"] .batch-action-sync button { border-color:rgba(138,240,198,.26); color:#e6edf5; background:linear-gradient(135deg,#162b28,#111923); box-shadow:none; }
+body[data-operations-theme="dark"] .batch-action-sync button small { color:#aab9b5; }
+body[data-operations-theme="dark"] .batch-action-sync button:hover:not(:disabled) { border-color:rgba(138,240,198,.54); color:#8af0c6; background:rgba(138,240,198,.08); }
 .post-list { max-height:calc(100dvh - 450px); padding:0 9px 22px; }
 .queue-item { margin:3px 0; padding:15px 13px; border:1px solid transparent; border-radius:12px; }
 .queue-item:hover { border-color:#b7ddcf; background:rgba(255,255,255,.86); }

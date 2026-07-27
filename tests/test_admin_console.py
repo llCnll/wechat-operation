@@ -76,7 +76,7 @@ def test_admin_home_is_configuration_and_traceability_console(admin_client, monk
     assert "受控 Chrome" in page
     assert "游戏圈会话服务" in page
     assert "外层会话" in page
-    assert "保活当前游戏 Frame" in page
+    assert "立即执行" in page
     assert 'class="console-session-maintenance"' in page
     assert "自动修复当前游戏 Frame" in page
     assert "检查外层会话" in page
@@ -354,7 +354,7 @@ def test_runtime_console_hides_login_page_entry_when_the_outer_session_is_alread
 
     assert 'action="/auth/open-login/"' not in session_card
     assert 'action="/admin/runtime/session-check/"' in session_card
-    assert 'action="/admin/runtime/session-keepalive/"' in session_card
+    assert 'action="/admin/runtime/session-keepalive/"' not in session_card
     assert 'action="/admin/runtime/current-game-frame/"' not in session_card
 
 

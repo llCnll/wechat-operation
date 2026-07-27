@@ -305,11 +305,25 @@ class GameCirclePostClient:
             {"openid": openid, "timeout_seconds": timeout_seconds},
         )
 
-    def perform_confirmed_operation(self, *, topic_id: int, action: str, payload: dict[str, Any], operation_id: str = "") -> dict[str, Any]:
+    def perform_confirmed_operation(self, *, topic_id: int | None, action: str, payload: dict[str, Any], operation_id: str = "") -> dict[str, Any]:
         return self._payload("POSTS_OPERATION", {"topic_id": topic_id, "action": action, "payload": payload}, operation_id=operation_id or str(uuid4()))
 
     def _payload(self, method: str, params: dict[str, Any], *, operation_id: str = "") -> dict[str, Any]:
-        payload = self._ipc.call(method, scope=self.scope, params=params, operation_id=operation_id).get("payload")
+        try:
+            result = self._ipc.call(
+                method,
+                scope=self.scope,
+                params=params,
+                operation_id=operation_id,
+            )
+        except GameCircleIpcError as exc:
+            # The session service transports this verified upstream condition as
+            # SOURCE_DELETED.  Rehydrate it at the post-source boundary so every
+            # caller shares the explicit deleted/unreadable fallback semantics.
+            if exc.category == "SOURCE_DELETED":
+                raise SourceBusinessDeletedError(str(exc)) from exc
+            raise
+        payload = result.get("payload")
         if not isinstance(payload, dict):
             raise SourceContractError("游戏圈会话响应结构无效")
         return payload

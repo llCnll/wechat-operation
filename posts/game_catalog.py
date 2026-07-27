@@ -148,6 +148,27 @@ def resolve_execution_scope(job: "BackgroundJob") -> ExecutionScope:
     return execution_scope
 
 
+@transaction.atomic
+def resolve_fixed_execution_scope(job: "BackgroundJob") -> ExecutionScope:
+    """Use a submit-time scope for manual fixed-range work without current-game comparison."""
+    locked_job = type(job).objects.select_for_update().get(pk=job.pk)
+    saved_scope = (locked_job.checkpoint or {}).get("execution_scope")
+    if not isinstance(saved_scope, dict):
+        raise ValueError("固定范围任务缺少执行范围")
+    appid = saved_scope.get("target_appid")
+    version = saved_scope.get("scope_version")
+    if (
+        not isinstance(appid, str)
+        or not appid
+        or not isinstance(version, int)
+        or version <= 0
+        or not ManagedGame.objects.filter(appid=appid).exists()
+    ):
+        raise ValueError("固定范围任务执行范围无效或游戏已不可管理")
+    job.checkpoint = dict(locked_job.checkpoint or {})
+    return ExecutionScope(target_appid=appid, scope_version=version)
+
+
 def checkpoint_with_execution_scope(
     job: "BackgroundJob", checkpoint: dict[str, object]
 ) -> dict[str, object]:

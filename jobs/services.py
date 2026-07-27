@@ -2,6 +2,7 @@ from collections.abc import Callable, Collection
 from dataclasses import dataclass
 from datetime import timedelta
 
+from django.db import IntegrityError, transaction
 from django.db.models import Q
 from django.utils import timezone
 
@@ -52,6 +53,50 @@ def enqueue_job_with_result(
         },
     )
     return EnqueueResult(job=job, created=created)
+
+
+def enqueue_active_coalesced_job(
+    *,
+    task_type: str,
+    active_coalescing_key: str,
+    idempotency_key: str,
+    parameter_summary: dict,
+    checkpoint: dict,
+    max_retries: int = 3,
+) -> EnqueueResult:
+    """Create one active job for a stable business scope, or reuse its owner.
+
+    ``active_coalescing_key`` is the database-enforced ownership key for work
+    that may be submitted repeatedly but must run at most once at a time.  It
+    is released by the normal terminal job transitions, so later submissions
+    deliberately create a fresh job.  Catching the unique-key race here keeps
+    every caller from hand-rolling an incomplete select-then-create sequence.
+    """
+    with transaction.atomic():
+        while True:
+            existing = (
+                BackgroundJob.objects.select_for_update()
+                .filter(active_coalescing_key=active_coalescing_key)
+                .first()
+            )
+            if existing is not None:
+                return EnqueueResult(existing, False)
+            try:
+                with transaction.atomic():
+                    job = BackgroundJob.objects.create(
+                        task_type=task_type,
+                        idempotency_key=idempotency_key,
+                        active_coalescing_key=active_coalescing_key,
+                        parameter_summary=parameter_summary,
+                        checkpoint=checkpoint,
+                        max_retries=max_retries,
+                    )
+            except IntegrityError:
+                # Another request won the unique active key after our read. Its
+                # terminal transition may race with this lookup, so retry from
+                # the authoritative state rather than returning a duplicate job.
+                continue
+            return EnqueueResult(job, True)
 
 
 def claim_next_job(*, task_types: Collection[str] | None = None) -> BackgroundJob | None:

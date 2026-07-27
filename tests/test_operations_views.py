@@ -566,6 +566,9 @@ def test_dashboard_renders_quick_filter_for_normal_pending_recommendations():
     assert "post_status=NORMAL" in page
     assert "批量执行 AI 建议" in page
     assert "当前没有可执行的 AI 沉底或屏蔽建议" in page
+    assert "同步筛选帖子" in page
+    assert "更新状态、指标与作者禁言状态" in page
+    assert "刷新当前筛选结果" not in page
 
 
 @pytest.mark.django_db
@@ -958,11 +961,13 @@ def test_dashboard_allows_deleted_post_author_unmute_without_post_read(monkeypat
         executed.append(kwargs)
         assert kwargs["action"] == RecommendedAction.UNMUTE
         assert kwargs["source"] is source
-        assert kwargs["upstream_payload"] == {"author_openid": "deleted-author"}
+        assert kwargs["openid"] == "deleted-author"
+        assert kwargs["source_appid"] == post.source_appid
+        assert kwargs["upstream_payload"] == {}
         return SimpleNamespace(result_code="OK")
 
     monkeypatch.setattr("posts.views._source_for_post", source_session)
-    monkeypatch.setattr("posts.views.execute_confirmed_operation", execute)
+    monkeypatch.setattr("posts.views.execute_author_operation_for_identity", execute)
     client = Client()
     client.force_login(user)
 
@@ -1256,7 +1261,9 @@ def test_dashboard_partial_combined_operation_keeps_human_review_pending():
     assert task.status == ReviewStatus.PENDING
     assert task.final_action == ""
     result_codes = set(task.operation_audits.values_list("result_code", flat=True))
-    assert task.operation_audits.count() == 2
+    # Post and author operations now have mutually exclusive audit targets.
+    # A failed author step is therefore not attached to the post task.
+    assert task.operation_audits.count() == 1
     assert "OK" not in result_codes
 
 
