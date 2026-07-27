@@ -1,0 +1,22 @@
+version: 1.6.1
+previous: 1.6.0
+changes:
+  - 修复受控 Chrome 扫码登录恢复：根路径和登录页入口统一按 token 与 `getappinfo` 观察，扫码完成后复用同一 HOME 建立当前游戏 Frame，避免错误关闭或重复创建会话页。
+  - 修复会话控制台状态反馈：登录等待或外层会话未就绪时，检查外层会话和建立 Frame 不再显示为已完成；自动修复仅在外层已验证且当前游戏缺少 lease 时补建 Frame。
+upgrade:
+  dependencies: none
+  database: none
+  static: none
+  restart:
+    mode: services
+    services:
+      - game_circle_session
+      - web
+  once_jobs: []
+  manual: []
+verification:
+  - uv run python manage.py validate_releases
+  - uv run pytest -q tests/test_release_protocol.py tests/test_release_source_archive.py
+  - uv run python manage.py check
+  - 重启 Web 与游戏圈会话服务后，确认控制台可显示外层会话和当前游戏 Frame 状态；登录等待时仅展示查看受控会话页入口。
+  - 在 Windows 受控 Chrome 中分别从根路径与登录页完成一次扫码，确认十秒稳定等待后复用同一 HOME 建立当前游戏 Frame；不得记录认证材料或执行上游写入。

@@ -367,12 +367,12 @@ def test_invalid_cdp_login_control_only_opens_controlled_chrome(mock_call):
 
     assert response.status_code == 302
     assert response.url == "/reports/"
-    assert mock_call.call_args_list == [call("OPEN_CONTROLLED_LOGIN"), call("CHECK_LOGIN")]
+    assert mock_call.call_args_list == [call("OPEN_CONTROLLED_LOGIN")]
 
 
 @pytest.mark.django_db
-@patch("posts.views.GameCircleIpcClient.call", side_effect=[{"status": "CONTROLLED_SESSION_PAGE_OPENED"}, {"status": "CHECK_COMPLETED"}])
-def test_login_control_reports_a_recovered_session_without_claiming_it_opened_a_page(mock_call):
+@patch("posts.views.GameCircleIpcClient.call", return_value={"status": "CONTROLLED_SESSION_LOGIN_PENDING"})
+def test_login_control_reports_login_wait_without_claiming_sync_validation(mock_call):
     user = get_user_model().objects.create_user(username="cdp-login-ready", password="test-password")
     client = Client()
     client.force_login(user)
@@ -380,8 +380,59 @@ def test_login_control_reports_a_recovered_session_without_claiming_it_opened_a_
     response = client.post("/auth/open-login/", {"return_to": "/admin/"}, follow=True)
 
     assert response.status_code == 200
-    assert "已打开受控会话页并完成状态检查" in response.content.decode()
-    assert mock_call.call_args_list == [call("OPEN_CONTROLLED_LOGIN"), call("CHECK_LOGIN")]
+    assert "正在等待扫码登录" in response.content.decode()
+    assert mock_call.call_args_list == [call("OPEN_CONTROLLED_LOGIN")]
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("url", "method", "status", "expected_message"),
+    (
+        (
+            "/admin/runtime/session-check/",
+            "CHECK_LOGIN",
+            "LOGIN_PENDING",
+            "正在等待扫码登录；未执行外层检查。",
+        ),
+        (
+            "/admin/runtime/current-game-frame/",
+            "BUILD_CURRENT_GAME_FRAME",
+            "LOGIN_PENDING",
+            "正在等待扫码登录；未执行当前游戏 Frame 建立。",
+        ),
+        (
+            "/admin/runtime/session-check/",
+            "CHECK_LOGIN",
+            "CONTROL_NOT_COMPLETED",
+            "外层会话当前未就绪，检查未完成；请根据会话状态处理。",
+        ),
+        (
+            "/admin/runtime/current-game-frame/",
+            "BUILD_CURRENT_GAME_FRAME",
+            "CONTROL_NOT_COMPLETED",
+            "当前游戏 Frame 尚未建立；请根据会话状态处理。",
+        ),
+    ),
+)
+def test_session_control_reports_uncompleted_outcomes_without_claiming_completion(
+    monkeypatch, url, method, status, expected_message
+):
+    user = get_user_model().objects.create_user(
+        username=f"pending-{method}", password="test-password", is_staff=True
+    )
+    client = Client()
+    client.force_login(user)
+    calls = []
+    monkeypatch.setattr(
+        "config.supervisor_views.GameCircleIpcClient.call",
+        lambda _self, request_method: calls.append(request_method) or {"status": status},
+    )
+
+    response = client.post(url, {"return_to": "/admin/"}, follow=True)
+
+    assert response.status_code == 200
+    assert expected_message in response.content.decode()
+    assert calls == [method]
 
 
 @pytest.mark.django_db

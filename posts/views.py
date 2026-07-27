@@ -171,15 +171,18 @@ def open_controlled_login(request):
     try:
         ipc = GameCircleIpcClient()
         result = ipc.call("OPEN_CONTROLLED_LOGIN")
-        ipc.call("CHECK_LOGIN")
     except GameCircleIpcError as exc:
         messages.error(request, str(exc))
     else:
         status = result.get("status") if isinstance(result, dict) else ""
-        if status == "CONTROLLED_SESSION_PAGE_OPENED":
-            messages.info(request, "已打开受控会话页并完成状态检查；请在该页面查看登录状态或完成扫码。")
+        if status == "CONTROLLED_SESSION_LOGIN_PENDING":
+            messages.info(request, "已打开受控会话页，正在等待扫码登录；完成扫码后系统会继续恢复当前游戏 Frame。")
+        elif status == "CONTROLLED_SESSION_LOGIN_REQUIRED":
+            messages.info(request, "已打开受控会话页；当前会话需要重新登录，请在该页面完成扫码后刷新状态。")
+        elif status == "CONTROLLED_SESSION_PAGE_OPENED":
+            messages.info(request, "已打开受控会话页；请在该页面查看登录状态或完成扫码。")
         else:
-            messages.info(request, "受控会话页已检查；请在该页面确认登录状态。")
+            messages.info(request, "已打开受控会话页；请在该页面确认登录状态。")
     return redirect(_safe_dashboard_return_url(request))
 
 

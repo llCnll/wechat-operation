@@ -32,10 +32,39 @@ from posts.models import ManagedGame
 INGESTION_WORKER_SERVICES = ("ingestion", "backfill_ingestion")
 INGESTION_WORKER_ACTIONS = frozenset(("start", "stop", "restart"))
 MAX_MANUAL_INGESTION_HOURS = 31 * 24
+SESSION_CONTROL_MESSAGES = {
+    "CHECK_LOGIN": {
+        "completed": "已检查外层会话；不会切换游戏或建立 Frame。",
+        "pending": "正在等待扫码登录；未执行外层检查。",
+        "uncompleted": "外层会话当前未就绪，检查未完成；请根据会话状态处理。",
+    },
+    "BUILD_CURRENT_GAME_FRAME": {
+        "completed": "已请求建立当前游戏 Frame；完成后请刷新状态确认。",
+        "pending": "正在等待扫码登录；未执行当前游戏 Frame 建立。",
+        "uncompleted": "当前游戏 Frame 尚未建立；请根据会话状态处理。",
+    },
+}
 
 
 def _return_to(request) -> str:
     return request.POST.get("return_to", "/admin/")
+
+
+def _run_session_control(request, method: str) -> None:
+    """Submit one fixed control and present only its service-owned outcome."""
+    message_set = SESSION_CONTROL_MESSAGES[method]
+    try:
+        result = GameCircleIpcClient().call(method)
+    except GameCircleIpcError as exc:
+        messages.error(request, str(exc))
+        return
+    status = result.get("status") if isinstance(result, dict) else ""
+    if status == "LOGIN_PENDING":
+        messages.info(request, message_set["pending"])
+    elif status == "CONTROL_NOT_COMPLETED":
+        messages.warning(request, message_set["uncompleted"])
+    else:
+        messages.success(request, message_set["completed"])
 
 
 @staff_member_required
@@ -135,24 +164,14 @@ def set_active_game_scope(request):
 @staff_member_required
 @require_POST
 def check_outer_session(request):
-    try:
-        GameCircleIpcClient().call("CHECK_LOGIN")
-    except GameCircleIpcError as exc:
-        messages.error(request, str(exc))
-    else:
-        messages.success(request, "已检查外层会话；不会切换游戏或建立 Frame。")
+    _run_session_control(request, "CHECK_LOGIN")
     return redirect(_return_to(request))
 
 
 @staff_member_required
 @require_POST
 def build_current_game_frame(request):
-    try:
-        GameCircleIpcClient().call("BUILD_CURRENT_GAME_FRAME")
-    except GameCircleIpcError as exc:
-        messages.error(request, str(exc))
-    else:
-        messages.success(request, "已请求建立当前游戏 Frame；完成后请刷新状态确认。")
+    _run_session_control(request, "BUILD_CURRENT_GAME_FRAME")
     return redirect(_return_to(request))
 
 
