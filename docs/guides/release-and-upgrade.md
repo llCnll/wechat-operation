@@ -12,6 +12,10 @@
 - `releases/<version>.yaml` 发布清单；
 - 需要时的数据库迁移、一次性 Job、静态资源和服务重启说明。
 
+## 作者治理与筛选刷新发布核验
+
+涉及作者目标审计、AI 复审决议或筛选原创帖刷新的发布清单必须声明数据库迁移，并要求重启 `web`、`ingestion`、`backfill_ingestion`、`mute_maintenance`、`review`、`metric_sync` 和 `scheduler`。端点升级后先执行迁移，再验证：删除帖作者禁言不读取帖子详情；AI 组合处置保留独立审计与部分失败；日/周范围只入队且周范围正确归一化；筛选刷新只对 `-10075007` 删除帖回退作者详情。
+
 `releases/<version>.yaml` 是唯一发布事实来源，不维护面向人工阅读的 changelog，也不得由 Git diff 自动推断升级操作。发布清单须明确其 `dependencies`、`database`、`static`、`once_jobs`、`restart`、`manual`、`verification`。涉及迁移、静态资源或 Supervisor 自身代码时，必须要求重启整个 Supervisor；只有明确列出的 Worker 或 Web 变化才可使用 `services` 级重启。
 
 `runtime/release-state.json` 是端点本地、被 Git 忽略的已确认版本状态，格式为：

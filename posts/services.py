@@ -42,7 +42,7 @@ def _sync_author_mute_observation(
     source_appid: str,
     source_requested_at=None,
     post: OriginalPost | None = None,
-    create_if_inactive: bool = True,
+    create_if_inactive: bool = False,
 ) -> AuthorMuteStatus | None:
     """Persist one normalized author observation from a topic or a user detail."""
     requested_at = source_requested_at or timezone.now()
@@ -152,7 +152,7 @@ def sync_author_mute_status_from_user_detail(
     expected_openid: str,
     source_requested_at=None,
     post: OriginalPost | None = None,
-    create_if_inactive: bool = True,
+    create_if_inactive: bool = False,
 ) -> AuthorMuteStatus | None:
     """Persist the author projection returned by the dedicated user-detail endpoint."""
     try:
@@ -173,6 +173,41 @@ def sync_author_mute_status_from_user_detail(
         post=post,
         create_if_inactive=create_if_inactive,
     )
+
+
+def refresh_one_post_from_source(
+    source,
+    post: OriginalPost,
+    *,
+    source_appid: str,
+    fallback_author_openids: set[str],
+) -> str:
+    """Refresh one post through the shared detail/author-projection boundary.
+
+    Only the adapter's explicit deleted/unreadable business error may fall back
+    to user detail.  Other source errors propagate so callers keep retry semantics.
+    """
+    requested_at = timezone.now()
+    try:
+        payload = source.get_post_metrics(post.topic_id)
+    except SourceBusinessDeletedError:
+        post.status = mark_post_deleted(post.status)
+        post.save(update_fields=("status", "updated_at"))
+        openid = post.author_openid
+        if not openid or openid in fallback_author_openids:
+            return "deleted"
+        fallback_author_openids.add(openid)
+        payload = source.get_author_detail(openid)
+        sync_author_mute_status_from_user_detail(
+            payload,
+            expected_openid=openid,
+            source_appid=source_appid,
+            source_requested_at=timezone.now(),
+            create_if_inactive=False,
+        )
+        return "author_fallback"
+    store_post_metrics(post, payload, source_requested_at=requested_at)
+    return "refreshed"
 
 
 def mute_management_status_queryset(*, source_appid: str, now=None):
@@ -369,13 +404,17 @@ def store_post_metrics(
 
 
 def refresh_post_status_and_metrics(client, post: OriginalPost) -> OriginalPost:
-    """Refresh only operational status and aggregate interaction counters."""
-    try:
-        requested_at = timezone.now()
-        metrics_payload = client.get_post_metrics(post.topic_id)
-    except SourceBusinessDeletedError:
-        post.status = mark_post_deleted(post.status)
-        post.save(update_fields=["status", "updated_at"])
-        return post
-    store_post_metrics(post, metrics_payload, source_requested_at=requested_at)
+    """Refresh one dashboard post through the shared source refresh boundary.
+
+    This compatibility entry point intentionally delegates to the same detail-first
+    flow used by status sync and filtered refresh.  In particular, an explicit
+    deleted/unreadable result may read the saved author identity once; all other
+    source failures continue to propagate to the caller.
+    """
+    refresh_one_post_from_source(
+        client,
+        post,
+        source_appid=post.source_appid,
+        fallback_author_openids=set(),
+    )
     return post

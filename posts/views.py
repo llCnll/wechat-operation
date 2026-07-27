@@ -8,7 +8,7 @@ from datetime import UTC, datetime, timedelta
 from django.contrib import messages
 from django.contrib.auth.decorators import login_required
 from django.db import transaction
-from django.db.models import F, OuterRef, Q, Subquery, Value
+from django.db.models import OuterRef, Prefetch, Q, Subquery
 from django.http import QueryDict
 from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse
@@ -31,6 +31,7 @@ from jobs.task_types import (
 )
 from reviews.models import (
     RISK_LABEL_DISPLAY,
+    AiOperationResolution,
     AiOperationReview,
     AiOperationReviewStatus,
     ContentCategory,
@@ -52,16 +53,20 @@ from reviews.services import (
     enqueue_evaluation_pipeline,
     escalate_ai_operation_review,
     execute_confirmed_operation,
+    execute_author_operation_for_identity,
     is_operation_enabled,
     mark_ai_review_restored,
     operation_result_reaches_target,
     save_reply_draft,
+    submit_ai_operation_resolution,
     video_evidence_summaries,
     video_extraction_error_detail,
     video_sampling_notice,
 )
 
 from .game_catalog import active_game_appid, current_execution_scope, managed_game_options
+from .dashboard_filters import filter_original_posts, parse_original_post_filter
+from .ingestion_jobs import enqueue_filtered_post_refresh
 from .models import (
     POST_STATUS_BLOCKED,
     POST_STATUS_DELETED,
@@ -112,14 +117,6 @@ POST_STATUS_FILTER_OPTIONS = (
     ("DELETED", "原平台已删除"),
     ("UNSYNCED", "未同步"),
 )
-
-POST_STATUS_FILTER_FLAGS = {
-    "BLOCKED": POST_STATUS_BLOCKED,
-    "SUNK": POST_STATUS_SUNK,
-    "SELF_VISIBLE": POST_STATUS_SELF_VISIBLE,
-    "DELETED": POST_STATUS_DELETED,
-}
-
 
 def _safe_dashboard_return_url(request) -> str:
     return_to = request.POST.get("return_to", "")
@@ -225,6 +222,35 @@ def _post_status_label(status: int | None) -> str:
     return "未同步" if status is None else f"未知状态（{status}）"
 
 
+def _corrected_post_transition(review: AiOperationReview) -> str:
+    """Return a verified AI-to-human status transition for a corrected review."""
+    if review.status != AiOperationReviewStatus.CORRECTED:
+        return ""
+    successful_resolution = next(
+        (
+            resolution
+            for resolution in getattr(review, "prefetched_resolutions", ())
+            if resolution.result_code == "SUCCEEDED"
+        ),
+        None,
+    )
+    if successful_resolution is None:
+        return ""
+    final_post_audit = next(
+        (
+            audit
+            for audit in successful_resolution.operation_audits.all()
+            if audit.task_id == review.audit.task_id and operation_result_reaches_target(audit.result_code)
+        ),
+        None,
+    )
+    if final_post_audit is None:
+        return ""
+    original_label = _post_status_label(review.audit.after_state.get("status"))
+    final_label = _post_status_label(final_post_audit.after_state.get("status"))
+    return f"{original_label} → {final_label}"
+
+
 def _operation_reason_suggestion(post: OriginalPost) -> str:
     """Create a short editable reason from the most relevant AI evidence."""
     review = getattr(post, "review_task", None)
@@ -322,7 +348,14 @@ def _author_mute_presentation(state: AuthorMuteStatus | None, *, now=None) -> di
     """Return an explicit display state; missing observation is never treated as unmuted."""
     now = now or timezone.now()
     if state is None:
-        return {"label": "状态未知（尚未同步）", "scope": "", "until": None, "active": False}
+        return {
+            "label": "状态未知（尚未同步）",
+            "detail": "尚未获得可核验的作者状态",
+            "scope": "",
+            "until": None,
+            "active": False,
+            "tone": "unknown",
+        }
     local_active = state.local_muted_until and state.local_muted_until > now
     global_active = state.global_muted_until and state.global_muted_until > now
     if local_active and global_active:
@@ -333,6 +366,7 @@ def _author_mute_presentation(state: AuthorMuteStatus | None, *, now=None) -> di
             "until": effective_until,
             "remaining": _remaining_time_label(effective_until, now),
             "active": True,
+            "tone": "muted",
         }
     if local_active:
         return {
@@ -341,6 +375,7 @@ def _author_mute_presentation(state: AuthorMuteStatus | None, *, now=None) -> di
             "until": state.local_muted_until,
             "remaining": _remaining_time_label(state.local_muted_until, now),
             "active": True,
+            "tone": "muted",
         }
     if global_active:
         return {
@@ -349,8 +384,16 @@ def _author_mute_presentation(state: AuthorMuteStatus | None, *, now=None) -> di
             "until": state.global_muted_until,
             "remaining": _remaining_time_label(state.global_muted_until, now),
             "active": True,
+            "tone": "muted",
         }
-    return {"label": "已确认未禁言", "scope": "", "until": None, "active": False}
+    return {
+        "label": "已确认未禁言",
+        "detail": "最近一次作者状态同步未发现有效禁言",
+        "scope": "",
+        "until": None,
+        "active": False,
+        "tone": "clear",
+    }
 
 
 def _remaining_time_label(until, now) -> str:
@@ -380,24 +423,27 @@ def operations_dashboard(request):
         query_string = normalized_query.urlencode()
         target = reverse("operations-dashboard")
         return redirect(f"{target}?{query_string}" if query_string else target)
-    search = request.GET.get("q", "").strip()
     appid = _dashboard_active_game(request.GET.get("appid", "").strip())
     game_filter = _dashboard_game_filter(appid)
+    try:
+        post_filter = parse_original_post_filter(request.GET)
+    except ValueError:
+        # Query normalization already preserves only supported dashboard
+        # fields.  This is defensive for hand-crafted URLs and keeps list and
+        # background-refresh predicates identical.
+        post_filter = parse_original_post_filter(QueryDict(""))
     filters = {
-        "category": [value for value in request.GET.getlist("category") if value],
-        "risk": [value for value in request.GET.getlist("risk") if value],
-        "suggested_action": [value for value in request.GET.getlist("suggested_action") if value],
-        "review_status": [value for value in request.GET.getlist("review_status") if value],
-        "post_status": [value for value in request.GET.getlist("post_status") if value],
+        "category": list(post_filter.category),
+        "risk": list(post_filter.risk),
+        "suggested_action": list(post_filter.suggested_action),
+        "review_status": list(post_filter.review_status),
+        "post_status": list(post_filter.post_status),
+        "min_confidence": "" if post_filter.min_confidence is None else str(post_filter.min_confidence),
+        "min_views": "" if post_filter.min_views is None else str(post_filter.min_views),
+        "reviewed": post_filter.reviewed,
         **{
             key: request.GET.get(key, "").strip()
-            for key in (
-                "min_confidence",
-                "sort",
-                "priority_order",
-                "reviewed",
-                "min_views",
-            )
+            for key in ("sort", "priority_order")
         },
     }
     valid_sorts = {value for value, _label in DASHBOARD_SORT_OPTIONS}
@@ -415,50 +461,7 @@ def operations_dashboard(request):
             "video_extractions__evidence",
         )
     )
-    if search:
-        posts = posts.filter(
-            Q(title__icontains=search)
-            | Q(content_text__icontains=search)
-            | Q(ballot_text__icontains=search)
-        )
-    posts = posts.filter(game_filter)
-    if filters["category"]:
-        posts = posts.filter(review_task__assessment__category__in=filters["category"])
-    if filters["risk"]:
-        posts = posts.filter(review_task__assessment__risk_evidence__label__in=filters["risk"])
-    if filters["suggested_action"]:
-        posts = posts.filter(review_task__suggested_action__in=filters["suggested_action"])
-    if filters["review_status"]:
-        posts = posts.filter(review_task__status__in=filters["review_status"])
-    else:
-        posts = posts.exclude(review_task__status=ReviewStatus.AUTO_EXECUTED_PENDING_REVIEW)
-    if filters["post_status"]:
-        selected_statuses = set(filters["post_status"])
-        status_query = Q()
-        if "NORMAL" in selected_statuses:
-            status_query |= Q(status=POST_STATUS_NORMAL)
-        if "UNSYNCED" in selected_statuses:
-            status_query |= Q(status__isnull=True)
-        flags = sum(
-            flag for name, flag in POST_STATUS_FILTER_FLAGS.items() if name in selected_statuses
-        )
-        if flags:
-            posts = posts.annotate(_selected_status_flags=F("status").bitand(Value(flags)))
-            status_query |= Q(_selected_status_flags__gt=0)
-        posts = posts.filter(status_query)
-    if filters["reviewed"] == "yes":
-        posts = posts.filter(review_task__reviewed_at__isnull=False)
-    elif filters["reviewed"] == "no":
-        posts = posts.filter(review_task__reviewed_at__isnull=True)
-    for name, field in (
-        ("min_confidence", "review_task__assessment__overall_confidence__gte"),
-        ("min_views", "latest_view_count__gte"),
-    ):
-        if filters[name]:
-            try:
-                posts = posts.filter(**{field: float(filters[name])})
-            except ValueError:
-                pass
+    posts = filter_original_posts(posts, source_appid=appid, filters=post_filter)
     ordering = {
         "priority_desc": ("-review_task__priority", "-publish_time", "-updated_at"),
         "priority_asc": ("review_task__priority", "-publish_time", "-updated_at"),
@@ -610,7 +613,7 @@ def operations_dashboard(request):
         "selected_position": selected_index + 1 if selected_post else 0,
         "previous_post": posts[selected_index - 1] if selected_index > 0 else None,
         "next_post": posts[selected_index + 1] if selected_index + 1 < len(posts) else None,
-        "search": search,
+        "search": post_filter.search,
         "appid": appid,
         "managed_games": managed_game_options(),
         "active_game": next((game for game in managed_game_options() if game.appid == appid), None),
@@ -704,8 +707,7 @@ def mute_management(request):
         status.presentation = _author_mute_presentation(status, now=now)
         status.system_muted_at = (
             OperationAudit.objects.filter(
-                task__post__author_openid=status.openid,
-                **({"task__post__source_appid": appid} if appid else {}),
+                author_status=status,
                 action=RecommendedAction.MUTE,
                 result_code="OK",
             )
@@ -884,6 +886,56 @@ def apply_permanent_mute_intent(request):
 
 
 @login_required
+@require_POST
+def confirm_author_mute_operation(request, status_id: int, action: str):
+    """Run a high-risk author operation from its durable status target, never a post."""
+    action = action.upper()
+    if action not in {RecommendedAction.MUTE, RecommendedAction.UNMUTE}:
+        messages.error(request, "不支持的作者操作。")
+        return redirect(_mute_management_return_url(request))
+    appid = _dashboard_active_game(request.POST.get("appid", "").strip())
+    status = get_object_or_404(AuthorMuteStatus, pk=status_id, source_appid=appid)
+    reason = request.POST.get("reason", "").strip()
+    if not reason:
+        messages.error(request, "必须填写业务原因。")
+        return redirect(_mute_management_return_url(request))
+    payload = _dashboard_operation_payload(request, action)
+    if payload is None:
+        return redirect(_mute_management_return_url(request))
+    try:
+        with _source_for_active_game(status.source_appid) as source:
+            audit = execute_author_operation_for_identity(
+                openid=status.openid,
+                source_appid=status.source_appid,
+                user=request.user,
+                action=action,
+                reason=reason,
+                source=source,
+                upstream_payload=payload,
+                confirmation_key=request.POST.get("confirmation_key"),
+                mute_trigger=MuteOperationTrigger.HUMAN_INITIAL,
+            )
+    except (ValueError, PermissionError) as exc:
+        messages.error(request, str(exc))
+    except OperationExecutionConflict as exc:
+        messages.warning(request, str(exc))
+    except Exception:
+        messages.error(request, "无法核验作者身份或建立上游操作会话，未执行作者操作。")
+    else:
+        if operation_result_reaches_target(audit.result_code):
+            if action == RecommendedAction.MUTE and "permanent_mute" in request.POST:
+                set_permanent_mute_intent(
+                    status,
+                    enabled=bool(payload.get("permanent_mute")),
+                    user=request.user,
+                )
+            messages.success(request, f"作者操作已完成：{audit.result_code}。")
+        else:
+            messages.warning(request, f"作者操作未成功：{audit.result_code}。")
+    return redirect(_mute_management_return_url(request))
+
+
+@login_required
 def author_mute_history(request, status_id: int):
     """Show saved original posts for one status row without exposing OpenID in the URL."""
     appid = _dashboard_active_game(request.GET.get("appid", "").strip())
@@ -1056,23 +1108,36 @@ def _resolve_escalated_ai_operation(
         source_context = _source_for_post(post) if post.source_appid else nullcontext(None)
         with source_context as source:
             confirmation_key = request.POST.get("confirmation_key")
-            audits = [
-                execute_confirmed_operation(
-                    task,
-                    user=request.user,
-                    action=operation,
-                    reason=reason,
-                    source=source,
-                    upstream_payload=payload,
-                    confirmation_key=f"{confirmation_key}:ai-correction:{index}:{operation.lower()}",
-                    mute_trigger=(
-                        MuteOperationTrigger.HUMAN_INITIAL
-                        if operation == RecommendedAction.MUTE
-                        else ""
-                    ),
-                )
-                for index, (operation, payload) in enumerate(operation_plan, start=1)
-            ]
+            audits = []
+            for index, (operation, payload) in enumerate(operation_plan, start=1):
+                key = f"{confirmation_key}:ai-correction:{index}:{operation.lower()}"
+                if operation == RecommendedAction.MUTE:
+                    if not post.author_openid or not post.source_appid:
+                        raise ValueError("帖子未保存可核验的作者身份，不能执行作者禁言")
+                    audit = execute_author_operation_for_identity(
+                        openid=post.author_openid,
+                        source_appid=post.source_appid,
+                        user=request.user,
+                        action=operation,
+                        reason=reason,
+                        source=source,
+                        upstream_payload=payload,
+                        confirmation_key=key,
+                        mute_trigger=MuteOperationTrigger.HUMAN_INITIAL,
+                    )
+                else:
+                    audit = execute_confirmed_operation(
+                        task,
+                        user=request.user,
+                        action=operation,
+                        reason=reason,
+                        source=source,
+                        upstream_payload=payload,
+                        confirmation_key=key,
+                    )
+                audits.append(audit)
+                if not operation_result_reaches_target(audit.result_code):
+                    break
     except OperationExecutionConflict as exc:
         messages.warning(request, str(exc))
         return redirect(redirect_url)
@@ -1128,6 +1193,48 @@ def confirm_dashboard_operation(request, topic_id: int, action: str):
     if not reason:
         messages.error(request, "必须填写业务原因。")
         return redirect(redirect_url)
+    if action in {RecommendedAction.MUTE, RecommendedAction.UNMUTE}:
+        if not post.author_openid or not post.source_appid:
+            messages.error(request, "帖子未保存可核验的作者身份，不能执行禁言操作。")
+            return redirect(redirect_url)
+        payload = _dashboard_operation_payload(request, action)
+        if payload is None:
+            return redirect(redirect_url)
+        try:
+            with _source_for_post(post) as source:
+                audit = execute_author_operation_for_identity(
+                    openid=post.author_openid,
+                    source_appid=post.source_appid,
+                    user=request.user,
+                    action=action,
+                    reason=reason,
+                    source=source,
+                    upstream_payload=payload,
+                    confirmation_key=request.POST.get("confirmation_key"),
+                    mute_trigger=MuteOperationTrigger.HUMAN_INITIAL,
+                )
+        except OperationExecutionConflict as exc:
+            messages.warning(request, str(exc))
+        except PermissionError as exc:
+            messages.error(request, str(exc))
+        except Exception:
+            messages.error(request, "无法核验作者身份或建立上游操作会话，未执行禁言。")
+        else:
+            if operation_result_reaches_target(audit.result_code):
+                if action == RecommendedAction.MUTE:
+                    try:
+                        _persist_human_mute_intent(
+                            post=post, payload=payload, audit=audit, user=request.user
+                        )
+                    except ValueError as exc:
+                        messages.warning(request, f"禁言已执行，但{exc}。")
+                        return redirect(redirect_url)
+                messages.success(request, f"作者操作已完成：{audit.result_code}。")
+            elif audit.result_code == "SESSION_RECOVERING":
+                messages.warning(request, "游戏圈会话正在恢复，请稍后重新确认。")
+            else:
+                messages.warning(request, f"作者操作未成功：{audit.result_code}。")
+        return redirect(redirect_url)
     if task.status == ReviewStatus.AUTO_REVIEW_ESCALATED:
         return _resolve_escalated_ai_operation(
             request,
@@ -1154,25 +1261,32 @@ def confirm_dashboard_operation(request, topic_id: int, action: str):
             source_context = _source_for_post(post) if post.source_appid else nullcontext(None)
             with source_context as source:
                 token = request.POST.get("confirmation_key")
-                audits = [
-                    execute_confirmed_operation(
-                        task,
-                        user=request.user,
-                        action=operation,
-                        reason=reason,
-                        source=source,
-                        upstream_payload=payload
-                        if operation == RecommendedAction.MUTE
-                        else {"block_reason_code": payload["block_reason_code"]},
-                        confirmation_key=f"{token}:{operation.lower()}",
-                        mute_trigger=(
-                            MuteOperationTrigger.HUMAN_INITIAL
-                            if operation == RecommendedAction.MUTE
-                            else ""
-                        ),
+                block_audit = execute_confirmed_operation(
+                    task,
+                    user=request.user,
+                    action=RecommendedAction.BLOCK,
+                    reason=reason,
+                    source=source,
+                    upstream_payload={"block_reason_code": payload["block_reason_code"]},
+                    confirmation_key=f"{token}:block",
+                )
+                audits = [block_audit]
+                if operation_result_reaches_target(block_audit.result_code):
+                    if not post.author_openid or not post.source_appid:
+                        raise ValueError("帖子未保存可核验的作者身份，不能执行作者禁言")
+                    audits.append(
+                        execute_author_operation_for_identity(
+                            openid=post.author_openid,
+                            source_appid=post.source_appid,
+                            user=request.user,
+                            action=RecommendedAction.MUTE,
+                            reason=reason,
+                            source=source,
+                            upstream_payload=payload,
+                            confirmation_key=f"{token}:mute",
+                            mute_trigger=MuteOperationTrigger.HUMAN_INITIAL,
+                        )
                     )
-                    for operation in (RecommendedAction.BLOCK, RecommendedAction.MUTE)
-                ]
         except OperationExecutionConflict as exc:
             messages.warning(request, str(exc))
             return redirect(redirect_url)
@@ -1264,7 +1378,14 @@ def ai_operation_reviews(request):
     appid = _dashboard_active_game(request.GET.get("appid", "").strip())
     reviews = AiOperationReview.objects.select_related(
         "audit__task__post", "audit__task__assessment", "audit__policy_version", "reviewer"
-    ).prefetch_related("audit__task__assessment__risk_evidence")
+    ).prefetch_related(
+        "audit__task__assessment__risk_evidence",
+        Prefetch(
+            "resolutions",
+            queryset=AiOperationResolution.objects.prefetch_related("operation_audits"),
+            to_attr="prefetched_resolutions",
+        ),
+    )
     reviews = reviews.filter(
         audit__task__post__in=OriginalPost.objects.filter(_dashboard_game_filter(appid))
     )
@@ -1301,6 +1422,27 @@ def ai_operation_reviews(request):
     for review in reviews:
         review.before_status_label = _post_status_label(review.audit.before_state.get("status"))
         review.after_status_label = _post_status_label(review.audit.after_state.get("status"))
+        review.corrected_post_transition = _corrected_post_transition(review)
+        post = review.audit.task.post
+        _set_status_context(post)
+        review.post_actions_available = not (post.is_deleted or post.is_self_visible)
+        review.post_unavailable_reason = (
+            "帖子已删除，不能再改变帖子状态；仍可在已保存作者身份可核验时单独禁言作者。"
+            if post.is_deleted
+            else "帖子仅自己可见，不能覆盖帖子状态；仍可在已保存作者身份可核验时单独禁言作者。"
+            if post.is_self_visible
+            else ""
+        )
+        author_status = _author_mute_status_for_post(post, appid)
+        review.author_status_id = author_status.pk if author_status else None
+        review.author_nick_name = (author_status.nick_name if author_status else post.author_nick_name) or ""
+        review.author_mute_presentation = _author_mute_presentation(author_status)
+        review.author_actions_available = bool(post.author_openid and post.source_appid)
+        review.author_unavailable_reason = (
+            "该帖子没有已保存的作者身份，不能安全执行作者禁言。"
+            if not review.author_actions_available
+            else ""
+        )
     return render(
         request,
         "posts/ai_operation_reviews.html",
@@ -1338,41 +1480,79 @@ def update_ai_operation_review(request, review_id: int, decision: str):
     redirect_url = _safe_ai_operation_reviews_return_url(request)
     reason = request.POST.get("reason", "")
     final_action = request.POST.get("final_action", "").upper()
+    author_decision = request.POST.get("author_decision", "UNCHANGED").upper()
     try:
-        if decision == "confirm":
-            confirm_ai_operation_review(review, user=request.user, reason=reason)
-            messages.success(request, "已确认 AI 操作正确。")
-        elif decision == "escalate":
+        if decision == "escalate":
+            # Historical links keep their explicit escalation transition.  New
+            # records use the in-place final-decision dialog instead.
             escalate_ai_operation_review(review, user=request.user, reason=reason)
-            if final_action:
-                return _resolve_escalated_ai_operation(
-                    request,
-                    task=review.audit.task,
-                    post=review.audit.task.post,
-                    action=final_action,
-                    reason=reason or "人工复审核验：AI 原处置不正确。",
-                    redirect_url=redirect_url,
-                )
-            messages.warning(request, "已标记异常，请在内容管理中人工跟进。")
-            redirect_url = _escalated_review_dashboard_url(request, review)
-        elif decision == "correct":
-            if review.status != AiOperationReviewStatus.ESCALATED:
-                raise ValueError("该 AI 操作当前不需要异常纠正")
-            if not final_action:
-                raise ValueError("请选择异常纠正后的最终处置")
-            return _resolve_escalated_ai_operation(
-                request,
-                task=review.audit.task,
-                post=review.audit.task.post,
-                action=final_action,
-                reason=reason or "人工复审核验：继续纠正 AI 原处置。",
-                redirect_url=redirect_url,
-            )
-        else:
+            messages.info(request, "已升级为人工跟进，请在内容管理中继续处理历史记录。")
+            return redirect(_escalated_review_dashboard_url(request, review))
+        if decision not in {"confirm", "resolve"}:
             messages.error(request, "不支持的复审操作。")
+            return redirect(redirect_url)
+        if final_action == RecommendedAction.MUTE:
+            final_action, author_decision = "KEEP_CURRENT", RecommendedAction.MUTE
+        elif final_action == RecommendedAction.BLOCK_AND_MUTE:
+            final_action, author_decision = RecommendedAction.BLOCK, RecommendedAction.MUTE
+        post_decision = "KEEP_CURRENT" if decision == "confirm" else final_action
+        if not post_decision:
+            raise ValueError("请选择最终帖子处置")
+        post_payload = None
+        if post_decision == RecommendedAction.BLOCK:
+            post_payload = _dashboard_operation_payload(request, RecommendedAction.BLOCK)
+        author_payload = None
+        if author_decision == RecommendedAction.MUTE:
+            author_payload = _dashboard_operation_payload(request, RecommendedAction.MUTE)
+        if post_payload is None and post_decision == RecommendedAction.BLOCK:
+            return redirect(redirect_url)
+        if author_payload is None and author_decision == RecommendedAction.MUTE:
+            return redirect(redirect_url)
+        requires_write = post_decision != "KEEP_CURRENT" or author_decision == RecommendedAction.MUTE
+        source_context = _source_for_post(review.audit.task.post) if requires_write else nullcontext(None)
+        with source_context as source:
+            resolution, audits = submit_ai_operation_resolution(
+                review,
+                user=request.user,
+                post_decision=post_decision,
+                author_decision=author_decision,
+                reason=reason,
+                confirmation_key=request.POST.get("confirmation_key", ""),
+                source=source,
+                post_payload=post_payload,
+                author_payload=author_payload,
+            )
+        if resolution.result_code == "SUCCEEDED":
+            messages.success(request, "AI 复审最终处置已完成。")
+        else:
+            summary = "，".join(f"{audit.action}={audit.result_code}" for audit in audits)
+            messages.warning(request, f"最终处置未全部成功，复审保持待处理：{summary or '请重新确认'}。")
     except ValueError as exc:
         messages.error(request, str(exc))
+    except PermissionError as exc:
+        messages.error(request, str(exc))
+    except OperationExecutionConflict as exc:
+        messages.warning(request, str(exc))
+    except Exception:
+        messages.error(request, "无法建立上游操作会话或完成最终处置。")
     return redirect(redirect_url)
+
+
+@login_required
+@require_POST
+def enqueue_filtered_post_refresh_request(request):
+    """Freeze the current list predicate and delegate all source work to backfill ingestion."""
+    try:
+        filters = parse_original_post_filter(QueryDict(request.POST.get("filters", "")))
+        result = enqueue_filtered_post_refresh(filters=filters)
+    except ValueError as exc:
+        messages.error(request, str(exc))
+    else:
+        outcome = "已创建" if result.created else "已复用正在处理的"
+        messages.success(request, f"{outcome}筛选原创帖刷新任务；将在后台同步全部匹配帖。")
+    query = request.POST.get("return_query", "")
+    target = reverse("operations-dashboard")
+    return redirect(f"{target}?{query}" if query else target)
 
 
 @login_required

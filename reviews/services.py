@@ -15,14 +15,15 @@ from django.utils import timezone
 
 from config.game_circle_ipc import GameCircleIpcError
 from config.settings import runtime
-from jobs.models import BackgroundJob, JobStatus
 from jobs.adapters import WriteResultUnknownError
+from jobs.models import BackgroundJob, JobStatus
 from jobs.services import enqueue_job
 from jobs.task_types import AI_AUTOMATED_MODERATION_TASK, AI_EVALUATE_TASK, OCR_EXTRACT_TASK
 from posts.models import (
     POST_STATUS_MODERATION_MASK,
     POST_STATUS_NORMAL,
     POST_STATUS_SELF_VISIBLE,
+    AuthorMuteStatus,
     CandidatePost,
     MediaType,
     OriginalPost,
@@ -30,15 +31,21 @@ from posts.models import (
     is_post_deleted,
     is_post_self_visible,
 )
-from posts.services import sync_author_mute_status, sync_author_mute_status_from_user_detail
+from posts.services import (
+    set_permanent_mute_intent,
+    sync_author_mute_status,
+    sync_author_mute_status_from_user_detail,
+)
 
 from .adapters import REVIEW_PROMPT_VERSION, AssessmentOutput
 from .models import (
     AiAssessment,
+    AiOperationResolution,
     AiOperationReview,
     AiOperationReviewStatus,
     ContentCategory,
     FocusReason,
+    MuteOperationTrigger,
     OcrExtraction,
     OperationAudit,
     OperationExecutionSource,
@@ -82,6 +89,8 @@ _READBACK_STATE_OPERATION_RESULT_CODES = _TARGET_REACHED_OPERATION_RESULT_CODES 
     ("SKIPPED_UPSTREAM_NOT_NORMAL", "SKIPPED_UPSTREAM_NOT_ACTIONABLE")
 )
 MUTE_DURATIONS_DAYS = frozenset((1, 3, 7, 30))
+AI_FINAL_POST_DECISIONS = frozenset(("KEEP_CURRENT", RecommendedAction.RESTORE, RecommendedAction.SINK, RecommendedAction.BLOCK))
+AI_FINAL_AUTHOR_DECISIONS = frozenset(("UNCHANGED", RecommendedAction.MUTE))
 BLOCK_REASON_OPTIONS = (
     (1, "其他"),
     (2, "色情低俗"),
@@ -102,7 +111,11 @@ MAX_EVALUATION_OCR_CHARS = 20_000
 AI_AUTOMATED_DAILY_LIMIT = 100
 OCR_GROUNDED_EVIDENCE_MIN_LENGTH = 6
 DEFAULT_REVIEW_PROMPT_VERSION = REVIEW_PROMPT_VERSION
-MUTE_VERIFY_DELAYS_SECONDS = (0, 2, 5, 10)
+# The platform may need a few seconds to project a completed mute write into
+# getuserdetail.  These are absolute points after that write, not cumulative
+# sleep durations: do not spend a request on an immediate read that is known
+# to observe the old state in that window.
+MUTE_VERIFY_READBACK_AT_SECONDS = (2, 5, 8, 10)
 MUTE_VERIFY_MAX_WAIT_SECONDS = 20
 MUTE_VERIFY_REQUEST_OVERHEAD_SECONDS = 0.5
 PUBLIC_REPLY_SUPPRESSION_RISK_LABELS = frozenset(
@@ -285,8 +298,10 @@ def _read_mute_state_with_verification(
     """Read at most four times after a mute write; never repeats the write itself."""
     latest_state: dict = {}
     started_at = monotonic()
-    for delay in MUTE_VERIFY_DELAYS_SECONDS:
-        remaining = MUTE_VERIFY_MAX_WAIT_SECONDS - (monotonic() - started_at)
+    for readback_at in MUTE_VERIFY_READBACK_AT_SECONDS:
+        elapsed = monotonic() - started_at
+        delay = max(0, readback_at - elapsed)
+        remaining = MUTE_VERIFY_MAX_WAIT_SECONDS - elapsed
         if remaining <= 0 or delay > remaining:
             break
         if delay:
@@ -321,6 +336,245 @@ def _read_mute_state_with_verification(
         elif latest_state["local_block_end_time"] <= int(timezone.now().timestamp()):
             break
     return latest_state
+
+
+def _author_operation_idempotency_key(
+    status: AuthorMuteStatus, action: str, confirmation_key: str | None
+) -> str:
+    """Deduplicate one explicit confirmation against one author target."""
+    token = confirmation_key or str(uuid4())
+    if not isinstance(token, str) or not token or len(token) > 64:
+        raise ValueError("确认令牌无效")
+    return f"author:{status.pk}:{action}:{token}"
+
+
+def _read_author_mute_state_with_verification(
+    source,
+    status: AuthorMuteStatus,
+    *,
+    action: str,
+    expected_end_time: int | None,
+) -> dict:
+    """Bounded, identity-checked author readback without a representative post."""
+    latest_state: dict = {}
+    started_at = monotonic()
+    for readback_at in MUTE_VERIFY_READBACK_AT_SECONDS:
+        elapsed = monotonic() - started_at
+        delay = max(0, readback_at - elapsed)
+        remaining = MUTE_VERIFY_MAX_WAIT_SECONDS - elapsed
+        if remaining <= 0 or delay > remaining:
+            break
+        if delay:
+            sleep(delay)
+        remaining = MUTE_VERIFY_MAX_WAIT_SECONDS - (monotonic() - started_at)
+        if remaining <= MUTE_VERIFY_REQUEST_OVERHEAD_SECONDS:
+            break
+        requested_at = timezone.now()
+        bounded_read = getattr(source, "get_author_detail_with_timeout", None)
+        if callable(bounded_read):
+            payload = bounded_read(
+                status.openid,
+                timeout_seconds=remaining - MUTE_VERIFY_REQUEST_OVERHEAD_SECONDS,
+            )
+        else:
+            payload = source.get_author_detail(status.openid)
+        sync_author_mute_status_from_user_detail(
+            payload,
+            expected_openid=status.openid,
+            source_appid=status.source_appid,
+            source_requested_at=requested_at,
+            create_if_inactive=True,
+        )
+        latest_state = _author_mute_state(payload, source_appid=status.source_appid)
+        if action == RecommendedAction.MUTE:
+            if latest_state["local_block_end_time"] >= (expected_end_time or 0):
+                break
+        elif latest_state["local_block_end_time"] <= int(timezone.now().timestamp()):
+            break
+    return latest_state
+
+
+def execute_author_operation(
+    status: AuthorMuteStatus,
+    *,
+    user,
+    action: str,
+    reason: str,
+    source,
+    upstream_payload: dict | None = None,
+    confirmation_key: str | None = None,
+    resolution=None,
+    mute_trigger: str = MuteOperationTrigger.HUMAN_INITIAL,
+    verified_before_payload: dict | None = None,
+    execution_source: str = OperationExecutionSource.HUMAN,
+) -> OperationAudit:
+    """Perform a confirmed MUTE/UNMUTE against one verified author target.
+
+    This deliberately has no `ReviewTask` or `OriginalPost` dependency.  A caller
+    may use a post solely to find an already persisted OpenID, then resolve this
+    author target before entering this operation boundary.
+    """
+    if action not in {RecommendedAction.MUTE, RecommendedAction.UNMUTE}:
+        raise ValueError("作者目标仅支持禁言或解除禁言")
+    payload = _prepare_upstream_payload(action, reason, upstream_payload)
+    if not is_operation_enabled(action):
+        raise PermissionError("上游写操作能力未启用")
+
+    # The fixed author-detail read is both the identity proof and the only source
+    # used to build a normal author's explicit operation target.
+    requested_at = timezone.now()
+    before_payload = verified_before_payload or source.get_author_detail(status.openid)
+    verified_status = sync_author_mute_status_from_user_detail(
+        before_payload,
+        expected_openid=status.openid,
+        source_appid=status.source_appid,
+        source_requested_at=requested_at,
+        create_if_inactive=True,
+    )
+    if verified_status is None:
+        raise ValueError("作者详情缺少可核验身份")
+    status = verified_status
+    before_state = _author_mute_state(before_payload, source_appid=status.source_appid)
+    idempotency_key = _author_operation_idempotency_key(status, action, confirmation_key)
+
+    with transaction.atomic():
+        try:
+            audit, created = OperationAudit.objects.get_or_create(
+                idempotency_key=idempotency_key,
+                defaults={
+                    "author_status": status,
+                    "resolution": resolution,
+                    "operation_id": str(uuid4()),
+                    "action": action,
+                    "reason": reason,
+                    "executor": user,
+                    "execution_source": execution_source,
+                    "mute_trigger": mute_trigger,
+                    "result_code": "EXECUTING",
+                },
+            )
+        except IntegrityError as exc:
+            active = OperationAudit.objects.filter(
+                author_status=status, result_code="EXECUTING"
+            ).first()
+            if active is not None:
+                raise OperationExecutionConflict("该作者已有禁言操作正在执行，请等待结果") from exc
+            raise
+        if not created:
+            return audit
+
+    result_code = "ACTION_FAILED"
+    error_summary = "上游操作失败或契约未验证"
+    after_state: dict = {}
+    try:
+        now_timestamp = int(timezone.now().timestamp())
+        if action == RecommendedAction.MUTE and before_state["local_block_end_time"] > now_timestamp:
+            result_code, error_summary, after_state = "ALREADY_APPLIED", "当前游戏已处于禁言状态", before_state
+        elif action == RecommendedAction.UNMUTE and before_state["local_block_end_time"] <= now_timestamp:
+            result_code, error_summary, after_state = "ALREADY_APPLIED", "当前游戏未处于禁言状态", before_state
+        else:
+            write_error: Exception | None = None
+            result = None
+            try:
+                operation_kwargs = {
+                    "topic_id": None,
+                    "action": action,
+                    "payload": {**payload, "author_openid": status.openid},
+                }
+                if getattr(source, "requires_operation_id", False):
+                    operation_kwargs["operation_id"] = audit.operation_id
+                result = source.perform_confirmed_operation(**operation_kwargs)
+            except Exception as exc:
+                write_error = exc
+            after_state = _read_author_mute_state_with_verification(
+                source,
+                status,
+                action=action,
+                expected_end_time=payload.get("mute_end_time"),
+            )
+            if write_error is not None:
+                error_summary = f"上游调用失败，回读状态已同步：{type(write_error).__name__}"[:500]
+            elif action == RecommendedAction.MUTE:
+                if after_state["local_block_end_time"] >= payload["mute_end_time"]:
+                    result_code, error_summary = "OK", ""
+                else:
+                    error_summary = "禁言状态回读与预期不一致"
+            elif after_state["local_block_end_time"] <= int(timezone.now().timestamp()):
+                result_code, error_summary = "OK", ""
+            else:
+                error_summary = "当前游戏禁言状态回读与预期不一致"
+            if result is not None and (not isinstance(result, dict) or result.get("errcode") != 0):
+                result_code, error_summary = "ACTION_FAILED", "上游操作响应结构无效"
+    except GameCircleIpcError as exc:
+        if exc.category == "SESSION_RECOVERING":
+            result_code, error_summary = "SESSION_RECOVERING", "游戏圈会话正在恢复，请稍后重新确认"
+        else:
+            error_summary = f"上游调用或状态验证失败：{type(exc).__name__}"[:500]
+    except WriteResultUnknownError:
+        result_code, error_summary = "PENDING_READBACK", "上游写入结果待回读确认；系统不会自动重放"
+    except Exception as exc:
+        error_summary = f"上游调用或状态验证失败：{type(exc).__name__}"[:500]
+
+    with transaction.atomic():
+        audit = OperationAudit.objects.select_for_update().get(pk=audit.pk)
+        audit.before_state = before_state
+        audit.after_state = after_state
+        audit.result_code = result_code
+        audit.error_summary = error_summary
+        audit.executed_at = timezone.now()
+        audit.save(update_fields=("before_state", "after_state", "result_code", "error_summary", "executed_at"))
+    return audit
+
+
+def execute_author_operation_for_identity(
+    *,
+    openid: str,
+    source_appid: str,
+    user,
+    action: str,
+    reason: str,
+    source,
+    upstream_payload: dict | None = None,
+    confirmation_key: str | None = None,
+    resolution=None,
+    mute_trigger: str = MuteOperationTrigger.HUMAN_INITIAL,
+    execution_source: str = OperationExecutionSource.HUMAN,
+) -> OperationAudit:
+    """Resolve an explicit author target after confirmation, then execute it.
+
+    The only caller-supplied identity is server-side context (a saved post or an
+    existing mute row).  The fixed detail endpoint validates it before a normal
+    author is allowed to gain a durable operation target.
+    """
+    if not isinstance(openid, str) or not openid:
+        raise ValueError("缺少已保存的作者身份，无法执行禁言操作")
+    if not isinstance(source_appid, str) or not source_appid:
+        raise ValueError("作者操作缺少当前游戏范围")
+    if not is_operation_enabled(action):
+        raise PermissionError("上游写操作能力未启用")
+    payload = source.get_author_detail(openid)
+    status = sync_author_mute_status_from_user_detail(
+        payload,
+        expected_openid=openid,
+        source_appid=source_appid,
+        source_requested_at=timezone.now(),
+        create_if_inactive=True,
+    )
+    if status is None:
+        raise ValueError("作者详情缺少可核验身份")
+    return execute_author_operation(
+        status,
+        user=user,
+        action=action,
+        reason=reason,
+        source=source,
+        upstream_payload=upstream_payload,
+        confirmation_key=confirmation_key,
+        resolution=resolution,
+        mute_trigger=mute_trigger,
+        verified_before_payload=payload,
+        execution_source=execution_source,
+    )
 
 
 def _prepare_upstream_payload(action: str, reason: str, payload: dict | None) -> dict:
@@ -1331,6 +1585,7 @@ def _reserve_operation_audit(
     execution_source: str,
     automation_snapshot: dict | None,
     mute_trigger: str = "",
+    resolution: AiOperationResolution | None = None,
 ) -> tuple[OperationAudit, bool]:
     """Reserve the only in-flight upstream write for a task before contacting CDP."""
     idempotency_key = _operation_idempotency_key(task, action, confirmation_key)
@@ -1339,6 +1594,7 @@ def _reserve_operation_audit(
             idempotency_key=idempotency_key,
             defaults={
                 "task": task,
+                "resolution": resolution,
                 "operation_id": str(uuid4()),
                 "action": action,
                 "reason": reason,
@@ -1371,6 +1627,7 @@ def execute_confirmed_operation(
     automation_snapshot: dict | None = None,
     reserved_audit: OperationAudit | None = None,
     mute_trigger: str = "",
+    resolution: AiOperationResolution | None = None,
 ) -> OperationAudit:
     """Execute one verified upstream operation with an explicit actor source."""
     payload = _prepare_upstream_payload(action, reason, upstream_payload)
@@ -1397,6 +1654,7 @@ def execute_confirmed_operation(
                 execution_source=execution_source,
                 automation_snapshot=automation_snapshot,
                 mute_trigger=mute_trigger,
+                resolution=resolution,
             )
         else:
             audit = OperationAudit.objects.select_for_update().get(pk=reserved_audit.pk)
@@ -1624,6 +1882,194 @@ def complete_ai_automation_review(audit: OperationAudit) -> AiOperationReview:
             task.reason = ""
             task.save()
         return review
+
+
+def ai_final_operation_plan(post_decision: str, author_decision: str) -> tuple[str, ...]:
+    """Return the minimal ordered writes implied by one final AI-review decision."""
+    if post_decision not in AI_FINAL_POST_DECISIONS:
+        raise ValueError("帖子最终决定无效")
+    if author_decision not in AI_FINAL_AUTHOR_DECISIONS:
+        raise ValueError("作者最终决定无效")
+    steps: list[str] = []
+    if post_decision != "KEEP_CURRENT":
+        steps.append(post_decision)
+    if author_decision == RecommendedAction.MUTE:
+        steps.append(RecommendedAction.MUTE)
+    return tuple(steps)
+
+
+def _ai_review_completion_status(review: AiOperationReview, post_decision: str, author_decision: str) -> str:
+    """Keep the historical confirmed/corrected projection without losing dimensions."""
+    original = review.audit.action
+    if post_decision == "KEEP_CURRENT" and author_decision == "UNCHANGED":
+        return AiOperationReviewStatus.CONFIRMED
+    if post_decision == original and author_decision == "UNCHANGED":
+        return AiOperationReviewStatus.CONFIRMED
+    return AiOperationReviewStatus.CORRECTED
+
+
+def _fail_ai_operation_resolution(resolution_id: int) -> None:
+    """Terminalize a committed resolution when no complete plan can be produced."""
+    with transaction.atomic():
+        resolution = AiOperationResolution.objects.select_for_update().get(pk=resolution_id)
+        if resolution.result_code == "EXECUTING":
+            resolution.result_code = "FAILED"
+            resolution.completed_at = timezone.now()
+            resolution.save(update_fields=("result_code", "completed_at"))
+
+
+def submit_ai_operation_resolution(
+    review: AiOperationReview,
+    *,
+    user,
+    post_decision: str,
+    author_decision: str,
+    reason: str,
+    confirmation_key: str,
+    source,
+    post_payload: dict | None = None,
+    author_payload: dict | None = None,
+) -> tuple[AiOperationResolution, list[OperationAudit]]:
+    """Execute one AI-review final decision as independent post/author audits.
+
+    The resolution is committed before writes.  A repeated browser submission
+    therefore returns the same durable batch instead of replaying platform writes.
+    """
+    steps = ai_final_operation_plan(post_decision, author_decision)
+    reason = reason.strip()
+    if not isinstance(confirmation_key, str) or len(confirmation_key) > 64:
+        raise ValueError("确认令牌无效")
+    if steps and not confirmation_key:
+        raise ValueError("确认令牌无效")
+    if not confirmation_key:
+        confirmation_key = f"local:{review.pk}:{uuid4()}"
+    with transaction.atomic():
+        review = (
+            AiOperationReview.objects.select_for_update()
+            .select_related("audit__task__post", "audit__task__assessment")
+            .get(pk=review.pk)
+        )
+        if review.status not in {AiOperationReviewStatus.PENDING, AiOperationReviewStatus.ESCALATED}:
+            raise ValueError("该 AI 操作不再等待复审")
+        resolution, created = AiOperationResolution.objects.get_or_create(
+            confirmation_key=confirmation_key,
+            defaults={
+                "review": review,
+                "post_decision": post_decision,
+                "author_decision": author_decision,
+                "reason": reason,
+                "executor": user,
+                "result_code": "EXECUTING",
+            },
+        )
+        if not created:
+            if resolution.review_id != review.pk:
+                raise ValueError("确认令牌不属于当前复审记录")
+            return resolution, list(resolution.operation_audits.order_by("created_at"))
+        if not steps:
+            reviewed_at = timezone.now()
+            review.status = _ai_review_completion_status(review, post_decision, author_decision)
+            review.reviewer = user
+            review.reviewed_at = reviewed_at
+            review.reason = reason
+            review.final_post_decision = post_decision
+            review.final_author_decision = author_decision
+            review.save()
+            task = review.audit.task
+            task.status = ReviewStatus.REVIEWED
+            task.final_action = review.audit.action
+            task.final_post_decision = post_decision
+            task.final_author_decision = author_decision
+            task.reviewed_by = user
+            task.reviewed_at = reviewed_at
+            task.reason = reason
+            task.save()
+            resolution.result_code = "SUCCEEDED"
+            resolution.completed_at = reviewed_at
+            resolution.save(update_fields=("result_code", "completed_at"))
+            return resolution, []
+
+    unavailable = [step for step in steps if not is_operation_enabled(step)]
+    if unavailable:
+        labels = "、".join(dict(RecommendedAction.choices)[step] for step in unavailable)
+        _fail_ai_operation_resolution(resolution.pk)
+        raise PermissionError(f"请先在系统配置中启用上游写操作：{labels}。")
+
+    task = review.audit.task
+    post = task.post
+    audits: list[OperationAudit] = []
+    try:
+        for index, step in enumerate(steps, start=1):
+            key = f"{confirmation_key}:step:{index}:{step.lower()}"
+            if step == RecommendedAction.MUTE:
+                if not post.author_openid or not post.source_appid:
+                    raise ValueError("帖子未保存可核验的作者身份，不能执行作者禁言")
+                audit = execute_author_operation_for_identity(
+                    openid=post.author_openid,
+                    source_appid=post.source_appid,
+                    user=user,
+                    action=step,
+                    reason=reason,
+                    source=source,
+                    upstream_payload=author_payload,
+                    confirmation_key=key,
+                    resolution=resolution,
+                )
+            else:
+                payload = post_payload if step == RecommendedAction.BLOCK else {}
+                audit = execute_confirmed_operation(
+                    task,
+                    user=user,
+                    action=step,
+                    reason=reason,
+                    source=source,
+                    upstream_payload=payload,
+                    confirmation_key=key,
+                    resolution=resolution,
+                )
+            audits.append(audit)
+            if not operation_result_reaches_target(audit.result_code):
+                _fail_ai_operation_resolution(resolution.pk)
+                return resolution, audits
+            if step == RecommendedAction.MUTE and author_payload is not None:
+                # The platform only receives a finite mute.  The optional
+                # "permanent" checkbox is an explicit local renewal intention and
+                # must be persisted only after the verified author write succeeds.
+                if audit.author_status_id is None:
+                    raise ValueError("禁言回读未形成作者状态，不能保存自动续期意图")
+                set_permanent_mute_intent(
+                    audit.author_status,
+                    enabled=bool(author_payload.get("permanent_mute")),
+                    user=user,
+                )
+    except Exception:
+        _fail_ai_operation_resolution(resolution.pk)
+        raise
+
+    with transaction.atomic():
+        resolution = AiOperationResolution.objects.select_for_update().get(pk=resolution.pk)
+        review = AiOperationReview.objects.select_for_update().select_related("audit__task").get(pk=review.pk)
+        reviewed_at = timezone.now()
+        review.status = _ai_review_completion_status(review, post_decision, author_decision)
+        review.reviewer = user
+        review.reviewed_at = reviewed_at
+        review.reason = reason
+        review.final_post_decision = post_decision
+        review.final_author_decision = author_decision
+        review.save()
+        task = review.audit.task
+        task.status = ReviewStatus.REVIEWED
+        task.final_action = post_decision if post_decision != "KEEP_CURRENT" else review.audit.action
+        task.final_post_decision = post_decision
+        task.final_author_decision = author_decision
+        task.reviewed_by = user
+        task.reviewed_at = reviewed_at
+        task.reason = reason
+        task.save()
+        resolution.result_code = "SUCCEEDED"
+        resolution.completed_at = reviewed_at
+        resolution.save(update_fields=("result_code", "completed_at"))
+    return resolution, audits
 
 
 @transaction.atomic

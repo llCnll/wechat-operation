@@ -3,7 +3,7 @@ from datetime import timedelta
 import pytest
 from django.utils import timezone
 
-from jobs.adapters import SourceBusinessDeletedError
+from jobs.adapters import SourceBusinessDeletedError, SourceTransportError
 from posts.models import (
     POST_STATUS_BLOCKED,
     POST_STATUS_DELETED,
@@ -205,13 +205,15 @@ def test_metrics_snapshot_discards_reply_payloads():
 
 
 @pytest.mark.django_db
-def test_status_and_metrics_refresh_marks_deleted_without_changing_cached_content():
+def test_status_and_metrics_refresh_marks_deleted_and_projects_muted_author():
+    future = int((timezone.now() + timedelta(days=1)).timestamp())
     post = OriginalPost.objects.create(
         topic_id=12,
         content_id="content-12",
         content_text="历史缓存内容",
         source_appid="wx-game",
         status=POST_STATUS_SUNK,
+        author_openid="deleted-author",
     )
 
     class Source:
@@ -219,14 +221,49 @@ def test_status_and_metrics_refresh_marks_deleted_without_changing_cached_conten
             assert topic_id == 12
             raise SourceBusinessDeletedError("原平台帖子已从管理队列删除")
 
-        def get_content_card(self, _content_id):
-            raise AssertionError("轻量刷新不得拉取内容卡")
+        def get_author_detail(self, openid):
+            assert openid == "deleted-author"
+            return {
+                "data": {
+                    "user": {
+                        "openid": openid,
+                        "nick_name": "删除帖作者",
+                        "block_info": {"appid": "wx-game", "block_end_time": future},
+                        "global_block_end_time": 0,
+                    }
+                }
+            }
 
     refreshed = refresh_post_status_and_metrics(Source(), post)
 
     assert refreshed.status == POST_STATUS_SUNK | POST_STATUS_DELETED
     assert is_post_deleted(refreshed.status)
     assert refreshed.content_text == "历史缓存内容"
+    state = AuthorMuteStatus.objects.get(openid="deleted-author", source_appid="wx-game")
+    assert state.local_muted_until is not None
+
+
+@pytest.mark.django_db
+def test_status_and_metrics_refresh_does_not_fallback_for_transport_failure():
+    post = OriginalPost.objects.create(
+        topic_id=121,
+        content_id="transport-failure",
+        source_appid="wx-game",
+        author_openid="saved-author",
+    )
+
+    class Source:
+        def get_post_metrics(self, topic_id):
+            assert topic_id == 121
+            raise SourceTransportError("temporary failure")
+
+        def get_author_detail(self, _openid):
+            raise AssertionError("普通来源失败不得查询作者详情")
+
+    with pytest.raises(SourceTransportError, match="temporary failure"):
+        refresh_post_status_and_metrics(Source(), post)
+
+    assert not AuthorMuteStatus.objects.exists()
 
 
 @pytest.mark.django_db
@@ -277,7 +314,7 @@ def test_author_mute_sync_normalizes_and_clears_expired_statuses():
 
 
 @pytest.mark.django_db
-def test_author_mute_sync_creates_unmuted_observation_and_updates_nickname():
+def test_author_mute_sync_does_not_create_unmuted_observation_and_updates_nickname():
     first = OriginalPost.objects.create(
         topic_id=15, content_id="author-first", source_appid="wx-game"
     )
@@ -290,15 +327,12 @@ def test_author_mute_sync_creates_unmuted_observation_and_updates_nickname():
     state = sync_author_mute_status(
         second, _author_detail(nick_name="新昵称", local_end=0), source_requested_at=timezone.now()
     )
-    assert AuthorMuteStatus.objects.count() == 1
-    assert state.nick_name == "新昵称"
-    assert state.last_source_post == second
+    assert AuthorMuteStatus.objects.count() == 0
+    assert state is None
     assert first.author_openid == second.author_openid == "author-1"
     first.refresh_from_db()
     second.refresh_from_db()
     assert first.author_nick_name == second.author_nick_name == "新昵称"
-    assert state.local_muted_until is None
-    assert state.global_muted_until is None
 
 
 @pytest.mark.django_db
@@ -322,7 +356,7 @@ def test_author_mute_sync_isolated_by_game_and_ignores_out_of_order_detail():
         second, _author_detail(appid="game-b", local_end=0), source_requested_at=later
     )
     assert stale.local_muted_until is not None
-    assert AuthorMuteStatus.objects.filter(openid="author-1").count() == 2
+    assert AuthorMuteStatus.objects.filter(openid="author-1").count() == 1
 
 
 @pytest.mark.django_db
@@ -338,8 +372,7 @@ def test_author_mute_sync_keeps_the_post_game_scope_when_detail_appid_differs():
         source_requested_at=timezone.now(),
     )
 
-    assert state.source_appid == "game-a"
-    assert state.local_muted_until is None
+    assert state is None
     assert not AuthorMuteStatus.objects.filter(openid="author-1", source_appid="game-b").exists()
 
 
