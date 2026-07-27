@@ -8,13 +8,18 @@ from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 from django.conf import settings
+from django.db import transaction
+from django.utils import timezone
 
 from jobs.models import BackgroundJob, JobStatus
 from jobs.services import enqueue_job_with_result
 
-from .game_catalog import active_game_appid
+from .dashboard_filters import OriginalPostFilter
+from .game_catalog import active_game_appid, current_execution_scope
 from .tasks import (
     MANUAL_INGEST_WINDOW_TASK,
+    MANUAL_CURRENT_INGEST_WINDOW_TASK,
+    FILTERED_POST_REFRESH_TASK,
     METRICS_REFRESH_WINDOW_TASK,
     SCHEDULED_INGEST_WINDOW_TASK,
     STATUS_SYNC_TASK,
@@ -124,6 +129,67 @@ def enqueue_manual_ingestion_window(
         task_type=MANUAL_INGEST_WINDOW_TASK,
         idempotency_prefix="manual-ingest-window",
     )
+
+
+def enqueue_manual_current_ingestion_window(
+    *, now: datetime | None = None
+) -> IngestionEnqueueResult:
+    """Queue the producer-owned, fixed current window under the submit-time scope."""
+    local_now = (now or timezone.now()).astimezone(SHANGHAI).replace(second=0, microsecond=0)
+    window = IngestionWindow(
+        start_time=int((local_now - timedelta(minutes=30)).timestamp()),
+        end_time=int(local_now.timestamp()),
+    )
+    with transaction.atomic():
+        scope = current_execution_scope(persist_default=False)
+        parameters = {
+            "appid": scope.target_appid,
+            "start_time": window.start_time,
+            "end_time": window.end_time,
+            "page_size": 20,
+        }
+        for job in BackgroundJob.objects.select_for_update().filter(
+            task_type=MANUAL_CURRENT_INGEST_WINDOW_TASK,
+            status__in=(JobStatus.PENDING, JobStatus.RUNNING),
+        ):
+            if job.parameter_summary == parameters and (job.checkpoint or {}).get(
+                "execution_scope"
+            ) == scope.as_checkpoint():
+                return IngestionEnqueueResult(job=job, created=False)
+        job = BackgroundJob.objects.create(
+            task_type=MANUAL_CURRENT_INGEST_WINDOW_TASK,
+            idempotency_key=(
+                f"manual-current-ingest:{scope.target_appid}:{scope.scope_version}:"
+                f"{window.start_time}:{window.end_time}:20:{uuid4().hex}"
+            ),
+            parameter_summary=parameters,
+            checkpoint={"execution_scope": scope.as_checkpoint()},
+        )
+    return IngestionEnqueueResult(job=job, created=True)
+
+
+def enqueue_filtered_post_refresh(*, filters: OriginalPostFilter) -> IngestionEnqueueResult:
+    """Queue a fixed predicate; the Worker resolves matching local posts when it runs."""
+    with transaction.atomic():
+        scope = current_execution_scope(persist_default=False)
+        parameters = {"appid": scope.target_appid, "filters": filters.as_parameters()}
+        for job in BackgroundJob.objects.select_for_update().filter(
+            task_type=FILTERED_POST_REFRESH_TASK,
+            status__in=(JobStatus.PENDING, JobStatus.RUNNING),
+        ):
+            if job.parameter_summary == parameters and (job.checkpoint or {}).get(
+                "execution_scope"
+            ) == scope.as_checkpoint():
+                return IngestionEnqueueResult(job=job, created=False)
+        job = BackgroundJob.objects.create(
+            task_type=FILTERED_POST_REFRESH_TASK,
+            idempotency_key=(
+                f"filtered-post-refresh:{scope.target_appid}:{scope.scope_version}:{uuid4().hex}"
+            ),
+            parameter_summary=parameters,
+            checkpoint={"execution_scope": scope.as_checkpoint()},
+        )
+    return IngestionEnqueueResult(job=job, created=True)
 
 
 def enqueue_ingestion_window(

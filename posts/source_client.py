@@ -234,10 +234,10 @@ class CdpGameCircleClient:
             self.frame.timeout = original_timeout
 
     def perform_confirmed_operation(
-        self, *, topic_id: int, action: str, payload: dict[str, Any]
+        self, *, topic_id: int | None, action: str, payload: dict[str, Any]
     ) -> dict[str, Any]:
-        """Execute only the independently verified topic status operations."""
-        if topic_id <= 0:
+        """Execute a verified post operation or an OpenID-targeted author operation."""
+        if action in {"SINK", "RESTORE", "BLOCK"} and (not isinstance(topic_id, int) or topic_id <= 0):
             raise SourceContractError("帖子 ID 无效")
         if action == "SINK":
             request_body = {"topic_id": topic_id, "status": 8}
@@ -261,6 +261,8 @@ class CdpGameCircleClient:
                 raise SourceContractError("禁言截止时间无效")
             account_openid = payload.get("author_openid")
             if not isinstance(account_openid, str) or not account_openid:
+                if not isinstance(topic_id, int) or topic_id <= 0:
+                    raise SourceContractError("禁言目标身份标识无效")
                 metrics = self.get_post_metrics(topic_id)
                 try:
                     account_openid = metrics["data"]["topic"]["creater"]["openid"]
@@ -281,6 +283,8 @@ class CdpGameCircleClient:
         elif action == "UNMUTE":
             account_openid = payload.get("author_openid")
             if not isinstance(account_openid, str) or not account_openid:
+                if not isinstance(topic_id, int) or topic_id <= 0:
+                    raise SourceContractError("解除禁言目标身份标识无效")
                 metrics = self.get_post_metrics(topic_id)
                 try:
                     account_openid = metrics["data"]["topic"]["creater"]["openid"]

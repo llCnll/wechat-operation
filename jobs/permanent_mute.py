@@ -24,7 +24,7 @@ from posts.game_catalog import (
     current_execution_scope,
     resolve_execution_scope,
 )
-from posts.models import AuthorMuteStatus, CandidatePost, OriginalPost, OriginType
+from posts.models import AuthorMuteStatus, OriginalPost
 from posts.services import (
     mute_management_status_queryset,
     set_permanent_mute_intent,
@@ -35,9 +35,8 @@ from reviews.models import (
     OperationAudit,
     OperationExecutionSource,
     RecommendedAction,
-    ReviewTask,
 )
-from reviews.services import execute_confirmed_operation
+from reviews.services import execute_author_operation
 
 PERMANENT_MUTE_DAYS = 30
 RENEWAL_THRESHOLD = timedelta(days=5)
@@ -191,34 +190,12 @@ def _enqueue_or_reuse_read_maintenance_job(
         return EnqueueResult(job=job, created=True)
 
 
-def _task_for_status(status: AuthorMuteStatus) -> ReviewTask:
-    post = status.last_source_post
-    if post is None:
-        raise ValueError("作者没有可验证的来源帖子，未执行上游禁言")
-    original_candidate = CandidatePost.objects.filter(
-        topic_id=post.topic_id, origin_type=OriginType.ORIGINAL
-    )
-    if not original_candidate.exists():
-        raise ValueError("来源帖子未通过原创状态复核，未执行上游禁言")
-    task, _ = ReviewTask.objects.get_or_create(
-        post=post, defaults={"suggested_action": RecommendedAction.HUMAN_REVIEW}
-    )
-    return task
-
-
 def _record_intent_audit(
     *, status: AuthorMuteStatus, result_code: str, user=None, error: str = ""
 ) -> None:
     """Record an intent-only management outcome without pretending it wrote upstream."""
-    try:
-        task = _task_for_status(status)
-    except ValueError:
-        # Legacy observations can predate the retained source-post link.  The
-        # local intent is still safe to change; its status row remains the
-        # trace until a later detail sync restores an auditable source post.
-        return
     OperationAudit.objects.create(
-        task=task,
+        author_status=status,
         operation_id=str(uuid4()),
         idempotency_key=f"permanent-mute:intent:{status.pk}:{uuid4().hex}",
         action=RecommendedAction.MUTE,
@@ -249,12 +226,8 @@ def _record_failure_audit(
     *, job: BackgroundJob, status: AuthorMuteStatus, error: Exception
 ) -> None:
     """Keep one safe per-author failure projection when maintenance cannot finish."""
-    try:
-        task = _task_for_status(status)
-    except Exception:
-        return
     OperationAudit.objects.create(
-        task=task,
+        author_status=status,
         operation_id=str(uuid4()),
         idempotency_key=f"permanent-mute:failure:{job.pk}:{status.pk}:{uuid4().hex}",
         action=RecommendedAction.MUTE,
@@ -297,12 +270,11 @@ def _maintain_one(*, job: BackgroundJob, status: AuthorMuteStatus, scope: Execut
         if not _needs_renewal(status, now=now):
             return
         locally_muted = bool(status.local_muted_until and status.local_muted_until > now)
-        task = _task_for_status(status)
         # Do not assume the upstream can extend a live mute.  A verified local
         # mute is explicitly released, read back by the operation service, then
         # a fresh 30-day mute is applied and read back again.
         repair_pending = OperationAudit.objects.filter(
-            task__post=status.last_source_post,
+            author_status=status,
             action=RecommendedAction.MUTE,
             execution_source=OperationExecutionSource.SYSTEM_MAINTENANCE,
         ).exclude(result_code="OK").exists()
@@ -312,8 +284,8 @@ def _maintain_one(*, job: BackgroundJob, status: AuthorMuteStatus, scope: Execut
             else MuteOperationTrigger.SYSTEM_RENEWAL
         )
         if locally_muted:
-            unmute = execute_confirmed_operation(
-                task,
+            unmute = execute_author_operation(
+                status,
                 user=None,
                 action=RecommendedAction.UNMUTE,
                 reason="永久禁言续期：为重新设置 30 天期限先解除当前游戏禁言。",
@@ -324,8 +296,8 @@ def _maintain_one(*, job: BackgroundJob, status: AuthorMuteStatus, scope: Execut
             )
             _verified_result(unmute, action="解除禁言")
 
-        mute = execute_confirmed_operation(
-            task,
+        mute = execute_author_operation(
+            status,
             user=None,
             action=RecommendedAction.MUTE,
             reason="永久禁言维护：设置当前游戏 30 天禁言期限。",

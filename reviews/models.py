@@ -79,6 +79,7 @@ class MuteOperationTrigger(models.TextChoices):
 class AiOperationReviewStatus(models.TextChoices):
     PENDING = "PENDING", "待复审"
     CONFIRMED = "CONFIRMED", "已确认正确"
+    CORRECTED = "CORRECTED", "已人工纠正"
     ESCALATED = "ESCALATED", "已升级人工跟进"
     RESTORED = "RESTORED", "已人工恢复"
 
@@ -270,6 +271,8 @@ class ReviewTask(models.Model):
     needs_focus = models.BooleanField(default=False)
     focus_reasons = models.JSONField(default=list, blank=True, db_default=[])
     final_action = models.CharField(max_length=32, choices=RecommendedAction.choices, blank=True)
+    final_post_decision = models.CharField(max_length=32, blank=True, db_default="")
+    final_author_decision = models.CharField(max_length=32, blank=True, db_default="")
     reviewed_by = models.ForeignKey(
         settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL
     )
@@ -306,7 +309,23 @@ class ReplyDraft(models.Model):
 
 
 class OperationAudit(models.Model):
-    task = models.ForeignKey(ReviewTask, on_delete=models.PROTECT, related_name="operation_audits")
+    task = models.ForeignKey(
+        ReviewTask, null=True, blank=True, on_delete=models.PROTECT, related_name="operation_audits"
+    )
+    author_status = models.ForeignKey(
+        "posts.AuthorMuteStatus",
+        null=True,
+        blank=True,
+        on_delete=models.PROTECT,
+        related_name="operation_audits",
+    )
+    resolution = models.ForeignKey(
+        "AiOperationResolution",
+        null=True,
+        blank=True,
+        on_delete=models.PROTECT,
+        related_name="operation_audits",
+    )
     operation_id = models.CharField(max_length=64, unique=True)
     idempotency_key = models.CharField(max_length=255, unique=True)
     action = models.CharField(max_length=32, choices=RecommendedAction.choices)
@@ -341,9 +360,21 @@ class OperationAudit(models.Model):
         constraints = [
             models.UniqueConstraint(
                 fields=("task",),
-                condition=models.Q(result_code="EXECUTING"),
+                condition=models.Q(result_code="EXECUTING", task__isnull=False),
                 name="one_executing_operation_per_task",
-            )
+            ),
+            models.UniqueConstraint(
+                fields=("author_status",),
+                condition=models.Q(result_code="EXECUTING", author_status__isnull=False),
+                name="one_executing_operation_per_author",
+            ),
+            models.CheckConstraint(
+                condition=(
+                    models.Q(task__isnull=False, author_status__isnull=True)
+                    | models.Q(task__isnull=True, author_status__isnull=False)
+                ),
+                name="operation_audit_has_one_target",
+            ),
         ]
         verbose_name = "上游操作审计"
         verbose_name_plural = "上游操作审计"
@@ -363,6 +394,8 @@ class AiOperationReview(models.Model):
     )
     reviewed_at = models.DateTimeField(null=True, blank=True)
     reason = models.TextField(blank=True)
+    final_post_decision = models.CharField(max_length=32, blank=True, db_default="")
+    final_author_decision = models.CharField(max_length=32, blank=True, db_default="")
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -372,3 +405,21 @@ class AiOperationReview(models.Model):
         ]
         verbose_name = "AI 操作复审"
         verbose_name_plural = "AI 操作复审"
+
+
+class AiOperationResolution(models.Model):
+    """One immutable operator confirmation and its final-operation plan."""
+
+    review = models.ForeignKey(AiOperationReview, on_delete=models.PROTECT, related_name="resolutions")
+    confirmation_key = models.CharField(max_length=255, unique=True)
+    post_decision = models.CharField(max_length=32)
+    author_decision = models.CharField(max_length=32)
+    reason = models.TextField(blank=True)
+    executor = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, on_delete=models.SET_NULL)
+    result_code = models.CharField(max_length=32, default="EXECUTING")
+    created_at = models.DateTimeField(auto_now_add=True)
+    completed_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        verbose_name = "AI 复审决议"
+        verbose_name_plural = "AI 复审决议"

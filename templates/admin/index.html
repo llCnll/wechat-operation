@@ -158,7 +158,7 @@
     <article class="console-producer-card {% if item.producer.enabled %}is-enabled{% else %}is-paused{% endif %}">
       <header>
         <div class="console-producer-identity"><i aria-hidden="true"></i><div><strong>{{ item.label }}</strong><span>{% if item.producer.enabled %}自动入队中{% else %}已暂停{% endif %}</span></div></div>
-        <div class="console-producer-actions"><button type="button" class="is-quiet" data-config-dialog="producer-{{ item.producer.pk }}" aria-haspopup="dialog">管理规则</button><form class="console-producer-toggle" method="post" action="{% url 'save-scheduled-producer' producer_id=item.producer.pk %}">{% csrf_token %}<input type="hidden" name="return_to" value="/admin/"><input type="hidden" name="enabled" value="{% if item.producer.enabled %}false{% else %}true{% endif %}"><button type="submit">{% if item.producer.enabled %}暂停{% else %}恢复{% endif %}</button></form></div>
+        <div class="console-producer-actions"><button type="button" class="is-quiet" data-config-dialog="producer-{{ item.producer.pk }}" aria-haspopup="dialog">管理规则</button><button type="button" data-config-dialog="producer-run-{{ item.producer.pk }}" aria-haspopup="dialog">立即执行</button><form class="console-producer-toggle" method="post" action="{% url 'save-scheduled-producer' producer_id=item.producer.pk %}">{% csrf_token %}<input type="hidden" name="return_to" value="/admin/"><input type="hidden" name="enabled" value="{% if item.producer.enabled %}false{% else %}true{% endif %}"><button type="submit">{% if item.producer.enabled %}暂停{% else %}恢复{% endif %}</button></form></div>
       </header>
       <dl class="console-producer-card-summary">
         <div><dt>规则</dt><dd>{{ item.rules|length }} 条</dd></div>
@@ -188,6 +188,16 @@
         <form class="console-producer-add-rule" method="post" action="{% url 'create-scheduled-producer-rule' producer_id=item.producer.pk %}">{% csrf_token %}<input type="hidden" name="return_to" value="/admin/"><span>系统将自动生成并保存受限调度表达式。</span>{% if item.new_rule_templates|length > 1 %}<label>任务类型<select name="rule_type">{% for template in item.new_rule_templates %}<option value="{{ template.key }}">{{ template.label }}</option>{% endfor %}</select></label>{% else %}<label>任务类型<input type="text" value="{{ item.new_rule_templates.0.label }}" readonly></label><input name="rule_type" type="hidden" value="{{ item.new_rule_templates.0.key }}">{% endif %}<label>执行频率<input type="text" value="{{ item.new_rule_schedule_editor.frequency_label }}" readonly></label>{% if item.new_rule_is_interval %}<label>{{ item.new_rule_schedule_editor.value_label }}<input name="interval_minutes" type="number" min="1" required></label>{% else %}<label>{{ item.new_rule_schedule_editor.value_label }}<input name="schedule_time" type="time" required></label>{% endif %}<div class="console-producer-add-actions"><label class="console-producer-switch"><input name="enabled" type="checkbox" value="true" checked> 新规则启用</label><button type="submit">新增规则</button></div></form>
       </details>
     </div>
+  </dialog>
+  {% endfor %}
+  {% for item in admin_console.scheduled_producers %}
+  <dialog class="console-config-dialog" data-config-dialog-panel="producer-run-{{ item.producer.pk }}" aria-labelledby="producer-run-{{ item.producer.pk }}-title">
+    <header><div><p>一次性任务</p><h2 id="producer-run-{{ item.producer.pk }}-title">{{ item.label }} · 立即执行</h2></div><button type="button" class="console-dialog-close" data-config-dialog-close aria-label="关闭">关闭</button></header>
+    <p class="console-dialog-intro">此操作仅创建后台任务，不改变自动规则、下次触发或自动覆盖进度。</p>
+    <form method="post" action="{% url 'run-scheduled-producer-now' producer_key=item.producer.producer_key %}">{% csrf_token %}<input type="hidden" name="return_to" value="/admin/">
+      {% if item.producer.producer_key == "metric_daily" or item.producer.producer_key == "metric_weekly" %}<div class="console-producer-fields"><label>开始日期<input type="date" name="start_date" required></label><label>结束日期<input type="date" name="end_date" required></label></div>{% else %}<p>无需额外参数。对应 Worker 未运行时，任务会保持待执行。</p>{% endif %}
+      <footer><button type="button" data-config-dialog-close>取消</button><button class="console-config-submit" type="submit">创建后台任务</button></footer>
+    </form>
   </dialog>
   {% endfor %}
 </section>

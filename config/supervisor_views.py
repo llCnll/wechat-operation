@@ -15,6 +15,7 @@ from config.game_circle_ipc import GameCircleIpcClient, GameCircleIpcError
 from config.runtime_config import affected_services, display_service_names, update_runtime_config
 from config.supervisor import SupervisorClient, SupervisorUnavailableError
 from jobs.game_circle_keepalive import enqueue_keepalive
+from jobs.manual_producers import run_manual_producer
 from jobs.models import ScheduledProducerRuleConfig
 from jobs.permanent_mute import enqueue_permanent_mute_renewal
 from jobs.scheduled_producers import (
@@ -283,6 +284,31 @@ def save_scheduled_producer(request, producer_id: int):
             request,
             f"{DEFINITION_BY_KEY[producer.producer_key].label}已{state}；下轮自动调度生效。",
         )
+    return redirect(_return_to(request))
+
+
+@staff_member_required
+@require_POST
+def run_scheduled_producer_now(request, producer_key: str):
+    """Create a one-off business job without touching the producer's rules."""
+    try:
+        run = run_manual_producer(producer_key=producer_key, values=request.POST)
+    except ValueError as exc:
+        messages.error(request, str(exc))
+    else:
+        created = sum(run.created)
+        reused = len(run.jobs) - created
+        identifiers = "、".join(f"#{job.pk}" for job in run.jobs)
+        summary = f"已创建 {created} 个任务（{identifiers}）"
+        if reused:
+            summary += f"，复用 {reused} 个正在处理的任务"
+        if run.requested_range:
+            summary += f"；输入范围 {run.requested_range[0]} 至 {run.requested_range[1]}"
+        if run.actual_range and run.actual_range != run.requested_range:
+            summary += f"，实际范围 {run.actual_range[0]} 至 {run.actual_range[1]}"
+        if producer_key == "metric_daily":
+            summary += f"，已覆盖 {len(run.jobs)} 个已启用日指标来源"
+        messages.success(request, f"{summary}。自动规则不受影响。")
     return redirect(_return_to(request))
 
 

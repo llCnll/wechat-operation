@@ -5,10 +5,12 @@ import pytest
 from config.game_circle_ipc import (
     GameCircleIpcClient,
     GameCircleIpcError,
+    GameCirclePostClient,
     GameCircleIpcServer,
     IpcRequest,
     WriteResultUnknownError,
 )
+from jobs.adapters import SourceBusinessDeletedError
 from posts.game_catalog import ExecutionScope
 
 
@@ -66,3 +68,14 @@ def test_ipc_rejects_an_unauthorized_caller_before_dispatch(ipc_server):
         client.call("POSTS_GET_METRICS", scope=ExecutionScope("game-a", 1), params={"topic_id": 1})
 
     assert received == []
+
+
+def test_post_client_rehydrates_deleted_source_category_for_shared_refresh_boundary():
+    class Ipc:
+        def call(self, *_args, **_kwargs):
+            raise GameCircleIpcError("SOURCE_DELETED", "原平台帖子已从管理队列删除")
+
+    client = GameCirclePostClient(scope=ExecutionScope("game-a", 1), ipc=Ipc())
+
+    with pytest.raises(SourceBusinessDeletedError, match="原平台帖子已从管理队列删除"):
+        client.get_post_metrics(1)

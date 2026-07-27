@@ -29,9 +29,6 @@
     {% if node.running and "BUILD_FRAME" in node.session_actions %}
     <form method="post" action="{% url 'build-current-game-frame' %}">{% csrf_token %}<input type="hidden" name="return_to" value="/admin/"><button class="is-quiet" type="submit">建立当前游戏 Frame</button></form>
     {% endif %}
-    {% if node.running and "KEEPALIVE" in node.session_actions %}
-    <form method="post" action="{% url 'enqueue-session-keepalive' %}">{% csrf_token %}<input type="hidden" name="return_to" value="/admin/"><button class="is-quiet" type="submit">保活当前游戏 Frame</button></form>
-    {% endif %}
     {% if node.running %}<details class="console-session-maintenance"><summary><span>可选自动维护</span><span class="console-lucide" aria-hidden="true">{% include "posts/includes/lucide_icon.html" with name="chevron-right" %}</span></summary><form method="post" action="{% url 'save-runtime-configuration' %}">{% csrf_token %}<input type="hidden" name="return_to" value="/admin/"><input type="hidden" name="config_scope" value="session_maintenance"><label><input name="SESSION_REPAIR_ENABLED" type="checkbox" value="true" {% if admin_console.runtime_config.session_repair_enabled == "true" %}checked{% endif %}><span><strong>自动修复当前游戏 Frame</strong><small>已验证外层会话时，修复损坏的 Frame 或补建当前游戏缺失的 Frame；扫码等待期间不介入。</small></span></label><button class="is-quiet" type="submit">保存自动维护</button></form></details>{% endif %}
     <button class="is-quiet" type="button" data-supervisor-logs="{% url 'supervisor-service-logs' service=node.service %}" data-supervisor-log-label="{{ node.label }}">日志</button>
   </div>
@@ -47,7 +44,7 @@
   {% elif node.key == "writes" %}
   <div class="console-service-actions"><button type="button" class="is-quiet" data-config-dialog="writes" aria-haspopup="dialog">管理授权</button></div>
   {% elif node.key == "mute-maintenance" %}
-  <div class="console-service-actions">{% include "admin/includes/runtime_service_controls.html" %}<form method="post" action="{% url 'enqueue-permanent-mute-renewal' %}">{% csrf_token %}<input type="hidden" name="return_to" value="/admin/"><button class="is-quiet" type="submit">执行一次</button></form></div>
+  <div class="console-service-actions">{% include "admin/includes/runtime_service_controls.html" %}</div>
   {% else %}
   <div class="console-service-actions">{% include "admin/includes/runtime_service_controls.html" %}</div>
   {% endif %}
