@@ -17,6 +17,32 @@
 
 系统内置 `wx6d2454a8afcd9706`，名称为“城主别慌张”，作为工作台缺省范围。不会保存外层 token、Cookie、完整认证 URL 或运营者身份。
 
+## `posts_activegamescope`（当前操作游戏）
+
+全局唯一的工作范围锚点。所有需要访问上游的异步任务都在首次实际访问前冻结该范围及版本；后续切换游戏不会改写已冻结任务。
+
+| 字段 | 类型与约束 | 含义 |
+| --- | --- | --- |
+| `id` | 小整数，主键，固定为 `1` | 单例约束，系统中最多一条当前范围。 |
+| `active_appid` | 外键，指向 `posts_managedgame.appid`，保护删除 | 当前操作游戏。 |
+| `scope_version` | 正大整数，默认 `1` | 每次切换范围递增，用于拒绝旧范围运行态投影。 |
+| `updated_at` / `updated_by_id` | 日期时间/外键，可空 | 最近一次范围切换的时间和本地操作者。 |
+
+## `posts_gamecircleloginruntimestate`（游戏圈登录运行态）
+
+全局唯一、无凭据的会话服务投影；只由游戏圈会话服务写入，页面和其他服务只能读取。它不保存 target ID、URL、Cookie、token 或来源响应。
+
+| 字段 | 类型与约束 | 含义 |
+| --- | --- | --- |
+| `id` | 小整数，主键，固定为 `1` | 单例约束，系统中最多一条运行态。 |
+| `login_state` | 字符串枚举 | `READY`、`SCAN_REQUIRED`、`UNAVAILABLE` 或 `UNKNOWN` 的简化登录态。 |
+| `outer_state` / `frame_state` | 字符串枚举 | 外层会话与当前游戏 Frame 的细分状态。 |
+| `frame_scope_version` | 正大整数，可空 | 当前有效 Frame 对应的范围版本；不匹配时不得视为当前游戏可用。 |
+| `available_actions` | JSON 数组 | 会话服务允许控制台展示的固定动作，不含执行参数。 |
+| `login_wait_until` / `checked_at` / `outer_verified_at` / `last_ready_at` | 日期时间，可空 | 扫码等待、最近检查、外层验证与最近完全就绪的时间。 |
+| `error_category` | 字符串枚举 | 固定脱敏错误类别。 |
+| `updated_at` | 日期时间，自动更新 | 最近一次运行态投影时间。 |
+
 ## `posts_candidatepost`（候选帖子）
 
 采集列表中的原始候选记录，用于判定原创或转发；转发帖保留在此表以便统计，但不进入工作台。
@@ -331,7 +357,8 @@ AI 评估中的单项风险证据，可保存多段命中内容。
 | 字段 | 类型与约束 | 含义 |
 | --- | --- | --- |
 | `id` | 整数，自增，主键 | 本地记录编号。 |
-| `task_id` | 外键，指向 `reviews_reviewtask`，保护删除 | 所属审核任务；有审计记录时不能删除任务。 |
+| `task_id` / `author_status_id` | 外键，可空，分别指向 `reviews_reviewtask` / `posts_authormutestatus`，保护删除 | 帖子或作者范围目标，二者恰有一个非空。 |
+| `resolution_id` | 外键，可空，指向 `reviews_aioperationresolution`，保护删除 | 触发本次 AI 复审最终处置的不可变确认批次；普通人工操作为空。 |
 | `operation_id` | 字符串，最长 64，唯一 | 本次操作的业务编号。 |
 | `idempotency_key` | 字符串，最长 255，唯一 | 防止同一确认重复写入上游的幂等键。 |
 | `action` | 字符串，最长 32，枚举 | 实际尝试的处置动作。 |
@@ -342,7 +369,8 @@ AI 评估中的单项风险证据，可保存多段命中内容。
 | `result_code` | 字符串，最长 100，可留空 | 上游或本地结果码。 |
 | `error_summary` | 字符串，最长 500，可留空 | 失败的脱敏摘要。 |
 | `executor_id` | 外键，可空，指向 `auth_user`，置空删除 | 执行确认的后台用户。 |
-| `execution_source` | 字符串，最长 16，枚举，默认 `HUMAN` | 处置来源：人工或 AI 自动。 |
+| `execution_source` | 字符串，最长 24，枚举，默认 `HUMAN` | 处置来源：人工或 AI 自动。 |
+| `mute_trigger` | 字符串，最长 24，可留空 | 禁言相关审计的受控来源投影；不保存来源请求或认证材料。 |
 | `automation_snapshot` | JSON 对象，默认 `{}` | AI 自动处置时的不可变授权、模型、策略和证据摘要；人工操作为空。 |
 | `executed_at` | 日期时间，可空 | 实际调用上游的时间。 |
 | `created_at` | 日期时间，自动写入 | 审计记录创建时间。 |
@@ -365,6 +393,20 @@ AI 评估中的单项风险证据，可保存多段命中内容。
 | `reason` | 文本，可留空 | 复审说明或升级原因。 |
 | `final_post_decision` / `final_author_decision` | 字符串，可留空 | 已确认的帖子决定与作者决定；历史记录可为空。 |
 | `created_at` / `updated_at` | 日期时间，自动写入/更新 | 创建和最近更新时间。 |
+
+## `reviews_aioperationresolution`（AI 复审决议）
+
+一条不可变的人工复审确认及其最终处置计划。同一复审可因新的确认令牌产生多个决议；决议关联的帖子、作者审计各自独立，失败不会自动补偿或重放。
+
+| 字段 | 类型与约束 | 含义 |
+| --- | --- | --- |
+| `review_id` | 外键，指向 `reviews_aioperationreview`，保护删除 | 所属 AI 操作复审。 |
+| `confirmation_key` | 字符串，最长 255，唯一 | 本次人工确认的幂等键。 |
+| `post_decision` / `author_decision` | 字符串，最长 32 | 已确认的最终帖子与作者决定。 |
+| `reason` | 文本，可留空 | 人工复审说明。 |
+| `executor_id` | 外键，可空，指向 `auth_user`，置空删除 | 确认决议的后台用户。 |
+| `result_code` | 字符串，最长 32，默认 `EXECUTING` | 决议执行汇总状态。 |
+| `created_at` / `completed_at` | 日期时间 | 创建与完成时间；未完成时 `completed_at` 为空。 |
 
 ## `jobs_backgroundjob`（后台任务）
 
@@ -453,8 +495,8 @@ AI 评估中的单项风险证据，可保存多段命中内容。
 | --- | --- | --- |
 | `SCHEDULED_INGEST_WINDOW` | Scheduler 创建的 30 分钟断点帖子采集。 | 实时采集 Worker（Supervisor 服务 `ingestion`） |
 | `STATUS_SYNC` | 回读一批待审核帖的上游状态与互动数据。 | 实时采集 Worker（Supervisor 服务 `ingestion`） |
-| `MANUAL_INGEST_WINDOW` | 从自动任务生产者“帖子采集 → 立即执行”的历史补采模式创建；使用当前操作游戏和最近小时数。 | 人工补采 Worker（Supervisor 服务 `backfill_ingestion`） |
-| `MANUAL_CURRENT_INGEST_WINDOW` | 自动任务生产者手动运行的固定最近 30 分钟采集；入队时冻结游戏范围。 | 人工补采 Worker（Supervisor 服务 `backfill_ingestion`） |
+| `MANUAL_INGEST_WINDOW` | 从自动任务生产者“帖子采集 → 立即执行”的历史补采模式创建；使用当前操作游戏、最近小时数和固定页大小 100。 | 人工补采 Worker（Supervisor 服务 `backfill_ingestion`） |
+| `MANUAL_CURRENT_INGEST_WINDOW` | 自动任务生产者手动运行的固定最近 30 分钟采集；入队时冻结游戏范围，固定页大小 100。 | 人工补采 Worker（Supervisor 服务 `backfill_ingestion`） |
 | `FILTERED_POST_REFRESH` | 内容管理当前筛选条件的异步状态、指标和作者投影刷新；只保存脱敏筛选谓词与游标。 | 人工补采 Worker（Supervisor 服务 `backfill_ingestion`） |
 | `METRICS_REFRESH_WINDOW` | 人工触发的日期范围原创帖互动回读，只新增浏览、点赞、评论和分享快照；单帖传输或契约失败会记录到 checkpoint 样本并继续。 | 人工补采 Worker（Supervisor 服务 `backfill_ingestion`） |
 | `INGEST_WINDOW` | 升级前遗留的采集任务；新版本不再创建。 | 人工补采 Worker（Supervisor 服务 `backfill_ingestion`） |
@@ -469,12 +511,12 @@ AI 评估中的单项风险证据，可保存多段命中内容。
 | `BLOCKED_USER_LIST_SYNC` | 手动导入平台当前禁言名单；从零起始分页读取最小名单字段，只同步当前游戏禁言截止与昵称，不读取帖子/作者详情、不设置永久意图，名单缺席不清除本地状态。 | 禁言维护 Worker（Supervisor 服务 `mute_maintenance`） |
 | `AUTHOR_MUTE_STATUS_BACKFILL_V2` | 一次性补全历史原创帖作者昵称与禁言状态；已知作者按游戏去重读取作者详情。旧 `AUTHOR_MUTE_STATUS_BACKFILL` 不由新版 Worker 认领。 | 人工补采 Worker（Supervisor 服务 `backfill_ingestion`） |
 | `POST_TOPIC_BACKFILL_V1` | 一次性本地拆分历史原创帖尾部话题；仅保存主键游标与聚合计数，不访问上游。 | 人工补采 Worker（Supervisor 服务 `backfill_ingestion`） |
-| `METRIC_DAILY_SYNC` / `METRIC_WEEKLY_SYNC` / `METRIC_BACKFILL` | 游戏圈日/周聚合指标同步或人工范围回填；当前工作区已实现、待发布。 | 指标快照 Worker（Supervisor 服务 `metric_sync`） |
+| `METRIC_DAILY_SYNC` / `METRIC_WEEKLY_SYNC` / `METRIC_BACKFILL` | 游戏圈日/周聚合指标同步或人工范围回填。 | 指标快照 Worker（Supervisor 服务 `metric_sync`） |
 | `PUBLIC_OPINION_REPORT` | 锁定本地正常原创帖来源后生成一份舆情报告运行版本；不调用 CDP 或上游。V2 可在确定性结果后按显式开关调用一次受约束模型结论。 | 舆情报告 Worker（Supervisor 服务 `public_opinion_reporting`） |
 
-## `reporting_gamecirclemetricsnapshot`（游戏圈指标快照，待发布）
+## `reporting_gamecirclemetricsnapshot`（游戏圈指标快照）
 
-当前工作区的指标能力按单游戏、单来源、单业务周期保存白名单聚合数值；不保存原始响应、认证上下文、排名对象或作者明细。稳定业务键为 `(appid, source, period_start, period_end, scope)`。
+系统按单游戏、单来源、单业务周期保存白名单聚合数值；不保存原始响应、认证上下文、排名对象或作者明细。稳定业务键为 `(appid, source, period_start, period_end, scope)`。
 
 | 字段 | 类型与约束 | 含义 |
 | --- | --- | --- |
@@ -489,22 +531,28 @@ AI 评估中的单项风险证据，可保存多段命中内容。
 | `latest_job_id` | 外键，可空，指向 `jobs_backgroundjob`，置空删除 | 最近写入该快照的后台任务。 |
 | `created_at` / `updated_at` | 日期时间，自动写入/更新 | 创建和最近更新时间。 |
 
-## `reporting_publicopinionreportsource` 与 `reporting_publicopinionreportrun`（舆情报告快照）
+## `reporting_publicopinionreport`、`reporting_publicopinionreportsource` 与 `reporting_publicopinionreportrun`（舆情报告）
 
-报告来源保存受保护的、首次锁定的正文和 AI 输入；运行版本保存不可变的对外结果。来源中的作者 OpenID、昵称和头像均不保存。运行中的 `deterministic_payload` 仅用于 Worker 中断恢复，不向报告详情、来源页或 Word 导出渲染。
+`PublicOpinionReport` 是稳定范围与保留期主体；首次执行锁定的来源与基线保存于 `PublicOpinionReportSource`，每次生成则产生独立 `PublicOpinionReportRun`。来源中的作者 OpenID、昵称和头像均不保存。运行中的 `deterministic_payload` 仅用于 Worker 中断恢复，不向报告详情、来源页或 Word 导出渲染。
 
 | 表/字段 | 含义 |
 | --- | --- |
+| `PublicOpinionReport.source_appid` / `start_day` / `end_day` | 已冻结的单游戏、上海时区报告范围；起止日满足 `start_day ≤ end_day`。 |
+| `status_rule_version` / `analysis_version` / `template_version` | 来源状态筛选、算法与 Word 模板的版本快照；重跑沿用，不隐式升级。 |
+| `source_locked_at` / `retention_until` | 首次来源锁定时间与完整报告的受控保留截止。 |
+| `created_by_id` / `current_successful_run_id` | 创建报告的本地用户与默认展示的最新成功 Run；不影响历史版本。 |
+| `PublicOpinionReportSource.source_kind` / `topic_id` / `sort_index` | `CURRENT` 本期或 `BASELINE` 对比基线成员；同一报告、来源类型与帖子/排序键均唯一。 |
 | `PublicOpinionReportSource.topics` | 锁定的独立尾部话题，不属于正文热词输入。 |
 | `ai_feedback_value` / `ai_feedback_state` | 已归一化的封闭反馈价值及有效、缺失或无效覆盖状态；异常原文不进入报告。 |
 | `official_identity` | 锁定时的官方身份来源：已核验、名称匹配或玩家。 |
+| `PublicOpinionReportRun.run_number` / `job_id` / `status` | 同一报告下递增且唯一的运行版本、其唯一后台 Job 与运行状态。 |
 | `PublicOpinionReportRun.metrics_as_of` | 本次运行读取互动和日指标的统一时点。 |
 | `data_quality` / `result_payload` | 对外可展示的质量摘要与不可变结果；不重新查询当前帖子、身份或指标。 |
 | `deterministic_payload` | 内部确定性检查点，包含固定证据和输入统计，禁止对外渲染。 |
 | `conclusion_status` / `conclusion_payload` | 受约束模型结论的终态与验证后内容；不可用不使报告失败。 |
 | `conclusion_attempted_at` / `conclusion_input_hash` / `conclusion_error_code` | 单次模型尝试审计、输入哈希与固定脱敏失败分类。 |
 
-## `reporting_metricjoblease`（指标任务租约，待发布）
+## `reporting_metricjoblease`（指标任务租约）
 
 同一人工指标范围只允许一个待执行或运行中的任务。终态后可创建新批次，快照仍按稳定业务键更新。
 

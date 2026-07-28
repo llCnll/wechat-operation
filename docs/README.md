@@ -30,6 +30,9 @@
 - [微信小游戏圈每日指标接口调研](research/wechat-game-circle-daily-metrics-research.md)：内容粉丝、游戏圈粉丝的历史查询能力、字段映射与保存边界。
 - [微信小游戏圈数据分析接口调研](research/wechat-game-circle-data-analysis-research.md)：内容消费、创作、分享、留存的范围查询，以及排名、能力卡和配置接口。
 - [微信公众平台二维码登录调研](research/wechat-mp-qr-login-research.md)：登录页、二维码资源与登录后游戏目录的已验证边界。
+- [游戏圈会话服务设计](research/game-circle-session-service-design.md)：会话所有权、受控 Chrome、Frame 和 IPC 的设计边界。
+- [游戏圈会话刷新调研](research/wechat-game-circle-session-refresh-research.md)：外层 token、来源身份与 `RECOVER`/`KEEPALIVE` 刷新路径的受控验证。
+- [会话韧性演练记录](guides/session-resilience-drill-2026-07-23.md)：受控 Chrome、会话服务和扫码恢复的最小演练证据。
 
 ## 建议阅读路径
 

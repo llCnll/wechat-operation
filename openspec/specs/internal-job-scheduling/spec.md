@@ -11,7 +11,7 @@
 
 #### Scenario: 时间桶内首次调度
 - **WHEN** Scheduler Worker 运行并进入已启用的帖子生产者尚未处理的北京时间 15 分钟逻辑槽
-- **THEN** 系统 SHALL 先幂等创建一个上限为 20 的 `STATUS_SYNC` 任务，再幂等创建一个回看最近 30 分钟、页大小为 20 的 `SCHEDULED_INGEST_WINDOW` 任务
+- **THEN** 系统 SHALL 先幂等创建一个上限为 20 的 `STATUS_SYNC` 任务，再幂等创建一个回看最近 30 分钟、页大小为 100 的 `SCHEDULED_INGEST_WINDOW` 任务
 
 #### Scenario: 重复检查或重复启动
 - **WHEN** 一个或多个 Scheduler Worker 在同一已启用生产者逻辑槽内重复检查或重启
