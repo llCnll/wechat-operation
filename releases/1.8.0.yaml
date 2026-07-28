@@ -1,0 +1,31 @@
+version: 1.8.0
+previous: 1.7.0
+changes:
+  - 新增按游戏核验的官方作者配置与内容身份展示；官方身份独立于禁言、审核和帖子状态。
+  - 新增异步舆情报告：首次运行锁定正常原创帖来源，支持版本化结果、受控来源追溯与 Word 导出；模型运营结论默认关闭且仅使用聚合白名单证据。
+  - 优化自动任务生产者：统一受限“立即执行”入口，当前窗口和历史补采均使用当前操作游戏与每页 100 条的固定读取范围。
+  - 加固 Supervisor 生命周期：受管服务使用实例租约自行退出，新的 Supervisor 可回收可确认身份的遗留 Web/Worker 进程。
+upgrade:
+  dependencies: none
+  database: migrate
+  static: collectstatic
+  restart:
+    mode: supervisor
+    services: []
+  once_jobs:
+    - id: post-topic-backfill-v1
+      enqueue: uv run python manage.py enqueue_post_topic_backfill
+      completion:
+        task_type: POST_TOPIC_BACKFILL_V1
+        idempotency_key: once:post-topic-backfill:v1
+        checkpoint_complete: true
+      required: true
+  manual:
+    - 完整重启 Supervisor 后，保持人工补采 Worker 运行，入队并等待尾部话题回填任务成功完成。
+verification:
+  - uv run python manage.py validate_releases
+  - uv run pytest -q tests/test_release_protocol.py tests/test_release_source_archive.py
+  - uv run python manage.py check
+  - 确认 POST_TOPIC_BACKFILL_V1 后台任务成功且 checkpoint.complete=true；任务只拆分本地原创帖尾部话题，不访问上游。
+  - 完整重启 Supervisor 后，确认 Web、游戏圈会话服务、实时采集、人工补采、指标、复审、禁言维护、舆情报告、调度与 AI 自动处置 Worker 均按既有 desired 状态恢复。
+  - 使用受控测试数据确认官方作者核验只写本地配置；新建舆情报告仅分析锁定的本地正常原创帖，Word 导出不含作者身份或全文。
