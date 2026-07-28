@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import random
 import secrets
 import signal
 import threading
@@ -31,6 +32,10 @@ SUPERVISOR_LEASE_VERSION = 1
 SUPERVISOR_LEASE_SECONDS = 30.0
 SUPERVISOR_LEASE_POLL_SECONDS = 5.0
 SUPERVISOR_LEASE_READ_FAILURE_LIMIT = 2
+ATOMIC_WRITE_RETRY_SECONDS = 1.0
+ATOMIC_WRITE_INITIAL_BACKOFF_SECONDS = 0.02
+ATOMIC_WRITE_MAX_BACKOFF_SECONDS = 0.2
+WINDOWS_RETRYABLE_REPLACE_ERRORS = frozenset({5, 32})
 
 
 class SupervisorLockedError(RuntimeError):
@@ -138,11 +143,58 @@ class RuntimeStore:
 
     def write_json(self, path: Path, value: object) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
-        with NamedTemporaryFile("w", encoding="utf-8", dir=path.parent, delete=False) as temporary:
-            json.dump(value, temporary, ensure_ascii=False, sort_keys=True)
-            temporary.write("\n")
-            temporary_path = Path(temporary.name)
-        os.replace(temporary_path, path)
+        temporary_path: Path | None = None
+        try:
+            with NamedTemporaryFile(
+                "w", encoding="utf-8", dir=path.parent, delete=False
+            ) as temporary:
+                temporary_path = Path(temporary.name)
+                json.dump(value, temporary, ensure_ascii=False, sort_keys=True)
+                temporary.write("\n")
+            self._replace_json_file(temporary_path, path)
+        except BaseException:
+            if temporary_path is not None:
+                try:
+                    temporary_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+            raise
+
+    @staticmethod
+    def _replace_json_file(temporary_path: Path, path: Path) -> None:
+        deadline = time.monotonic() + ATOMIC_WRITE_RETRY_SECONDS
+        delay = ATOMIC_WRITE_INITIAL_BACKOFF_SECONDS
+        attempts = 0
+        while True:
+            attempts += 1
+            try:
+                os.replace(temporary_path, path)
+                return
+            except PermissionError as exc:
+                if not RuntimeStore._is_retryable_replace_error(exc):
+                    RuntimeStore._record_write_attempts(exc, attempts)
+                    raise
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    RuntimeStore._record_write_attempts(exc, attempts)
+                    raise
+                sleep_seconds = min(
+                    delay * random.uniform(0.8, 1.2),
+                    remaining,
+                )
+                time.sleep(sleep_seconds)
+                delay = min(delay * 2, ATOMIC_WRITE_MAX_BACKOFF_SECONDS)
+
+    @staticmethod
+    def _is_retryable_replace_error(exc: PermissionError) -> bool:
+        return (
+            os.name == "nt"
+            and getattr(exc, "winerror", None) in WINDOWS_RETRYABLE_REPLACE_ERRORS
+        )
+
+    @staticmethod
+    def _record_write_attempts(exc: OSError, attempts: int) -> None:
+        exc.runtime_write_attempts = attempts
 
     def token(self) -> str:
         return self._token_at(self.token_path)
