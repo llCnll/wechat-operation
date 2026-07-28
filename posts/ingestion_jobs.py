@@ -200,7 +200,7 @@ def enqueue_manual_historical_ingestion_window(
             appid=scope.target_appid,
             start_time=int((local_now - timedelta(hours=duration_hours)).timestamp()),
             end_time=int(local_now.timestamp()),
-            page_size=20,
+            page_size=_fixed_ingestion_page_size(),
             task_type=MANUAL_INGEST_WINDOW_TASK,
             idempotency_prefix="manual-ingest-window",
             idempotency_scope_version=scope.scope_version,

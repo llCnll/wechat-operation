@@ -92,7 +92,7 @@ def test_manual_historical_ingestion_uses_the_current_game_without_starting_a_wo
     assert job.status == JobStatus.PENDING
     assert job.parameter_summary["appid"] == game.appid
     assert job.checkpoint["execution_scope"] == {"target_appid": game.appid, "scope_version": 1}
-    assert job.parameter_summary["page_size"] == 20
+    assert job.parameter_summary["page_size"] == 100
     assert job.parameter_summary["end_time"] - job.parameter_summary["start_time"] == 12 * 60 * 60
     assert not ScheduledProducerSlot.objects.exists()
     assert not BackgroundJob.objects.filter(task_type=STATUS_SYNC_TASK).exists()
