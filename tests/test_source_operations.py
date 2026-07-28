@@ -131,7 +131,7 @@ def test_author_detail_uses_the_fixed_user_query_contract(monkeypatch):
         (
             "getuserdetail",
             {
-                "data": '{"query": 1, "topic_req": {"order_by": 1, "is_desc": true}, "openid": "author-openid", "page": 0, "page_size": 10, "need_user_info": true}'
+                "data": '{"query": 1, "topic_req": {"order_by": 1, "is_desc": true}, "openid": "author-openid", "page": 0, "page_size": 3, "need_user_info": true}'
             },
         )
     ]

@@ -10,7 +10,7 @@ import httpx
 
 from config.settings import runtime
 
-CONCLUSION_PROMPT_VERSION = "public-opinion-conclusion-v1"
+CONCLUSION_PROMPT_VERSION = "public-opinion-conclusion-v2"
 CONCLUSION_SCHEMA_VERSION = "public-opinion-evidence-v1"
 CONCLUSION_KINDS = frozenset({"OVERVIEW", "CHANGE", "VERIFICATION", "LIMITATION", "OBSERVATION"})
 FORBIDDEN_TERMS = (
@@ -30,6 +30,26 @@ FORBIDDEN_TERMS = (
     "因果",
 )
 NUMERIC_CLAIM_PATTERN = re.compile(r"\d")
+CONCLUSION_FAILURE_LABELS = {
+    "MODEL_CONCLUSION_DISABLED": "模型结论未启用",
+    "MODEL_NOT_CONFIGURED": "模型连接未配置",
+    "MODEL_CONNECT_TIMEOUT": "模型连接超时",
+    "MODEL_READ_TIMEOUT": "模型响应超时",
+    "MODEL_WRITE_TIMEOUT": "模型请求发送超时",
+    "MODEL_POOL_TIMEOUT": "模型请求排队超时",
+    "MODEL_CONNECTION_FAILED": "模型连接失败",
+    "MODEL_AUTH_FAILED": "模型鉴权失败",
+    "MODEL_ENDPOINT_NOT_FOUND": "模型接口地址无效",
+    "MODEL_RATE_LIMITED": "模型服务限流",
+    "MODEL_REQUEST_REJECTED": "模型请求被拒绝",
+    "MODEL_SERVICE_ERROR": "模型服务端错误",
+    "MODEL_TRANSPORT": "模型服务请求失败",
+    "MODEL_RESPONSE_INVALID": "模型响应结构无效",
+    "MODEL_NON_JSON": "模型未返回 JSON 结论",
+    "MODEL_SCHEMA_INVALID": "模型结论未通过约束校验",
+    "MODEL_INTERRUPTED": "模型调用中断",
+    "MODEL_UNAVAILABLE": "模型结论暂不可用",
+}
 
 
 class ConclusionError(RuntimeError):
@@ -38,6 +58,37 @@ class ConclusionError(RuntimeError):
     def __init__(self, code: str):
         super().__init__(code)
         self.code = code
+
+
+def conclusion_failure_label(error_code: object) -> str:
+    """Return a fixed display label without exposing upstream response details."""
+    return CONCLUSION_FAILURE_LABELS.get(str(error_code), "模型结论未能生成")
+
+
+def _transport_error_code(exc: httpx.HTTPError) -> str:
+    """Classify transport failures while retaining no remote body or credentials."""
+    if isinstance(exc, httpx.ConnectTimeout):
+        return "MODEL_CONNECT_TIMEOUT"
+    if isinstance(exc, httpx.ReadTimeout):
+        return "MODEL_READ_TIMEOUT"
+    if isinstance(exc, httpx.WriteTimeout):
+        return "MODEL_WRITE_TIMEOUT"
+    if isinstance(exc, httpx.PoolTimeout):
+        return "MODEL_POOL_TIMEOUT"
+    if isinstance(exc, httpx.ConnectError):
+        return "MODEL_CONNECTION_FAILED"
+    if isinstance(exc, httpx.HTTPStatusError):
+        status_code = exc.response.status_code
+        if status_code in {401, 403}:
+            return "MODEL_AUTH_FAILED"
+        if status_code == 404:
+            return "MODEL_ENDPOINT_NOT_FOUND"
+        if status_code == 429:
+            return "MODEL_RATE_LIMITED"
+        if 400 <= status_code < 500:
+            return "MODEL_REQUEST_REJECTED"
+        return "MODEL_SERVICE_ERROR"
+    return "MODEL_TRANSPORT"
 
 
 def evidence_for_payload(payload: dict[str, object]) -> dict[str, object]:
@@ -66,7 +117,7 @@ def evidence_for_payload(payload: dict[str, object]) -> dict[str, object]:
                     if key in row
                 }
                 for row in rows
-                if isinstance(row, dict)
+                if isinstance(row, dict) and row.get("official_identity") == "PLAYER"
             ]
     evidence: dict[str, object] = {
         "schema_version": CONCLUSION_SCHEMA_VERSION,
@@ -142,7 +193,8 @@ class PublicOpinionConclusionClient:
             "你是游戏运营分析助手。只可依据输入证据生成至多5条运营参考；"
             "每条输出 text 和 evidence_ids，evidence_ids 只能取输入顶层键。"
             "不得归责、断言因果、提出自动处置或复述身份/正文；text 不得出现数值，"
-            "精确数据仅保留在引用证据中。只返回 JSON 对象。"
+            "精确数据仅保留在引用证据中。每条 text 使用完整、带限定语的一至两句话，"
+            "说明观察范围或需要人工核验的边界，避免口号式短句。只返回 JSON 对象。"
         )
         try:
             response = httpx.post(
@@ -153,7 +205,7 @@ class PublicOpinionConclusionClient:
             )
             response.raise_for_status()
         except httpx.HTTPError as exc:
-            raise ConclusionError("MODEL_TRANSPORT") from exc
+            raise ConclusionError(_transport_error_code(exc)) from exc
         try:
             content = response.json()["choices"][0]["message"]["content"]
         except (KeyError, IndexError, TypeError, ValueError) as exc:

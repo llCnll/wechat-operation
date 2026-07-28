@@ -9,7 +9,8 @@ from docx import Document
 from posts.official_authors import OFFICIAL_IDENTITY_LABELS
 
 from .public_opinion_analysis import feedback_value_display
-from .public_opinion_presentation import present_daily_metrics
+from .public_opinion_conclusion import conclusion_failure_label
+from .public_opinion_presentation import present_conclusion, present_daily_metrics, present_observations
 
 
 def _table(document: Document, headings: tuple[str, ...], rows: list[tuple[object, ...]]) -> None:
@@ -154,15 +155,24 @@ def render_public_opinion_word(*, report, run, game_name: str) -> bytes:
         ],
     )
     document.add_heading("运营观察", level=1)
-    for item in payload["observations"]:
-        document.add_paragraph(f"{item['message']} 需人工核验。", style="List Bullet")
+    observations = present_observations(payload)
+    for item in observations:
+        suffix = " 需人工核验。" if item.get("verify") else ""
+        document.add_paragraph(f"{item['message']}{suffix}", style="List Bullet")
     document.add_heading("模型结论", level=1)
-    conclusion = payload.get("conclusion") or {}
+    conclusion = present_conclusion(payload.get("conclusion"), payload)
     if conclusion.get("status") == "AVAILABLE":
         for item in conclusion.get("items", []):
-            document.add_paragraph(f"{item['text']}（证据：{'、'.join(item['evidence_ids'])}）", style="List Bullet")
+            document.add_paragraph(f"{item['kind_label']}：{item['text']}", style="List Bullet")
+            for evidence in item["evidence"]:
+                document.add_paragraph(
+                    f"引用证据｜{evidence['label']}：{evidence['summary']}", style="List Bullet 2"
+                )
     else:
-        document.add_paragraph("模型结论暂不可用；确定性统计仍可作为运营参考。")
+        error_label = conclusion_failure_label(conclusion.get("error_code"))
+        document.add_paragraph(
+            f"模型结论暂不可用（{error_label}）；确定性统计仍可作为运营参考。"
+        )
     if conclusion.get("prompt_version"):
         document.add_paragraph(
             " · ".join(

@@ -14,6 +14,7 @@ from config import database  # noqa: F401  Registers SQLite connection initializ
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 RUNTIME_DIR = BASE_DIR / "runtime"
+FIXED_INGESTION_PAGE_SIZE = 100
 
 
 class RuntimeSettings(BaseSettings):
@@ -75,7 +76,7 @@ class RuntimeSettings(BaseSettings):
     game_circle_max_requests_per_second: float = Field(default=0, ge=0, le=1000)
     scheduled_ingestion_interval_minutes: int = Field(default=15, ge=1, le=1440)
     scheduled_ingestion_lookback_minutes: int = Field(default=30, ge=1, le=24 * 60)
-    scheduled_ingestion_page_size: int = Field(default=20, ge=1, le=100)
+    scheduled_ingestion_page_size: int = Field(default=FIXED_INGESTION_PAGE_SIZE, ge=1, le=100)
 
 
 try:

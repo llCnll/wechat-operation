@@ -922,6 +922,60 @@ def test_dashboard_rejects_upstream_operation_for_self_visible_post(monkeypatch)
 
 
 @pytest.mark.django_db
+def test_dashboard_allows_self_visible_post_author_mute_without_post_operation(monkeypatch):
+    """Only actions that alter a post remain unavailable for self-visible posts."""
+    monkeypatch.setattr(runtime, "enable_upstream_writes", True)
+    monkeypatch.setattr(runtime, "enable_mute_writes", True)
+    user = get_user_model().objects.create_user(username="self-visible-author-action")
+    post = OriginalPost.objects.create(
+        topic_id=1011,
+        content_id="self-visible-author-action-content",
+        status=POST_STATUS_SELF_VISIBLE,
+        source_appid="wx-game",
+        author_openid="self-visible-author",
+    )
+    source = object()
+    executed = []
+
+    @contextmanager
+    def source_session(_post):
+        yield source
+
+    def execute(*args, **kwargs):
+        executed.append(kwargs)
+        assert kwargs["action"] == RecommendedAction.MUTE
+        assert kwargs["source"] is source
+        assert kwargs["openid"] == post.author_openid
+        assert kwargs["source_appid"] == post.source_appid
+        return SimpleNamespace(result_code="OK")
+
+    monkeypatch.setattr("posts.views._source_for_post", source_session)
+    monkeypatch.setattr("posts.views.execute_author_operation_for_identity", execute)
+    monkeypatch.setattr("posts.views._persist_human_mute_intent", lambda **kwargs: None)
+    client = Client()
+    client.force_login(user)
+
+    page = client.get(f"/?appid={post.source_appid}&topic={post.topic_id}").content.decode()
+    assert 'data-operation="MUTE"' in page
+    assert 'data-operation="UNMUTE"' in page
+    assert 'postBoundActions=new Set(["SINK","BLOCK","RESTORE","BLOCK_AND_MUTE"])' in page
+    assert "帖子状态不可覆盖；已保存作者身份时仍可独立执行禁言或解除禁言。" in page
+
+    response = client.post(
+        f"/posts/{post.topic_id}/operate/MUTE/",
+        {
+            "reason": "作者状态核验后禁言",
+            "block_reason": "1",
+            "mute_days": "30",
+            "confirmation_key": "self-visible-author-mute",
+        },
+    )
+
+    assert response.status_code == 302
+    assert len(executed) == 1
+
+
+@pytest.mark.django_db
 def test_operations_dashboard_renders_ballot_title_and_options():
     user = get_user_model().objects.create_user(
         username="ballot-operator", password="test-password"

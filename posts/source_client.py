@@ -220,7 +220,7 @@ class CdpGameCircleClient:
                         "topic_req": {"order_by": 1, "is_desc": True},
                         "openid": openid,
                         "page": 0,
-                        "page_size": 10,
+                        "page_size": 3,
                         "need_user_info": True,
                     }
                 )

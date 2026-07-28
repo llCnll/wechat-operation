@@ -277,7 +277,12 @@ def _observations(
     observations: list[dict[str, object]] = []
     if total and ai_count < total:
         observations.append(
-            {"kind": "AI_COVERAGE", "message": f"AI 评估覆盖 {ai_count}/{total}。", "verify": True}
+            {
+                "kind": "AI_COVERAGE",
+                "message": f"AI 评估覆盖 {ai_count}/{total}。",
+                "verify": True,
+                "verification_note": "核对未覆盖帖子是否集中在特定日期、内容类型或采集异常，避免将已覆盖样本直接视为全量玩家反馈。",
+            }
         )
     current_mapped = sum(sentiment_counts.values())
     baseline_mapped = sum(baseline_sentiments.values())
@@ -293,8 +298,34 @@ def _observations(
                     "kind": "SENTIMENT_CHANGE",
                     "message": f"负面情绪占比较上期{direction} {abs(delta):.0%}。",
                     "verify": True,
+                    "verification_note": "抽样查看本期与基线中可映射情绪的帖子，确认覆盖范围和内容结构可比，再解读占比变化。",
                 }
             )
+    player_ranked = [row for row in total_ranked if row.get("official_identity") == "PLAYER"]
+    official_ranked = [row for row in total_ranked if row.get("official_identity") != "PLAYER"]
+    if player_ranked and player_ranked[0]["interaction_total"]:
+        observations.append(
+            {
+                "kind": "PLAYER_HIGH_INTERACTION",
+                "message": (
+                    f"玩家内容帖子 {player_ranked[0]['topic_id']} 的互动总量为 "
+                    f"{player_ranked[0]['interaction_total']}。"
+                ),
+                "verify": True,
+                "verification_note": "查看该玩家帖的内容、发布时间和互动构成，确认互动是否对应持续玩家关注，而非单次活动、转发或异常流量。",
+            }
+        )
+    if official_ranked and official_ranked[0]["interaction_total"]:
+        observations.append(
+            {
+                "kind": "OFFICIAL_HIGH_INTERACTION",
+                "message": (
+                    f"官方内容帖子 {official_ranked[0]['topic_id']} 的互动总量为 "
+                    f"{official_ranked[0]['interaction_total']}；已按锁定身份单列，不纳入玩家关注或反馈信号。"
+                ),
+                "verify": False,
+            }
+        )
     for key, count in sorted(topic_counts.items(), key=lambda item: (-item[1], item[0]))[:2]:
         if count:
             observations.append(
@@ -302,16 +333,9 @@ def _observations(
                     "kind": "TOPIC_VOLUME",
                     "message": f"{TOPIC_LABELS[key]}主题命中 {count} 帖。",
                     "verify": True,
+                    "verification_note": "抽样核对命中帖子与主题词的语义相关性；同一帖子可命中多个主题，主题计数不能直接与帖子总量比较。",
                 }
             )
-    if total_ranked and total_ranked[0]["interaction_total"]:
-        observations.append(
-            {
-                "kind": "HIGH_INTERACTION",
-                "message": f"帖子 {total_ranked[0]['topic_id']} 的互动总量为 {total_ranked[0]['interaction_total']}。",
-                "verify": True,
-            }
-        )
     return observations[:MAX_OBSERVATIONS]
 
 

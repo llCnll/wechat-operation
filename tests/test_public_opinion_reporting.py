@@ -4,6 +4,7 @@ from unittest.mock import Mock
 from zipfile import ZipFile
 from zoneinfo import ZoneInfo
 
+import httpx
 import pytest
 from django.contrib.auth import get_user_model
 from django.test import Client
@@ -29,6 +30,7 @@ from reporting.models import (
     PublicOpinionReportSourceKind,
 )
 from reporting.public_opinion_analysis import (
+    InteractionInput,
     LEGACY_ANALYSIS_VERSION,
     ReportSourceInput,
     build_report_result,
@@ -166,7 +168,10 @@ def test_report_locks_sources_and_rerun_only_refreshes_interactions():
 
 
 @pytest.mark.django_db
-def test_v2_report_keeps_topics_verified_daily_metrics_and_model_failure_as_success():
+def test_v2_report_keeps_topics_verified_daily_metrics_and_model_failure_as_success(monkeypatch):
+    monkeypatch.setattr(
+        "reporting.public_opinion_conclusion.runtime.public_opinion_conclusion_enabled", False
+    )
     appid = "public-opinion-v2-evidence"
     day = date(2026, 7, 20)
     post = _post(topic_id=120, appid=appid, day=day, content="玩法反馈")
@@ -194,6 +199,33 @@ def test_v2_report_keeps_topics_verified_daily_metrics_and_model_failure_as_succ
     assert "GROUP_PUBLISH_DAILY" not in body
     assert "publish_pv" not in body
 
+    run.result_payload["conclusion"]["error_code"] = "MODEL_READ_TIMEOUT"
+    run.save(update_fields=("result_payload", "updated_at"))
+    timeout_document = render_public_opinion_word(
+        report=result.report, run=run, game_name="测试游戏"
+    )
+    with ZipFile(BytesIO(timeout_document)) as archive:
+        timeout_body = archive.read("word/document.xml").decode()
+    assert "模型响应超时" in timeout_body
+
+    run.result_payload["conclusion"] = {
+        "status": "AVAILABLE",
+        "items": [{
+            "kind": "OVERVIEW",
+            "text": "当前固定范围可作为人工运营观察的参考。",
+            "evidence_ids": ["summary", "player_topics"],
+        }],
+    }
+    run.save(update_fields=("result_payload", "updated_at"))
+    conclusion_document = render_public_opinion_word(
+        report=result.report, run=run, game_name="测试游戏"
+    )
+    with ZipFile(BytesIO(conclusion_document)) as archive:
+        conclusion_body = archive.read("word/document.xml").decode()
+    assert "整体概览" in conclusion_body
+    assert "报告概览" in conclusion_body
+    assert "玩家话题" in conclusion_body
+
 
 def test_conclusion_validation_rejects_unknown_evidence_and_forbidden_language():
     evidence = {"summary": {}, "data_quality": {}, "categories": [], "sentiments": [], "risks": [], "topics": [], "player_topics": [], "hotwords": {}, "daily_trend": [], "daily_metrics": [], "representative_posts": {}}
@@ -210,7 +242,7 @@ def test_conclusion_validation_rejects_unknown_evidence_and_forbidden_language()
         validate_conclusion({"items": [{"kind": "ACTION", "text": "当前仅观察到同期变化。", "evidence_ids": ["summary"]}]}, evidence=evidence)
 
 
-def test_conclusion_evidence_excludes_representative_official_identity():
+def test_conclusion_evidence_includes_only_player_representatives():
     from reporting.public_opinion_conclusion import evidence_for_payload
 
     evidence = evidence_for_payload(
@@ -222,15 +254,93 @@ def test_conclusion_evidence_excludes_representative_official_identity():
                         "title": "安全标题",
                         "interaction_total": 10,
                         "official_identity": "VERIFIED_OFFICIAL",
-                    }
+                    },
+                    {
+                        "topic_id": 2,
+                        "title": "玩家标题",
+                        "interaction_total": 8,
+                        "official_identity": "PLAYER",
+                    },
                 ]
             }
         }
     )
 
+    assert [row["topic_id"] for row in evidence["representative_posts"]["by_total"]] == [2]
     row = evidence["representative_posts"]["by_total"][0]
-    assert row["topic_id"] == 1
     assert "official_identity" not in row
+
+
+def test_official_high_interaction_is_not_presented_as_player_signal():
+    official = ReportSourceInput(
+        topic_id=1, publish_time=None, title="官方公告", content_text="活动", ballot_text="",
+        has_ai_assessment=False, ai_category="", ai_sentiment="", ai_feedback_value="",
+        ai_risk_summary=(), official_identity="VERIFIED_OFFICIAL",
+    )
+    player = ReportSourceInput(
+        topic_id=2, publish_time=None, title="玩家反馈", content_text="反馈", ballot_text="",
+        has_ai_assessment=False, ai_category="", ai_sentiment="", ai_feedback_value="",
+        ai_risk_summary=(), official_identity="PLAYER",
+    )
+    payload, _ = build_report_result(
+        current=(official, player), baseline=(),
+        interactions=(
+            InteractionInput(1, 100, 20, 10, 0, timezone.now()),
+            InteractionInput(2, 100, 10, 5, 0, timezone.now()),
+        ),
+        source_locked_at=timezone.now(), metrics_as_of=timezone.now(),
+    )
+
+    messages = {item["kind"]: item["message"] for item in payload["observations"]}
+    assert "官方内容帖子 1" in messages["OFFICIAL_HIGH_INTERACTION"]
+    assert "不纳入玩家关注或反馈信号" in messages["OFFICIAL_HIGH_INTERACTION"]
+    assert next(
+        item for item in payload["observations"] if item["kind"] == "OFFICIAL_HIGH_INTERACTION"
+    )["verify"] is False
+    assert "不纳入玩家关注或反馈信号" in next(
+        item for item in payload["observations"] if item["kind"] == "OFFICIAL_HIGH_INTERACTION"
+    )["message"]
+    assert "玩家内容帖子 2" in messages["PLAYER_HIGH_INTERACTION"]
+
+
+def test_report_presentation_uses_chinese_evidence_and_corrects_legacy_official_observation():
+    from reporting.views import _report_payload_for_display
+
+    raw_payload = {
+        "summary": {"source_count": 12},
+        "data_quality": {"source_count": 12, "ai_assessment_count": 10, "interaction_snapshot_count": 11},
+        "categories": [{"label": "反馈", "count": 5}],
+        "player_topics": [{"label": "城主攻略", "count": 3}],
+        "representative_posts": {"by_total": [{"topic_id": 1441287140, "interaction_total": 99, "official_identity": "VERIFIED_OFFICIAL"}]},
+        "observations": [{"kind": "HIGH_INTERACTION", "message": "帖子 1441287140 的互动总量为 99。", "verify": True}],
+        "conclusion": {"status": "AVAILABLE", "items": [{"kind": "OVERVIEW", "text": "当前内容结构可作为人工运营观察的固定范围。", "evidence_ids": ["summary", "categories", "player_topics", "representative_posts"]}]},
+    }
+
+    projected = _report_payload_for_display(raw_payload)
+
+    evidence = projected["conclusion"]["items"][0]["evidence"]
+    assert [(item["label"], item["summary"]) for item in evidence] == [
+        ("报告概览", "锁定来源 12 帖"),
+        ("内容类别", "前列类别：反馈 5"),
+        ("玩家话题", "前列玩家话题：城主攻略 3"),
+        ("玩家高互动代表帖", "仅纳入 0 条玩家内容代表帖"),
+    ]
+    assert "官方内容帖子 1441287140" in projected["observations"][-1]["message"]
+    assert projected["observations"][-1]["verify"] is False
+    assert "不纳入玩家关注或反馈信号" in projected["observations"][-1]["message"]
+    assert raw_payload["observations"][0]["message"] == "帖子 1441287140 的互动总量为 99。"
+
+
+def test_observation_presentation_supplies_expandable_verification_guidance_for_history():
+    from reporting.public_opinion_presentation import present_observations
+
+    observations = present_observations(
+        {"observations": [{"kind": "TOPIC_VOLUME", "message": "玩法/策略主题命中 8 帖。", "verify": True}]}
+    )
+
+    assert observations[0]["verification_note"] == (
+        "抽样核对命中帖子与主题词的语义相关性；同一帖子可命中多个主题，主题计数不能直接与帖子总量比较。"
+    )
 
 
 def test_conclusion_snapshot_records_the_generation_contract(monkeypatch):
@@ -247,7 +357,7 @@ def test_conclusion_snapshot_records_the_generation_contract(monkeypatch):
         "status": "UNAVAILABLE",
         "items": [],
         "model_version": "test-model",
-        "prompt_version": "public-opinion-conclusion-v1",
+        "prompt_version": "public-opinion-conclusion-v2",
         "evidence_schema_version": "public-opinion-evidence-v1",
         "input_hash": "a" * 64,
         "error_code": "MODEL_TRANSPORT",
@@ -269,6 +379,38 @@ def test_conclusion_client_classifies_non_json_and_schema_failure_without_networ
     response.json.return_value = {"choices": [{"message": {"content": '{"items":[{"text":"无证据","evidence_ids":[]}]}'}}]}
     with pytest.raises(ConclusionError, match="MODEL_SCHEMA_INVALID"):
         PublicOpinionConclusionClient().conclude(evidence)
+
+
+def test_conclusion_client_classifies_response_timeout_without_exposing_exception(monkeypatch):
+    evidence = {
+        "summary": {}, "data_quality": {}, "categories": [], "sentiments": [], "risks": [],
+        "topics": [], "player_topics": [], "hotwords": {}, "daily_trend": [],
+        "daily_metrics": [], "representative_posts": {},
+    }
+    monkeypatch.setattr("reporting.public_opinion_conclusion.runtime.public_opinion_conclusion_enabled", True)
+    monkeypatch.setattr("reporting.public_opinion_conclusion.runtime.ai_base_url", "https://model.invalid")
+    monkeypatch.setattr("reporting.public_opinion_conclusion.runtime.ai_api_key", "test")
+    monkeypatch.setattr("reporting.public_opinion_conclusion.runtime.ai_model", "test-model")
+    monkeypatch.setattr(
+        "reporting.public_opinion_conclusion.httpx.post",
+        lambda *args, **kwargs: (_ for _ in ()).throw(httpx.ReadTimeout("sensitive upstream detail")),
+    )
+
+    with pytest.raises(ConclusionError, match="MODEL_READ_TIMEOUT"):
+        PublicOpinionConclusionClient().conclude(evidence)
+
+
+def test_report_display_exposes_only_the_fixed_conclusion_failure_label():
+    from reporting.views import _report_payload_for_display
+
+    payload = _report_payload_for_display(
+        {"summary": {}, "representative_posts": {}, "conclusion": {
+            "status": "UNAVAILABLE", "error_code": "MODEL_READ_TIMEOUT",
+        }}
+    )
+
+    assert payload["conclusion"]["error_label"] == "模型响应超时"
+    assert "upstream" not in str(payload)
 
 
 def test_historical_invalid_feedback_is_a_coverage_gap_not_a_business_bucket():

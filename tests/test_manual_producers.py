@@ -32,7 +32,7 @@ def test_manual_current_ingestion_freezes_scope_and_never_creates_status_sync():
 
     assert job.task_type == MANUAL_CURRENT_INGEST_WINDOW_TASK
     assert job.checkpoint["execution_scope"] == {"target_appid": game.appid, "scope_version": 1}
-    assert job.parameter_summary["page_size"] == 20
+    assert job.parameter_summary["page_size"] == 100
     assert repeated.jobs == (job,)
     assert repeated.created == (False,)
     assert job.active_coalescing_key

@@ -216,7 +216,12 @@ def affected_services(changed: set[str]) -> set[str]:
         services.add("public_opinion_reporting")
     if changed & video_keys:
         services.add("video_extraction")
-    if changed & (BOOLEAN_KEYS - SESSION_MAINTENANCE_KEYS):
+    web_and_moderation_keys = (
+        BOOLEAN_KEYS
+        - SESSION_MAINTENANCE_KEYS
+        - {"PUBLIC_OPINION_CONCLUSION_ENABLED"}
+    )
+    if changed & web_and_moderation_keys:
         services.update(("web", "ai_moderation"))
     if changed & SESSION_MAINTENANCE_KEYS:
         services.update(("game_circle_session", "scheduler"))
