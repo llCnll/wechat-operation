@@ -11,6 +11,7 @@ from django.utils.dateparse import parse_datetime
 from config.runtime_config import public_runtime_config
 from config.supervisor import SupervisorClient, SupervisorUnavailableError
 from reviews.video import media_tools_available
+from reporting.public_opinion_configuration import public_opinion_conclusion_configuration
 
 MANAGED_SERVICE_NAMES = (
     "controlled_chrome",
@@ -377,7 +378,7 @@ def _build_runtime_console(
         snapshot,
         "mute-maintenance",
         "禁言维护 Worker",
-        "维护已明确标记的永久禁言，并消费作者禁言状态刷新任务。",
+        "维护已明确标记的永久禁言，并消费作者禁言状态刷新、作者扫描与平台禁言名单导入任务。",
         service="mute_maintenance",
         business_condition="只读状态刷新可直接消费；仅永久禁言续期 Job 另需对应写入授权。",
         missing_behavior="未授权时仅续期 Job 不执行写入；只读刷新不受影响。",
@@ -744,6 +745,10 @@ def admin_console_overview(request):
             for rule in producer["rules"]
         ),
     )
+    public_opinion_conclusion_config = public_opinion_conclusion_configuration(
+        appid=active_scope.active_appid if active_scope else "",
+        runtime_config=runtime_config,
+    )
     return {
         "admin_console": {
             "active_policy": active_policy,
@@ -760,6 +765,7 @@ def admin_console_overview(request):
             "runtime_config": runtime_config,
             "manual_daily_metric_quick_ranges": manual_daily_metric_quick_ranges,
             "manual_weekly_metric_quick_ranges": manual_weekly_metric_quick_ranges,
+            "public_opinion_conclusion_config": public_opinion_conclusion_config,
             "scheduled_producers": scheduled_producers,
             "services": services,
             "supervisor_error": supervisor_error,

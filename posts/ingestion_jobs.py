@@ -33,6 +33,14 @@ MAX_MANUAL_INGESTION_HOURS = 31 * 24
 SHANGHAI = ZoneInfo("Asia/Shanghai")
 
 
+def _fixed_ingestion_page_size() -> int:
+    """Return the verified candidate-list size shared by normal ingestion entrypoints."""
+    page_size = _positive_int(settings.SCHEDULED_INGESTION_PAGE_SIZE, name="默认页面大小")
+    if page_size != settings.FIXED_INGESTION_PAGE_SIZE:
+        raise ValueError(f"自动采集默认页面大小必须为{settings.FIXED_INGESTION_PAGE_SIZE}")
+    return page_size
+
+
 @dataclass(frozen=True)
 class IngestionEnqueueResult:
     """The ingestion job and whether this request created it."""
@@ -149,23 +157,24 @@ def enqueue_manual_current_ingestion_window(
         start_time=int((local_now - timedelta(minutes=30)).timestamp()),
         end_time=int(local_now.timestamp()),
     )
+    page_size = _fixed_ingestion_page_size()
     with transaction.atomic():
         scope = current_execution_scope(persist_default=False)
         parameters = {
             "appid": scope.target_appid,
             "start_time": window.start_time,
             "end_time": window.end_time,
-            "page_size": 20,
+            "page_size": page_size,
         }
         result = enqueue_active_coalesced_job(
             task_type=MANUAL_CURRENT_INGEST_WINDOW_TASK,
             idempotency_key=(
                 f"manual-current-ingest:{scope.target_appid}:{scope.scope_version}:"
-                f"{window.start_time}:{window.end_time}:20:{uuid4().hex}"
+                f"{window.start_time}:{window.end_time}:{page_size}:{uuid4().hex}"
             ),
             active_coalescing_key=(
                 f"manual-current-ingest:{scope.target_appid}:v{scope.scope_version}:"
-                f"{window.start_time}:{window.end_time}:20"
+                f"{window.start_time}:{window.end_time}:{page_size}"
             ),
             parameter_summary=parameters,
             checkpoint={"execution_scope": scope.as_checkpoint()},
@@ -191,7 +200,7 @@ def enqueue_manual_historical_ingestion_window(
             appid=scope.target_appid,
             start_time=int((local_now - timedelta(hours=duration_hours)).timestamp()),
             end_time=int(local_now.timestamp()),
-            page_size=20,
+            page_size=_fixed_ingestion_page_size(),
             task_type=MANUAL_INGEST_WINDOW_TASK,
             idempotency_prefix="manual-ingest-window",
             idempotency_scope_version=scope.scope_version,
@@ -254,9 +263,7 @@ def enqueue_scheduled_ingestion(
 ) -> IngestionEnqueueResult:
     """Enqueue the current operation scope without invoking any browser adapter."""
     appid = active_game_appid(persist_default=False)
-    page_size = _positive_int(settings.SCHEDULED_INGESTION_PAGE_SIZE, name="默认页面大小")
-    if page_size != 20:
-        raise ValueError("自动采集默认页面大小必须为20")
+    page_size = _fixed_ingestion_page_size()
     window = scheduled_ingestion_window(now, interval_minutes=interval_minutes)
     return _enqueue_ingestion_window(
         appid=appid,

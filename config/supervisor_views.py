@@ -169,6 +169,8 @@ def save_runtime_configuration(request):
         values.setdefault("ASR_ENABLED", "false")
     if request.POST.get("config_scope") == "session_maintenance":
         values.setdefault("SESSION_REPAIR_ENABLED", "false")
+    if request.POST.get("config_scope") == "public_opinion":
+        values.setdefault("PUBLIC_OPINION_CONCLUSION_ENABLED", "false")
     try:
         changed = update_runtime_config(values)
     except ValueError as exc:

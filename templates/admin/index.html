@@ -31,6 +31,7 @@
     <div class="console-runtime-section-heading"><div><p><span class="console-lucide" aria-hidden="true">{% include "posts/includes/lucide_icon.html" with name="gamepad" %}</span> WORK SCOPE</p><h3 id="work-scope-title">当前操作游戏</h3></div><span>{{ admin_console.runtime_console.work_scope.description }}</span></div>
     <div class="console-work-scope-current"><span>当前范围</span><strong>{{ admin_console.runtime_console.work_scope.name|default:"尚未选择游戏" }}</strong></div>
     <details class="console-active-game-switch" {% if not admin_console.runtime_console.work_scope.configured %}open{% endif %}><summary>更换操作游戏</summary><form method="post" action="{% url 'set-active-game-scope' %}">{% csrf_token %}<input type="hidden" name="return_to" value="/admin/"><label>操作游戏<select name="appid" required>{% for game in admin_console.manual_ingestion_games %}<option value="{{ game.appid }}" {% if game.appid == admin_console.manual_ingestion_default_appid %}selected{% endif %}>{{ game.name }}</option>{% endfor %}</select></label><button type="submit">切换并建立 Frame</button></form><form method="post" action="{% url 'sync-managed-game-catalog' %}">{% csrf_token %}<input type="hidden" name="return_to" value="/admin/"><button class="is-quiet" type="submit">刷新可管理游戏目录</button></form></details>
+    {% if admin_console.runtime_console.work_scope.configured %}<a class="console-action-button" href="{% url 'official-author-management' %}?appid={{ admin_console.manual_ingestion_default_appid|urlencode }}">管理官方作者</a>{% endif %}
   </section>
   <div class="console-runtime-tabs">
     <input class="console-runtime-tab-input" type="radio" name="runtime-view" id="runtime-flow-tab" checked>
@@ -101,6 +102,19 @@
       <label>超时（秒）<input name="AI_TIMEOUT_SECONDS" value="{{ admin_console.runtime_config.ai_timeout_seconds }}" inputmode="decimal"></label>
     </div>
     <footer><span>保存后重启 AI 审核 Worker 即可加载。</span><button class="console-config-submit" type="submit">保存 AI 配置</button></footer>
+  </form>
+</dialog>
+
+<dialog class="console-config-dialog" data-config-dialog-panel="public-opinion" aria-labelledby="public-opinion-config-title">
+  <form method="post" action="{% url 'save-runtime-configuration' %}">{% csrf_token %}<input type="hidden" name="return_to" value="/admin/"><input type="hidden" name="config_scope" value="public_opinion">
+    <header><div><p>REPORT CONFIGURATION</p><h2 id="public-opinion-config-title">配置舆情报告</h2></div><button type="button" class="console-dialog-close" data-config-dialog-close aria-label="关闭">关闭</button></header>
+    <p class="console-dialog-intro">只控制未来报告是否生成受约束模型结论；不会调用模型、修改已完成报告或补写历史结论。</p>
+    <div class="console-public-opinion-config">
+      <section class="console-public-opinion-state is-{{ admin_console.public_opinion_conclusion_config.code|lower }}"><span>当前状态</span><strong>{{ admin_console.public_opinion_conclusion_config.label }}</strong><small>{{ admin_console.public_opinion_conclusion_config.description }}</small>{% if admin_console.public_opinion_conclusion_config.recent_failure %}<em>最近一次失败：{{ admin_console.public_opinion_conclusion_config.recent_failure }}</em>{% endif %}</section>
+      <section class="console-public-opinion-connection"><div><span>AI 连接</span><strong>由“配置 AI 审核”统一维护</strong></div><dl><div><dt>服务地址</dt><dd>{% if admin_console.public_opinion_conclusion_config.ai_base_url %}已配置{% else %}未配置{% endif %}</dd></div><div><dt>模型名称</dt><dd>{{ admin_console.public_opinion_conclusion_config.ai_model|default:'未配置' }}</dd></div><div><dt>访问密钥</dt><dd>{% if admin_console.public_opinion_conclusion_config.ai_api_key_configured %}已配置{% else %}未配置{% endif %}</dd></div></dl></section>
+      <label class="console-public-opinion-toggle"><input name="PUBLIC_OPINION_CONCLUSION_ENABLED" type="checkbox" value="true" {% if admin_console.public_opinion_conclusion_config.enabled %}checked{% endif %}><span><strong>为新报告生成模型结论</strong><small>仅使用固定的聚合证据，不能生成自动处置、归责或因果判断。</small></span></label>
+    </div>
+    <footer><span>保存后仅需重启舆情报告 Worker。新建报告或重跑固定来源才会读取新配置。</span><button class="console-config-submit" type="submit">保存报告配置</button></footer>
   </form>
 </dialog>
 

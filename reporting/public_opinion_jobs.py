@@ -9,15 +9,19 @@ from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 from django.db import IntegrityError, transaction
-from django.db.models import Max
+from django.db.models import F, Max
 from django.utils import timezone
 
 from jobs.models import BackgroundJob, JobStatus
 from jobs.services import JobTerminalError
 from jobs.task_types import PUBLIC_OPINION_REPORT_TASK
-from posts.models import POST_STATUS_NORMAL, InteractionSnapshot, OriginalPost
+from posts.models import POST_STATUS_NORMAL, InteractionSnapshot, ManagedGame, OriginalPost
+from posts.official_authors import active_official_openids, identity_for_values
 
+from .metric_sources import ENABLED_DAILY_SOURCES
 from .models import (
+    GameCircleMetricSnapshot,
+    MetricPublicationState,
     PublicOpinionReport,
     PublicOpinionReportRun,
     PublicOpinionReportRunStatus,
@@ -31,6 +35,14 @@ from .public_opinion_analysis import (
     InteractionInput,
     ReportSourceInput,
     build_report_result,
+    report_algorithm,
+)
+from .public_opinion_conclusion import (
+    ConclusionError,
+    PublicOpinionConclusionClient,
+    conclusion_snapshot,
+    evidence_for_payload,
+    evidence_hash,
 )
 
 SHANGHAI = ZoneInfo("Asia/Shanghai")
@@ -68,9 +80,9 @@ def _range_datetimes(start_day: date, end_day: date) -> tuple[datetime, datetime
     )
 
 
-def _active_key(*, appid: str, start_day: date, end_day: date) -> str:
+def _active_key(*, appid: str, start_day: date, end_day: date, version: str) -> str:
     return (
-        f"public-opinion:{appid}:{start_day.isoformat()}:{end_day.isoformat()}:{ANALYSIS_VERSION}"
+        f"public-opinion:{appid}:{start_day.isoformat()}:{end_day.isoformat()}:{version}"
     )
 
 
@@ -102,7 +114,7 @@ def create_public_opinion_report(
     start_day, end_day = validate_report_range(start_day, end_day)
     if _eligible_post_count(appid=source_appid, start_day=start_day, end_day=end_day) > REPORT_MAX_POSTS:
         raise ValueError(f"报告范围帖子数超过 {REPORT_MAX_POSTS} 条限制")
-    active_key = _active_key(appid=source_appid, start_day=start_day, end_day=end_day)
+    active_key = _active_key(appid=source_appid, start_day=start_day, end_day=end_day, version=ANALYSIS_VERSION)
     with transaction.atomic():
         existing = (
             BackgroundJob.objects.select_related("public_opinion_run__report")
@@ -149,7 +161,7 @@ def rerun_public_opinion_report(*, report: PublicOpinionReport) -> PublicOpinion
     if report.retention_until <= timezone.now():
         raise ValueError("报告来源已到期，不能重跑")
     active_key = _active_key(
-        appid=report.source_appid, start_day=report.start_day, end_day=report.end_day
+        appid=report.source_appid, start_day=report.start_day, end_day=report.end_day, version=report.analysis_version
     )
     with transaction.atomic():
         report = PublicOpinionReport.objects.select_for_update().get(pk=report.pk)
@@ -187,12 +199,17 @@ def _source_rows(
     *, report: PublicOpinionReport, posts: list[OriginalPost], source_kind: str
 ) -> list[PublicOpinionReportSource]:
     rows: list[PublicOpinionReportSource] = []
+    game_name = ManagedGame.objects.filter(appid=report.source_appid).values_list("name", flat=True).first() or ""
+    official_openids = active_official_openids(appid=report.source_appid)
     for index, post in enumerate(posts, start=1):
         assessment = getattr(getattr(post, "review_task", None), "assessment", None)
         risks = tuple(assessment.risk_evidence.all()) if assessment is not None else ()
         title = post.title or ""
         content_text = post.content_text or ""
         ballot_text = post.ballot_text or ""
+        identity = identity_for_values(author_openid=post.author_openid, author_nick_name=post.author_nick_name, game_name=game_name, verified_openids=official_openids)
+        feedback = (assessment.feedback_value if assessment is not None else "").strip().upper()
+        feedback_state = "VALID" if feedback in {"NONE", "LOW", "MEDIUM", "HIGH"} else ("INVALID" if feedback else "MISSING")
         rows.append(
             PublicOpinionReportSource(
                 report=report,
@@ -203,6 +220,7 @@ def _source_rows(
                 publish_time=post.publish_time,
                 title=title,
                 content_text=content_text,
+                topics=list(post.topics or []),
                 ballot_text=ballot_text,
                 content_fingerprint=_fingerprint(
                     title=title, content_text=content_text, ballot_text=ballot_text
@@ -210,7 +228,9 @@ def _source_rows(
                 has_ai_assessment=assessment is not None,
                 ai_category=assessment.category if assessment is not None else "",
                 ai_sentiment=assessment.sentiment if assessment is not None else "",
-                ai_feedback_value=assessment.feedback_value if assessment is not None else "",
+                ai_feedback_value=feedback if feedback_state == "VALID" else "",
+                ai_feedback_state=feedback_state,
+                official_identity=identity.key,
                 ai_risk_summary=[
                     {"label": risk.label, "confidence": risk.confidence} for risk in risks
                 ],
@@ -290,6 +310,9 @@ def _source_input(source: PublicOpinionReportSource) -> ReportSourceInput:
         ai_sentiment=source.ai_sentiment,
         ai_feedback_value=source.ai_feedback_value,
         ai_risk_summary=risks,
+        ai_feedback_state=source.ai_feedback_state or "MISSING",
+        topics=tuple(item for item in source.topics if isinstance(item, str)),
+        official_identity=source.official_identity or "PLAYER",
     )
 
 
@@ -337,12 +360,25 @@ def load_interactions(
     return tuple(latest.values())
 
 
+def load_daily_metrics(*, report: PublicOpinionReport, metrics_as_of: datetime) -> tuple[dict[str, object], ...]:
+    snapshots = GameCircleMetricSnapshot.objects.filter(
+        appid=report.source_appid, scope="ALL", source__in=ENABLED_DAILY_SOURCES,
+        period_start__gte=report.start_day, period_end__lte=report.end_day,
+        captured_at__lte=metrics_as_of, publication_state=MetricPublicationState.VERIFIED,
+    ).filter(period_start=F("period_end")).order_by("source", "period_start")
+    return tuple({"source": item.source, "day": item.period_start.isoformat(), "metrics": item.metrics, "captured_at": item.captured_at.isoformat()} for item in snapshots)
+
+
 def execute_public_opinion_report(job: BackgroundJob) -> None:
     try:
         run = PublicOpinionReportRun.objects.select_related("report").get(job=job)
     except PublicOpinionReportRun.DoesNotExist as exc:
         raise JobTerminalError("舆情报告任务未关联运行版本") from exc
     report = run.report
+    try:
+        algorithm = report_algorithm(report.analysis_version)
+    except ValueError as exc:
+        raise JobTerminalError(str(exc)) from exc
     if report.retention_until <= timezone.now():
         raise JobTerminalError("舆情报告来源已到期")
     PublicOpinionReportRun.objects.filter(pk=run.pk).update(
@@ -351,17 +387,39 @@ def execute_public_opinion_report(job: BackgroundJob) -> None:
         error_summary="",
     )
     try:
-        report = lock_report_sources(report_id=report.pk)
-        current, baseline = load_report_inputs(report=report)
-        metrics_as_of = timezone.now()
-        interactions = load_interactions(current=current, metrics_as_of=metrics_as_of)
-        payload, quality = build_report_result(
-            current=current,
-            baseline=baseline,
-            interactions=interactions,
-            source_locked_at=report.source_locked_at,
-            metrics_as_of=metrics_as_of,
-        )
+        run.refresh_from_db()
+        if run.deterministic_payload:
+            payload = dict(run.deterministic_payload["payload"])
+            quality = dict(run.data_quality)
+            metrics_as_of = run.metrics_as_of
+            input_summary = dict(run.deterministic_payload.get("input_summary") or {})
+        else:
+            report = lock_report_sources(report_id=report.pk)
+            current, baseline = load_report_inputs(report=report)
+            metrics_as_of = timezone.now()
+            interactions = load_interactions(current=current, metrics_as_of=metrics_as_of)
+            daily_metrics = load_daily_metrics(report=report, metrics_as_of=metrics_as_of) if algorithm.supports_daily_metrics else ()
+            payload, quality = build_report_result(current=current, baseline=baseline, interactions=interactions, source_locked_at=report.source_locked_at, metrics_as_of=metrics_as_of, daily_metrics=daily_metrics, version=report.analysis_version)
+            input_summary = {
+                "current_source_count": len(current),
+                "baseline_source_count": len(baseline),
+                "interaction_input_count": len(interactions),
+            }
+            with transaction.atomic():
+                locked_run = PublicOpinionReportRun.objects.select_for_update().get(pk=run.pk)
+                if not locked_run.deterministic_payload:
+                    locked_run.metrics_as_of = metrics_as_of
+                    locked_run.data_quality = quality
+                    locked_run.deterministic_payload = {
+                        "payload": payload,
+                        "input_summary": input_summary,
+                    }
+                    locked_run.save(update_fields=("metrics_as_of", "data_quality", "deterministic_payload", "updated_at"))
+                else:
+                    payload = dict(locked_run.deterministic_payload["payload"])
+                    quality = dict(locked_run.data_quality)
+                    metrics_as_of = locked_run.metrics_as_of
+                    input_summary = dict(locked_run.deterministic_payload.get("input_summary") or {})
     except JobTerminalError as exc:
         PublicOpinionReportRun.objects.filter(pk=run.pk).update(
             status=PublicOpinionReportRunStatus.FAILED,
@@ -383,6 +441,35 @@ def execute_public_opinion_report(job: BackgroundJob) -> None:
             result_payload={},
         )
         raise
+    conclusion = {"status": "NOT_APPLICABLE", "items": []}
+    conclusion_status = "NOT_APPLICABLE"
+    conclusion_error = ""
+    if algorithm.supports_model_conclusion:
+        evidence = evidence_for_payload(payload)
+        input_hash = evidence_hash(evidence)
+        run.refresh_from_db()
+        if run.conclusion_attempted_at is not None:
+            conclusion = {"status": "UNAVAILABLE", "items": []}
+            conclusion_status, conclusion_error = "UNAVAILABLE", "MODEL_INTERRUPTED"
+        else:
+            with transaction.atomic():
+                locked_run = PublicOpinionReportRun.objects.select_for_update().get(pk=run.pk)
+                locked_run.conclusion_attempted_at = timezone.now()
+                locked_run.conclusion_input_hash = input_hash
+                locked_run.save(update_fields=("conclusion_attempted_at", "conclusion_input_hash", "updated_at"))
+            try:
+                conclusion = PublicOpinionConclusionClient().conclude(evidence)
+                conclusion_status = "AVAILABLE"
+            except ConclusionError as exc:
+                conclusion = {"status": "UNAVAILABLE", "items": []}
+                conclusion_status, conclusion_error = "UNAVAILABLE", exc.code
+            except Exception:
+                conclusion = {"status": "UNAVAILABLE", "items": []}
+                conclusion_status, conclusion_error = "UNAVAILABLE", "MODEL_UNAVAILABLE"
+        conclusion = conclusion_snapshot(
+            conclusion, input_hash=input_hash, error_code=conclusion_error
+        )
+        payload["conclusion"] = conclusion
     with transaction.atomic():
         run = (
             PublicOpinionReportRun.objects.select_for_update()
@@ -391,13 +478,12 @@ def execute_public_opinion_report(job: BackgroundJob) -> None:
         )
         run.status = PublicOpinionReportRunStatus.SUCCEEDED
         run.metrics_as_of = metrics_as_of
-        run.input_summary = {
-            "current_source_count": len(current),
-            "baseline_source_count": len(baseline),
-            "interaction_input_count": len(interactions),
-        }
+        run.input_summary = input_summary
         run.data_quality = quality
         run.result_payload = payload
+        run.conclusion_status = conclusion_status
+        run.conclusion_payload = conclusion
+        run.conclusion_error_code = conclusion_error
         run.error_summary = ""
         run.finished_at = timezone.now()
         run.save()

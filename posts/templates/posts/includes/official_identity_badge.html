@@ -1,0 +1,8 @@
+{% if identity.key == "VERIFIED_OFFICIAL" %}
+<span class="official-identity-badge" title="官方作者（已核验）" aria-label="官方作者（已核验）">
+  <span class="official-identity-badge-icon" aria-hidden="true">{% include "posts/includes/lucide_icon.html" with name="shield-check" %}</span>
+  <span class="visually-hidden">官方作者（已核验）</span>
+</span>
+{% elif identity.key == "GAME_NAME_MATCH" %}
+<span class="official-identity-name-match" title="官方名称匹配">名称匹配</span>
+{% endif %}

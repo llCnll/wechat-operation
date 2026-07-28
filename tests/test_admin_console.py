@@ -657,6 +657,15 @@ def test_manual_ingestion_only_creates_a_pending_job_without_starting_workers(ad
 
 
 @pytest.mark.django_db
+def test_admin_home_offers_public_opinion_configuration(admin_client):
+    page = admin_client.get("/admin/").content.decode()
+
+    assert "配置舆情报告" in page
+    assert 'data-config-dialog="public-opinion"' in page
+    assert 'data-config-dialog-panel="public-opinion"' in page
+
+
+@pytest.mark.django_db
 def test_runtime_configuration_view_turns_missing_write_switches_off(admin_client, monkeypatch):
     saved = {}
 
@@ -699,6 +708,36 @@ def test_ai_configuration_does_not_change_write_switches(admin_client, monkeypat
 
     assert response.status_code == 302
     assert saved == {"config_scope": "ai", "AI_MODEL": "test-model", "return_to": "/admin/"}
+
+
+@pytest.mark.django_db
+def test_public_opinion_configuration_only_saves_its_own_switch(admin_client, monkeypatch):
+    saved = {}
+
+    def record(values):
+        saved.update(values)
+        return {"PUBLIC_OPINION_CONCLUSION_ENABLED"}
+
+    monkeypatch.setattr("config.supervisor_views.update_runtime_config", record)
+
+    response = admin_client.post(
+        "/admin/runtime/configuration/",
+        {
+            "config_scope": "public_opinion",
+            "PUBLIC_OPINION_CONCLUSION_ENABLED": "true",
+            "return_to": "/admin/",
+        },
+    )
+
+    assert response.status_code == 302
+    assert saved == {
+        "config_scope": "public_opinion",
+        "PUBLIC_OPINION_CONCLUSION_ENABLED": "true",
+        "return_to": "/admin/",
+    }
+    response_messages = " ".join(str(message) for message in get_messages(response.wsgi_request))
+    assert "舆情报告 Worker" in response_messages
+    assert "Web 服务" not in response_messages
 
 
 @pytest.mark.django_db

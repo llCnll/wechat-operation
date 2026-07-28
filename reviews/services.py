@@ -118,6 +118,7 @@ DEFAULT_REVIEW_PROMPT_VERSION = REVIEW_PROMPT_VERSION
 MUTE_VERIFY_READBACK_AT_SECONDS = (2, 5, 8, 10)
 MUTE_VERIFY_MAX_WAIT_SECONDS = 20
 MUTE_VERIFY_REQUEST_OVERHEAD_SECONDS = 0.5
+MUTE_VERIFY_TARGET_TOLERANCE_SECONDS = 120
 PUBLIC_REPLY_SUPPRESSION_RISK_LABELS = frozenset(
     {
         "TRAFFIC_DIVERSION",
@@ -288,6 +289,17 @@ def _author_source_appid(post: OriginalPost, source) -> str:
     return appid
 
 
+def _mute_target_reached(state: dict, expected_end_time: int | None) -> bool:
+    """Confirm this write's target, never merely a pre-existing longer mute."""
+    if not isinstance(expected_end_time, int) or expected_end_time <= 0:
+        return False
+    observed_end_time = state.get("local_block_end_time")
+    return (
+        isinstance(observed_end_time, int)
+        and abs(observed_end_time - expected_end_time) <= MUTE_VERIFY_TARGET_TOLERANCE_SECONDS
+    )
+
+
 def _read_mute_state_with_verification(
     source,
     post: OriginalPost,
@@ -331,7 +343,7 @@ def _read_mute_state_with_verification(
         )
         latest_state = _author_mute_state(payload, source_appid=source_appid)
         if action == RecommendedAction.MUTE:
-            if latest_state["local_block_end_time"] >= (expected_end_time or 0):
+            if _mute_target_reached(latest_state, expected_end_time):
                 break
         elif latest_state["local_block_end_time"] <= int(timezone.now().timestamp()):
             break
@@ -387,7 +399,7 @@ def _read_author_mute_state_with_verification(
         )
         latest_state = _author_mute_state(payload, source_appid=status.source_appid)
         if action == RecommendedAction.MUTE:
-            if latest_state["local_block_end_time"] >= (expected_end_time or 0):
+            if _mute_target_reached(latest_state, expected_end_time):
                 break
         elif latest_state["local_block_end_time"] <= int(timezone.now().timestamp()):
             break
@@ -468,9 +480,7 @@ def execute_author_operation(
     after_state: dict = {}
     try:
         now_timestamp = int(timezone.now().timestamp())
-        if action == RecommendedAction.MUTE and before_state["local_block_end_time"] > now_timestamp:
-            result_code, error_summary, after_state = "ALREADY_APPLIED", "当前游戏已处于禁言状态", before_state
-        elif action == RecommendedAction.UNMUTE and before_state["local_block_end_time"] <= now_timestamp:
+        if action == RecommendedAction.UNMUTE and before_state["local_block_end_time"] <= now_timestamp:
             result_code, error_summary, after_state = "ALREADY_APPLIED", "当前游戏未处于禁言状态", before_state
         else:
             write_error: Exception | None = None
@@ -495,7 +505,7 @@ def execute_author_operation(
             if write_error is not None:
                 error_summary = f"上游调用失败，回读状态已同步：{type(write_error).__name__}"[:500]
             elif action == RecommendedAction.MUTE:
-                if after_state["local_block_end_time"] >= payload["mute_end_time"]:
+                if _mute_target_reached(after_state, payload["mute_end_time"]):
                     result_code, error_summary = "OK", ""
                 else:
                     error_summary = "禁言状态回读与预期不一致"
@@ -1707,10 +1717,6 @@ def execute_confirmed_operation(
             timezone.now().timestamp()
         ):
             error_summary = "当前游戏未处于禁言状态"
-        elif action == RecommendedAction.MUTE and before_state["local_block_end_time"] > int(
-            timezone.now().timestamp()
-        ):
-            error_summary = "当前游戏已处于禁言状态"
         else:
             write_error: Exception | None = None
             result = None
@@ -1740,7 +1746,7 @@ def execute_confirmed_operation(
                     )
                 elif action == RecommendedAction.MUTE:
                     expected_end_time = payload["mute_end_time"]
-                    if after_state["local_block_end_time"] < expected_end_time:
+                    if not _mute_target_reached(after_state, expected_end_time):
                         error_summary = "禁言状态回读与预期不一致"
                     else:
                         result_code = "OK"

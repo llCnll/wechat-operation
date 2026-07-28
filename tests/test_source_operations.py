@@ -1,9 +1,15 @@
-import pytest
 from unittest.mock import Mock
 
+import pytest
+
 from config.cdp import CdpTargetUnavailableError
-from jobs.adapters import PluginSessionExpiredError, SourceBusinessDeletedError, SourceContractError
-from posts.source_client import CdpGameCircleClient
+from jobs.adapters import (
+    PluginSessionExpiredError,
+    SourceBusinessDeletedError,
+    SourceContractError,
+    SourceTransportError,
+)
+from posts.source_client import BLOCKED_USER_LIST_PAGE_SIZE_REJECTED, CdpGameCircleClient
 from reporting.source_client import CdpGameCircleMetricClient
 
 
@@ -125,7 +131,7 @@ def test_author_detail_uses_the_fixed_user_query_contract(monkeypatch):
         (
             "getuserdetail",
             {
-                "data": '{"query": 1, "topic_req": {"order_by": 1, "is_desc": true}, "openid": "author-openid", "page": 0, "page_size": 10, "need_user_info": true}'
+                "data": '{"query": 1, "topic_req": {"order_by": 1, "is_desc": true}, "openid": "author-openid", "page": 0, "page_size": 3, "need_user_info": true}'
             },
         )
     ]
@@ -137,6 +143,32 @@ def test_author_detail_rejects_an_unbounded_identity_before_source_access(monkey
 
     with pytest.raises(SourceContractError, match="作者用户 ID 无效"):
         client.get_author_detail("x" * 256)
+
+
+def test_blocked_user_list_only_classifies_an_explicit_page_size_error_for_fallback(monkeypatch):
+    client = object.__new__(CdpGameCircleClient)
+    monkeypatch.setattr(
+        client,
+        "_get_gameopenmpwap",
+        lambda *_args, **_kwargs: {"errcode": 400, "errmsg": "invalid page_size"},
+    )
+
+    with pytest.raises(SourceContractError) as exc_info:
+        client.list_blocked_users(page=0, page_size=500)
+
+    assert exc_info.value.safe_reason == BLOCKED_USER_LIST_PAGE_SIZE_REJECTED
+
+
+def test_blocked_user_list_does_not_treat_a_platform_failure_as_pagination_rejection(monkeypatch):
+    client = object.__new__(CdpGameCircleClient)
+    monkeypatch.setattr(
+        client,
+        "_get_gameopenmpwap",
+        lambda *_args, **_kwargs: {"errcode": -1, "errmsg": "system busy"},
+    )
+
+    with pytest.raises(SourceTransportError, match="平台禁言名单读取失败"):
+        client.list_blocked_users(page=0, page_size=500)
 
 
 def test_management_detail_deleted_error_is_mapped_to_business_deletion(monkeypatch):

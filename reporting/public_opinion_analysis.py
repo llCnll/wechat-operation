@@ -11,13 +11,44 @@ import jieba
 
 from reviews.models import ContentCategory, risk_label_display
 
-ANALYSIS_VERSION = "public-opinion-v1"
+LEGACY_ANALYSIS_VERSION = "public-opinion-v1"
+ANALYSIS_VERSION = "public-opinion-v2"
 WORD_TEMPLATE_VERSION = "public-opinion-word-v1"
 REPORT_STATUS_RULE_VERSION = "original-post-normal-v1"
 MIN_ENGAGEMENT_VIEWS = 20
 MAX_REPRESENTATIVE_POSTS = 10
 MAX_OBSERVATIONS = 5
 SHANGHAI = ZoneInfo("Asia/Shanghai")
+
+
+@dataclass(frozen=True)
+class ReportAlgorithm:
+    """Published report contract; never silently fall forward on a rerun."""
+
+    version: str
+    supports_daily_metrics: bool
+    supports_model_conclusion: bool
+
+
+REPORT_ALGORITHMS = {
+    LEGACY_ANALYSIS_VERSION: ReportAlgorithm(
+        version=LEGACY_ANALYSIS_VERSION,
+        supports_daily_metrics=False,
+        supports_model_conclusion=False,
+    ),
+    ANALYSIS_VERSION: ReportAlgorithm(
+        version=ANALYSIS_VERSION,
+        supports_daily_metrics=True,
+        supports_model_conclusion=True,
+    ),
+}
+
+
+def report_algorithm(version: str) -> ReportAlgorithm:
+    try:
+        return REPORT_ALGORITHMS[version]
+    except KeyError as exc:
+        raise ValueError("舆情报告算法版本不可用") from exc
 
 SENTIMENT_LABELS = {
     "POSITIVE": "正面",
@@ -98,6 +129,9 @@ class ReportSourceInput:
     ai_sentiment: str
     ai_feedback_value: str
     ai_risk_summary: tuple[dict[str, object], ...]
+    ai_feedback_state: str = "MISSING"
+    topics: tuple[str, ...] = ()
+    official_identity: str = "PLAYER"
 
     @property
     def text(self) -> str:
@@ -121,11 +155,20 @@ def normalize_sentiment(value: str) -> str | None:
 def normalize_feedback_value(value: str) -> str | None:
     if not value.strip():
         return None
-    return FEEDBACK_VALUE_LABELS.get(value.strip().upper(), "未归类")
+    return FEEDBACK_VALUE_LABELS.get(value.strip().upper())
 
 
 def feedback_value_display(value: object) -> str:
-    return normalize_feedback_value(value) if isinstance(value, str) else "未归类"
+    """Display the closed feedback enum across current and historical snapshots."""
+    if not isinstance(value, str):
+        return ""
+    candidate = value.strip()
+    if not candidate:
+        return ""
+    return FEEDBACK_VALUE_LABELS.get(candidate.upper()) or next(
+        (label for label in FEEDBACK_VALUE_LABELS.values() if candidate == label),
+        "",
+    )
 
 
 def _topic_keys(text: str) -> tuple[str, ...]:
@@ -165,7 +208,7 @@ def _safe_count(value: int | None) -> int:
 
 
 def _representative_rows(
-    interactions: tuple[InteractionInput, ...],
+    interactions: tuple[InteractionInput, ...], *, identities: dict[int, str] | None = None,
 ) -> tuple[list[dict], list[dict]]:
     rows = []
     for item in interactions:
@@ -185,6 +228,7 @@ def _representative_rows(
                 "engagement_rate": round(total / max(views, 1), 6),
                 "engagement_rate_percent": round(total / max(views, 1) * 100, 2),
                 "captured_at": item.captured_at.isoformat(),
+                "official_identity": (identities or {}).get(item.topic_id, "PLAYER"),
             }
         )
     total_ranked = sorted(
@@ -233,7 +277,12 @@ def _observations(
     observations: list[dict[str, object]] = []
     if total and ai_count < total:
         observations.append(
-            {"kind": "AI_COVERAGE", "message": f"AI 评估覆盖 {ai_count}/{total}。", "verify": True}
+            {
+                "kind": "AI_COVERAGE",
+                "message": f"AI 评估覆盖 {ai_count}/{total}。",
+                "verify": True,
+                "verification_note": "核对未覆盖帖子是否集中在特定日期、内容类型或采集异常，避免将已覆盖样本直接视为全量玩家反馈。",
+            }
         )
     current_mapped = sum(sentiment_counts.values())
     baseline_mapped = sum(baseline_sentiments.values())
@@ -249,8 +298,34 @@ def _observations(
                     "kind": "SENTIMENT_CHANGE",
                     "message": f"负面情绪占比较上期{direction} {abs(delta):.0%}。",
                     "verify": True,
+                    "verification_note": "抽样查看本期与基线中可映射情绪的帖子，确认覆盖范围和内容结构可比，再解读占比变化。",
                 }
             )
+    player_ranked = [row for row in total_ranked if row.get("official_identity") == "PLAYER"]
+    official_ranked = [row for row in total_ranked if row.get("official_identity") != "PLAYER"]
+    if player_ranked and player_ranked[0]["interaction_total"]:
+        observations.append(
+            {
+                "kind": "PLAYER_HIGH_INTERACTION",
+                "message": (
+                    f"玩家内容帖子 {player_ranked[0]['topic_id']} 的互动总量为 "
+                    f"{player_ranked[0]['interaction_total']}。"
+                ),
+                "verify": True,
+                "verification_note": "查看该玩家帖的内容、发布时间和互动构成，确认互动是否对应持续玩家关注，而非单次活动、转发或异常流量。",
+            }
+        )
+    if official_ranked and official_ranked[0]["interaction_total"]:
+        observations.append(
+            {
+                "kind": "OFFICIAL_HIGH_INTERACTION",
+                "message": (
+                    f"官方内容帖子 {official_ranked[0]['topic_id']} 的互动总量为 "
+                    f"{official_ranked[0]['interaction_total']}；已按锁定身份单列，不纳入玩家关注或反馈信号。"
+                ),
+                "verify": False,
+            }
+        )
     for key, count in sorted(topic_counts.items(), key=lambda item: (-item[1], item[0]))[:2]:
         if count:
             observations.append(
@@ -258,20 +333,13 @@ def _observations(
                     "kind": "TOPIC_VOLUME",
                     "message": f"{TOPIC_LABELS[key]}主题命中 {count} 帖。",
                     "verify": True,
+                    "verification_note": "抽样核对命中帖子与主题词的语义相关性；同一帖子可命中多个主题，主题计数不能直接与帖子总量比较。",
                 }
             )
-    if total_ranked and total_ranked[0]["interaction_total"]:
-        observations.append(
-            {
-                "kind": "HIGH_INTERACTION",
-                "message": f"帖子 {total_ranked[0]['topic_id']} 的互动总量为 {total_ranked[0]['interaction_total']}。",
-                "verify": True,
-            }
-        )
     return observations[:MAX_OBSERVATIONS]
 
 
-def validate_result_payload(payload: dict[str, object]) -> None:
+def validate_result_payload(payload: dict[str, object], *, version: str = ANALYSIS_VERSION) -> None:
     required = {
         "schema_version",
         "summary",
@@ -287,9 +355,12 @@ def validate_result_payload(payload: dict[str, object]) -> None:
         "observations",
         "limitations",
     }
+    algorithm = report_algorithm(version)
+    if algorithm.supports_daily_metrics:
+        required |= {"player_topics", "daily_metrics", "conclusion"}
     if set(payload) != required:
         raise ValueError("舆情报告结果结构无效")
-    if payload["schema_version"] != ANALYSIS_VERSION:
+    if payload["schema_version"] != version:
         raise ValueError("舆情报告结果版本无效")
 
 
@@ -300,12 +371,15 @@ def build_report_result(
     interactions: tuple[InteractionInput, ...],
     source_locked_at: datetime,
     metrics_as_of: datetime,
+    daily_metrics: tuple[dict[str, object], ...] = (),
+    version: str = ANALYSIS_VERSION,
 ) -> tuple[dict[str, object], dict[str, object]]:
     categories: Counter[str] = Counter()
     sentiments: Counter[str] = Counter()
     baseline_sentiments: Counter[str] = Counter()
     feedback: Counter[str] = Counter()
     risks: Counter[str] = Counter()
+    player_topics: Counter[str] = Counter()
     topics: Counter[str] = Counter()
     daily: dict[str, dict[str, object]] = defaultdict(
         lambda: {"post_count": 0, "sentiment_covered": 0, "topic_hits": 0}
@@ -314,6 +388,7 @@ def build_report_result(
     text_missing = 0
     ai_count = 0
     sentiment_covered = 0
+    feedback_missing = feedback_invalid = feedback_valid = 0
     for source in current:
         if not source.text:
             text_missing += 1
@@ -326,8 +401,14 @@ def build_report_result(
             sentiments[sentiment] += 1
             sentiment_covered += 1
         feedback_value = normalize_feedback_value(source.ai_feedback_value)
-        if feedback_value:
+        if source.ai_feedback_state == "INVALID":
+            feedback_invalid += 1
+        elif feedback_value:
             feedback[feedback_value] += 1
+            feedback_valid += 1
+        else:
+            feedback_missing += 1
+        player_topics.update(source.topics)
         for risk in source.ai_risk_summary:
             label = risk.get("label") if isinstance(risk, dict) else ""
             if isinstance(label, str) and label:
@@ -344,7 +425,8 @@ def build_report_result(
         sentiment = normalize_sentiment(source.ai_sentiment)
         if sentiment:
             baseline_sentiments[sentiment] += 1
-    total_ranked, rate_ranked = _representative_rows(interactions)
+    identities = {source.topic_id: source.official_identity for source in current}
+    total_ranked, rate_ranked = _representative_rows(interactions, identities=identities)
     titles = {source.topic_id: (source.title[:120] or "（无标题）") for source in current}
     for row in (*total_ranked, *rate_ranked):
         row["title"] = titles.get(row["topic_id"], "")
@@ -361,13 +443,22 @@ def build_report_result(
         limitations.append("部分帖子缺少互动快照，互动榜单仅使用可用快照。")
     if not baseline_available:
         limitations.append("没有可用的上一等长周期基线，热词不展示变化值。")
+    if feedback_invalid:
+        limitations.append("部分 AI 反馈价值不符合受控枚举，已作为无效覆盖缺口排除。")
+    if version == ANALYSIS_VERSION and not daily_metrics:
+        limitations.append("没有可用的已验证日指标快照，无法并列观察运营指标趋势。")
     quality = {
         "source_count": total,
         "baseline_count": len(baseline),
         "text_missing_count": text_missing,
         "ai_assessment_count": ai_count,
         "sentiment_covered_count": sentiment_covered,
+        "feedback_value_valid_count": feedback_valid,
+        "feedback_value_missing_count": feedback_missing,
+        "feedback_value_invalid_count": feedback_invalid,
         "interaction_snapshot_count": interaction_count,
+        "daily_metric_snapshot_count": len(daily_metrics),
+        "daily_metric_source_count": len({item.get("source") for item in daily_metrics if isinstance(item, dict)}),
         "interaction_first_captured_at": min(snapshot_times).isoformat()
         if snapshot_times
         else None,
@@ -376,8 +467,8 @@ def build_report_result(
         "source_locked_at": source_locked_at.isoformat(),
         "metrics_as_of": metrics_as_of.isoformat(),
     }
-    payload = {
-        "schema_version": ANALYSIS_VERSION,
+    payload: dict[str, object] = {
+        "schema_version": version,
         "summary": {"source_count": total, "feedback_values": _rows(feedback)},
         "data_quality": quality,
         "categories": _rows(categories, dict(ContentCategory.choices)),
@@ -398,5 +489,7 @@ def build_report_result(
         ),
         "limitations": limitations,
     }
-    validate_result_payload(payload)
+    if report_algorithm(version).supports_daily_metrics:
+        payload.update({"player_topics": _rows(player_topics), "daily_metrics": list(daily_metrics), "conclusion": {"status": "PENDING", "items": []}})
+    validate_result_payload(payload, version=version)
     return payload, quality

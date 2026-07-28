@@ -24,6 +24,7 @@ from .models import (
     PublicOpinionReportSource,
 )
 from .public_opinion_analysis import feedback_value_display
+from .public_opinion_conclusion import conclusion_failure_label
 from .public_opinion_jobs import (
     create_public_opinion_report as create_report_job,
 )
@@ -33,6 +34,12 @@ from .public_opinion_jobs import (
 )
 from .public_opinion_jobs import (
     rerun_public_opinion_report as rerun_report_job,
+)
+from .public_opinion_presentation import (
+    present_conclusion,
+    present_daily_metrics,
+    present_observations,
+    summarize_daily_metrics,
 )
 from .public_opinion_word import render_public_opinion_word
 from .services import (
@@ -189,7 +196,20 @@ def _report_payload_for_display(payload: dict) -> dict:
             for item in representatives.get(key) or []
             if isinstance(item, dict)
         ]
-    return {**payload, "summary": summary, "representative_posts": representatives}
+    daily_metrics = present_daily_metrics(payload.get("daily_metrics"))
+    conclusion = present_conclusion(payload.get("conclusion"), payload)
+    if conclusion.get("status") == "UNAVAILABLE":
+        conclusion["error_label"] = conclusion_failure_label(conclusion.get("error_code"))
+    observations = present_observations(payload)
+    return {
+        **payload,
+        "summary": summary,
+        "representative_posts": representatives,
+        "daily_metrics": daily_metrics,
+        "daily_metric_summaries": summarize_daily_metrics(daily_metrics),
+        "observations": observations,
+        "conclusion": conclusion,
+    }
 
 
 @login_required

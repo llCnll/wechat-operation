@@ -1441,6 +1441,14 @@ class GameCircleSessionService:
                                     openid, timeout_seconds=timeout_seconds
                                 )
                             }
+                        if request.method == "POSTS_LIST_BLOCKED_USERS":
+                            page = request.params.get("page")
+                            page_size = request.params.get("page_size")
+                            if not isinstance(page, int) or page < 0:
+                                raise SourceContractError("禁言名单页码无效")
+                            if not isinstance(page_size, int) or not 1 <= page_size <= 500:
+                                raise SourceContractError("禁言名单分页大小无效")
+                            return client.list_blocked_users(page=page, page_size=page_size)
                         if request.method == "POSTS_OPERATION":
                             payload = request.params.get("payload")
                             if not request.operation_id or not isinstance(payload, dict):

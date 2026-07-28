@@ -2,5 +2,20 @@
 {% block title %}帖子详情 | 游戏圈运营{% endblock %}
 {% block content %}
 <a class="back-link" href="{% url 'operations-dashboard' %}">返回内容管理</a>
-<section class="detail-grid"><article class="post-card"><p class="eyebrow">ORIGINAL POST · #{{ post.topic_id }}</p><h1>{{ post.title|default:"未命名帖子" }}</h1><p class="published">发布于 {{ post.publish_time|date:"Y-m-d H:i"|default:"未知" }}</p><div class="post-content">{{ post.content_text|linebreaks }}{% if post.media.exists %}<section class="media-section"><p>附件图片 · {{ post.media.count }} 张</p><div class="media-gallery">{% for media in post.media.all %}<a href="{{ media.url }}" target="_blank" rel="noopener noreferrer" title="在新标签打开原图"><img src="{{ media.url }}" alt="帖子图片 {{ forloop.counter }}" loading="lazy" onerror="this.closest('a').hidden=true"></a>{% endfor %}</div></section>{% endif %}</div></article><aside class="side-card"><p class="eyebrow">POST METRICS</p><h2>帖子指标</h2><div class="metric"><span>浏览</span><strong>{{ post.latest_view_count|default:"--" }}</strong></div><div class="metric"><span>点赞</span><strong>{{ post.latest_love_count|default:"--" }}</strong></div><div class="metric"><span>评论</span><strong>{{ post.latest_reply_count|default:"--" }}</strong></div><hr><p class="muted">评论正文不会被采集或展示。</p><button disabled>审核与处置即将接入</button></aside></section>
+<section class="detail-grid">
+  <article class="post-card">
+    <p class="eyebrow">ORIGINAL POST · #{{ post.topic_id }}</p>
+    <h1>{{ post.title|default:"未命名帖子" }}</h1>
+    <div class="post-author-line"><span>{{ post.author_nick_name|default:"作者未知" }}</span>{% include "posts/includes/official_identity_badge.html" with identity=post.official_identity %}</div>
+    <p class="published">发布于 {{ post.publish_time|date:"Y-m-d H:i"|default:"未知" }} <span class="published-game">所属游戏：{{ game_name|default:"游戏未命名" }}</span></p>
+    <div class="post-content">
+      {{ post.content_text|linebreaks }}
+      {% if post.topics %}<p class="post-topics">{% for topic in post.topics %}<span>#{{ topic }}</span>{% endfor %}</p>{% endif %}
+      {% if post.media.exists %}
+      <section class="media-section"><p>附件图片 · {{ post.media.count }} 张</p><div class="media-gallery">{% for media in post.media.all %}<a href="{{ media.url }}" target="_blank" rel="noopener noreferrer" title="在新标签打开原图"><img src="{{ media.url }}" alt="帖子图片 {{ forloop.counter }}" loading="lazy" onerror="this.closest('a').hidden=true"></a>{% endfor %}</div></section>
+      {% endif %}
+    </div>
+  </article>
+  <aside class="side-card"><p class="eyebrow">POST METRICS</p><h2>帖子指标</h2><div class="metric"><span>浏览</span><strong>{{ post.latest_view_count|default:"--" }}</strong></div><div class="metric"><span>点赞</span><strong>{{ post.latest_love_count|default:"--" }}</strong></div><div class="metric"><span>评论</span><strong>{{ post.latest_reply_count|default:"--" }}</strong></div><hr><p class="muted">评论正文不会被采集或展示。</p><button disabled>审核与处置即将接入</button></aside>
+</section>
 {% endblock %}

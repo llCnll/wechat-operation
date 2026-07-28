@@ -11,7 +11,7 @@
 
 #### Scenario: 时间桶内首次调度
 - **WHEN** Scheduler Worker 运行并进入已启用的帖子生产者尚未处理的北京时间 15 分钟逻辑槽
-- **THEN** 系统 SHALL 先幂等创建一个上限为 20 的 `STATUS_SYNC` 任务，再幂等创建一个回看最近 30 分钟、页大小为 20 的 `SCHEDULED_INGEST_WINDOW` 任务
+- **THEN** 系统 SHALL 先幂等创建一个上限为 20 的 `STATUS_SYNC` 任务，再幂等创建一个回看最近 30 分钟、页大小为 100 的 `SCHEDULED_INGEST_WINDOW` 任务
 
 #### Scenario: 重复检查或重复启动
 - **WHEN** 一个或多个 Scheduler Worker 在同一已启用生产者逻辑槽内重复检查或重启
@@ -60,7 +60,7 @@ Scheduler SHALL 为同一已完成业务周使用默认周一 `17:30`、周二 `
 
 #### Scenario: 超过回看窗口的空洞
 - **WHEN** 帖子生产者停止超过 30 分钟且其规则使用默认 `SKIP` 策略
-- **THEN** 系统 SHALL 不自动扩大采集窗口，运营人员 MUST 在系统配置首页的帖子采集 Worker 节点创建受控历史补采窗口；直接管理命令仅用于诊断
+- **THEN** 系统 SHALL 不自动扩大采集窗口，运营人员 MUST 在系统配置首页帖子采集生产者的立即执行弹窗创建受控历史补采窗口；直接管理命令仅用于诊断
 
 ### Requirement: 一次性作者状态回填任务的消费边界
 系统 SHALL 将 `AUTHOR_MUTE_STATUS_BACKFILL_V2` 明确归类为一次性 Job，并仅允许既有人工补采 Worker 消费。入队入口 SHALL 只创建或复用 V2 固定幂等键的后台任务，不得建立 CDP 会话、认领任务或调用上游。V2 任务不得加入 Scheduler 或实时采集 Worker 的消费范围，且其失败重试上限 SHALL 为零。`AUTHOR_MUTE_STATUS_BACKFILL` 为不兼容的 V1 类型：系统不迁移、恢复或认领该类型。

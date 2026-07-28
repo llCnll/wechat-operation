@@ -14,6 +14,7 @@ from jobs.models import BackgroundJob
 from jobs.services import JobDeferred
 from jobs.task_types import (
     AUTHOR_MUTE_STATUS_BACKFILL_V2_TASK,
+    POST_TOPIC_BACKFILL_V1_TASK,
     LEGACY_INGEST_WINDOW_TASK,
     FILTERED_POST_REFRESH_TASK,
     MANUAL_CURRENT_INGEST_WINDOW_TASK,
@@ -25,6 +26,7 @@ from jobs.task_types import (
 from jobs.once.author_mute_status_backfill import (
     author_mute_status_backfill_handler,
 )
+from jobs.once.backfill_post_topics import post_topic_backfill_handler
 from reviews.models import ReviewStatus
 
 from .ingestion import ingest_page
@@ -336,4 +338,5 @@ BACKFILL_INGESTION_WORKER_HANDLERS = {
     FILTERED_POST_REFRESH_TASK: filtered_post_refresh_handler,
     METRICS_REFRESH_WINDOW_TASK: refresh_metrics_window_handler,
     AUTHOR_MUTE_STATUS_BACKFILL_V2_TASK: author_mute_status_backfill_handler,
+    POST_TOPIC_BACKFILL_V1_TASK: post_topic_backfill_handler,
 }
