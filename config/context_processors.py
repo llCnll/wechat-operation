@@ -559,6 +559,40 @@ def admin_console_overview(request):
     active_scope = ActiveGameScope.objects.select_related("active_game").filter(pk=1).first()
     game_summary = ManagedGame.objects.aggregate(last_synced_at=Max("last_synced_at"))
     runtime_config = public_runtime_config()
+    today = timezone.localdate()
+    yesterday = today - timedelta(days=1)
+    manual_daily_metric_quick_ranges = (
+        {"label": "昨天", "start_date": yesterday, "end_date": yesterday},
+        {
+            "label": "近 7 天",
+            "start_date": yesterday - timedelta(days=6),
+            "end_date": yesterday,
+        },
+        {
+            "label": "近 30 天",
+            "start_date": yesterday - timedelta(days=29),
+            "end_date": yesterday,
+        },
+    )
+    last_completed_week_end = today - timedelta(days=today.weekday() + 1)
+    last_completed_week_start = last_completed_week_end - timedelta(days=6)
+    manual_weekly_metric_quick_ranges = (
+        {
+            "label": "上周",
+            "start_date": last_completed_week_start,
+            "end_date": last_completed_week_end,
+        },
+        {
+            "label": "近 4 周",
+            "start_date": last_completed_week_start - timedelta(weeks=3),
+            "end_date": last_completed_week_end,
+        },
+        {
+            "label": "近 12 周",
+            "start_date": last_completed_week_start - timedelta(weeks=11),
+            "end_date": last_completed_week_end,
+        },
+    )
     scheduled_producers = []
     active_rules = ScheduledProducerRuleConfig.objects.filter(archived_at__isnull=True).order_by(
         "pk"
@@ -724,6 +758,8 @@ def admin_console_overview(request):
             "running_job_count": BackgroundJob.objects.filter(status=JobStatus.RUNNING).count(),
             "failed_job_count": BackgroundJob.objects.filter(status=JobStatus.FAILED).count(),
             "runtime_config": runtime_config,
+            "manual_daily_metric_quick_ranges": manual_daily_metric_quick_ranges,
+            "manual_weekly_metric_quick_ranges": manual_weekly_metric_quick_ranges,
             "scheduled_producers": scheduled_producers,
             "services": services,
             "supervisor_error": supervisor_error,

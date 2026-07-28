@@ -12,7 +12,7 @@ from django.utils import timezone
 
 from config.game_circle_ipc import GameCircleIpcError, GameCirclePostClient
 from jobs.models import BackgroundJob, JobStatus
-from jobs.services import EnqueueResult, JobDeferred, JobTerminalError
+from jobs.services import EnqueueResult, JobDeferred, JobTerminalError, enqueue_active_coalesced_job
 from jobs.task_types import (
     AUTHOR_MUTE_STATUS_REFRESH_TASK,
     PERMANENT_MUTE_RENEWAL_TASK,
@@ -61,6 +61,17 @@ def enqueue_permanent_mute_renewal(
     else:
         slot = f"manual-{uuid4().hex}"
     key = _renewal_key(scope, slot)
+    if source == "manual":
+        return enqueue_active_coalesced_job(
+            task_type=PERMANENT_MUTE_RENEWAL_TASK,
+            idempotency_key=key,
+            active_coalescing_key=(
+                f"permanent-mute:renewal:manual:{scope.target_appid}:v{scope.scope_version}"
+            ),
+            parameter_summary={"source": source},
+            checkpoint={"execution_scope": scope.as_checkpoint(), "last_status_id": 0},
+            max_retries=3,
+        )
     job, created = BackgroundJob.objects.get_or_create(
         idempotency_key=key,
         defaults={

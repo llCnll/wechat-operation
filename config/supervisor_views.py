@@ -2,22 +2,17 @@
 
 from __future__ import annotations
 
-from datetime import timedelta
-
 from django.contrib import messages
 from django.contrib.admin.views.decorators import staff_member_required
 from django.http import JsonResponse
 from django.shortcuts import redirect
-from django.utils import timezone
 from django.views.decorators.http import require_GET, require_POST
 
 from config.game_circle_ipc import GameCircleIpcClient, GameCircleIpcError
 from config.runtime_config import affected_services, display_service_names, update_runtime_config
 from config.supervisor import SupervisorClient, SupervisorUnavailableError
-from jobs.game_circle_keepalive import enqueue_keepalive
 from jobs.manual_producers import run_manual_producer
 from jobs.models import ScheduledProducerRuleConfig
-from jobs.permanent_mute import enqueue_permanent_mute_renewal
 from jobs.scheduled_producers import (
     DEFINITION_BY_KEY,
     create_rule_configuration,
@@ -26,13 +21,10 @@ from jobs.scheduled_producers import (
     update_producer_enabled,
     update_rule_configuration,
 )
-from posts.game_catalog import active_game_appid, set_active_game, sync_authorized_managed_games
-from posts.ingestion_jobs import SHANGHAI, enqueue_manual_ingestion_window
-from posts.models import ManagedGame
+from posts.game_catalog import set_active_game, sync_authorized_managed_games
 
 INGESTION_WORKER_SERVICES = ("ingestion", "backfill_ingestion")
 INGESTION_WORKER_ACTIONS = frozenset(("start", "stop", "restart"))
-MAX_MANUAL_INGESTION_HOURS = 31 * 24
 SESSION_CONTROL_MESSAGES = {
     "CHECK_LOGIN": {
         "completed": "已检查外层会话；不会切换游戏或建立 Frame。",
@@ -103,51 +95,6 @@ def control_ingestion_workers(request, action: str):
 
 @staff_member_required
 @require_POST
-def enqueue_manual_ingestion(request):
-    """Create a bounded historical ingestion task for the backfill Worker."""
-    appid = request.POST.get("appid", "").strip()
-    try:
-        hours = int(request.POST.get("hours", ""))
-    except (TypeError, ValueError):
-        messages.error(request, "补采时长必须是正整数小时。")
-        return redirect(_return_to(request))
-
-    if not 1 <= hours <= MAX_MANUAL_INGESTION_HOURS:
-        messages.error(request, f"补采时长须在 1 至 {MAX_MANUAL_INGESTION_HOURS} 小时之间。")
-        return redirect(_return_to(request))
-
-    try:
-        active_game_appid(appid, persist_default=False)
-    except ValueError as exc:
-        messages.error(request, str(exc))
-        return redirect(_return_to(request))
-    game = ManagedGame.objects.filter(appid=appid).only("appid", "name").first()
-    if game is None:
-        messages.error(request, "当前操作游戏不在本地目录中。")
-        return redirect(_return_to(request))
-
-    end_at = timezone.now().astimezone(SHANGHAI).replace(second=0, microsecond=0)
-    start_at = end_at - timedelta(hours=hours)
-    try:
-        result = enqueue_manual_ingestion_window(
-            appid=game.appid,
-            start_time=int(start_at.timestamp()),
-            end_time=int(end_at.timestamp()),
-            page_size=20,
-        )
-    except ValueError as exc:
-        messages.error(request, str(exc))
-    else:
-        outcome = "已创建" if result.created else "已存在"
-        messages.success(
-            request,
-            f"{game.name}最近 {hours} 小时的历史补采任务{outcome}（任务 #{result.job.pk}）。",
-        )
-    return redirect(_return_to(request))
-
-
-@staff_member_required
-@require_POST
 def set_active_game_scope(request):
     appid = request.POST.get("appid", "").strip()
     try:
@@ -173,36 +120,6 @@ def check_outer_session(request):
 @require_POST
 def build_current_game_frame(request):
     _run_session_control(request, "BUILD_CURRENT_GAME_FRAME")
-    return redirect(_return_to(request))
-
-
-@staff_member_required
-@require_POST
-def enqueue_session_keepalive_request(request):
-    try:
-        result = enqueue_keepalive(trigger="manual")
-    except ValueError as exc:
-        messages.error(request, str(exc))
-    else:
-        outcome = "已创建" if result.created else "已复用"
-        messages.success(request, f"当前游戏 Frame 保活任务{outcome}。")
-    return redirect(_return_to(request))
-
-
-@staff_member_required
-@require_POST
-def enqueue_permanent_mute_renewal_request(request):
-    """Queue maintenance; source reads and writes remain in its Worker."""
-    try:
-        result = enqueue_permanent_mute_renewal(source="manual")
-    except ValueError as exc:
-        messages.error(request, str(exc))
-    else:
-        outcome = "已创建" if result.created else "已复用"
-        messages.success(
-            request,
-            f"永久禁言续期任务{outcome}（任务 #{result.job.pk}）；Worker 未运行时任务会等待启动。",
-        )
     return redirect(_return_to(request))
 
 

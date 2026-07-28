@@ -439,7 +439,7 @@ AI 评估中的单项风险证据，可保存多段命中内容。
 | --- | --- | --- |
 | `SCHEDULED_INGEST_WINDOW` | Scheduler 创建的 30 分钟断点帖子采集。 | 实时采集 Worker（Supervisor 服务 `ingestion`） |
 | `STATUS_SYNC` | 回读一批待审核帖的上游状态与互动数据。 | 实时采集 Worker（Supervisor 服务 `ingestion`） |
-| `MANUAL_INGEST_WINDOW` | 从系统配置首页创建的指定游戏和最近小时数断点帖子采集。 | 人工补采 Worker（Supervisor 服务 `backfill_ingestion`） |
+| `MANUAL_INGEST_WINDOW` | 从自动任务生产者“帖子采集 → 立即执行”的历史补采模式创建；使用当前操作游戏和最近小时数。 | 人工补采 Worker（Supervisor 服务 `backfill_ingestion`） |
 | `MANUAL_CURRENT_INGEST_WINDOW` | 自动任务生产者手动运行的固定最近 30 分钟采集；入队时冻结游戏范围。 | 人工补采 Worker（Supervisor 服务 `backfill_ingestion`） |
 | `FILTERED_POST_REFRESH` | 内容管理当前筛选条件的异步状态、指标和作者投影刷新；只保存脱敏筛选谓词与游标。 | 人工补采 Worker（Supervisor 服务 `backfill_ingestion`） |
 | `METRICS_REFRESH_WINDOW` | 人工触发的日期范围原创帖互动回读，只新增浏览、点赞、评论和分享快照；单帖传输或契约失败会记录到 checkpoint 样本并继续。 | 人工补采 Worker（Supervisor 服务 `backfill_ingestion`） |
