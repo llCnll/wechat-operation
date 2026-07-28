@@ -63,7 +63,7 @@ def test_scheduled_enqueue_is_fixed_game_and_idempotent_in_one_time_bucket():
         "appid": "wx6d2454a8afcd9706",
         "start_time": int(_shanghai_time(9, 45).timestamp()),
         "end_time": int(_shanghai_time(10, 15).timestamp()),
-        "page_size": 20,
+        "page_size": 100,
     }
     assert BackgroundJob.objects.filter(task_type="SCHEDULED_INGEST_WINDOW").count() == 1
 

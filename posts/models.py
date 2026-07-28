@@ -201,6 +201,7 @@ class OriginalPost(models.Model):
     title = models.CharField(max_length=500, blank=True)
     content_html = models.TextField(blank=True)
     content_text = models.TextField(blank=True)
+    topics = models.JSONField(default=list, blank=True, db_default=[])
     ballot_text = models.TextField(blank=True, db_default="")
     publish_time = models.DateTimeField(null=True, blank=True)
     status = models.IntegerField(null=True, blank=True)
@@ -214,6 +215,26 @@ class OriginalPost(models.Model):
     class Meta:
         verbose_name = "原创帖子"
         verbose_name_plural = "原创帖子"
+
+
+class OfficialAuthor(models.Model):
+    """An auditable, game-scoped verified official identity."""
+
+    source_appid = models.CharField(max_length=128)
+    openid = models.CharField(max_length=255)
+    nick_name = models.CharField(max_length=255, blank=True)
+    verified_at = models.DateTimeField()
+    created_by = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL, related_name="created_official_authors")
+    disabled_at = models.DateTimeField(null=True, blank=True)
+    disabled_by = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL, related_name="disabled_official_authors")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=("source_appid", "openid"), name="official_author_scope")]
+        indexes = [models.Index(fields=("source_appid", "disabled_at"))]
+        verbose_name = "官方作者"
+        verbose_name_plural = "官方作者"
 
 
 class AuthorMuteStatus(models.Model):

@@ -21,11 +21,13 @@ from config.game_circle_ipc import GameCircleIpcClient, GameCircleIpcError, Game
 from jobs.models import BackgroundJob, JobStatus
 from jobs.permanent_mute import (
     enqueue_author_mute_status_refresh,
+    enqueue_blocked_user_list_sync,
     enqueue_post_author_mute_status_sync,
     persist_permanent_mute_intent,
 )
 from jobs.task_types import (
     AUTHOR_MUTE_STATUS_REFRESH_TASK,
+    BLOCKED_USER_LIST_SYNC_TASK,
     PERMANENT_MUTE_RENEWAL_TASK,
     POST_AUTHOR_MUTE_STATUS_SYNC_TASK,
 )
@@ -64,7 +66,7 @@ from reviews.services import (
     video_sampling_notice,
 )
 
-from .game_catalog import active_game_appid, current_execution_scope, managed_game_options
+from .game_catalog import ExecutionScope, active_game_appid, current_execution_scope, managed_game_options
 from .dashboard_filters import filter_original_posts, parse_original_post_filter
 from .ingestion_jobs import enqueue_filtered_post_refresh
 from .models import (
@@ -77,6 +79,8 @@ from .models import (
     ActiveGameScope,
     CandidatePost,
     InteractionSnapshot,
+    ManagedGame,
+    OfficialAuthor,
     OriginalPost,
     OriginType,
     is_post_blocked,
@@ -85,6 +89,7 @@ from .models import (
     is_post_self_visible,
     is_post_sunk,
 )
+from .official_authors import apply_identity_presentation, disable_official_author, enable_official_author
 from .services import (
     mute_management_status_queryset,
     refresh_post_status_and_metrics,
@@ -416,6 +421,92 @@ def _author_mute_status_for_post(post: OriginalPost, appid: str) -> AuthorMuteSt
     ).first()
 
 
+def _configuration_scope(appid: str) -> ExecutionScope:
+    """Build a read-only target scope without mutating the active game selection."""
+    if not ManagedGame.objects.filter(appid=appid).exists():
+        raise ValueError("只能选择已同步的可管理游戏")
+    scope = ActiveGameScope.objects.filter(pk=1).first()
+    if scope is None:
+        raise ValueError("尚未配置当前操作游戏")
+    return ExecutionScope(target_appid=appid, scope_version=scope.scope_version)
+
+
+def _official_preview_key(appid: str) -> str:
+    return f"official-author-preview:{appid}"
+
+
+@login_required
+def official_author_management(request):
+    games = managed_game_options(persist_default=False)
+    try:
+        default_appid = active_game_appid(persist_default=False)
+    except ValueError:
+        default_appid = games[0].appid if games else ""
+    appid = request.GET.get("appid", default_appid).strip() or default_appid
+    game = ManagedGame.objects.filter(appid=appid).first()
+    if game is None:
+        messages.error(request, "请选择本地可管理游戏。")
+        return redirect(reverse("official-author-management"))
+    return render(request, "posts/official_author_management.html", {
+        "appid": appid, "game": game, "managed_games": games,
+        "authors": OfficialAuthor.objects.filter(source_appid=appid, disabled_at__isnull=True).order_by("nick_name", "openid"),
+        "preview": request.session.get(_official_preview_key(appid)),
+    })
+
+
+@login_required
+@require_POST
+def preview_official_author(request):
+    appid = request.POST.get("appid", "").strip()
+    openid = request.POST.get("openid", "").strip()
+    try:
+        payload = GameCirclePostClient(scope=_configuration_scope(appid)).get_author_detail(openid)
+        user = payload["data"]["user"]
+        if not isinstance(user, dict) or user.get("openid") != openid:
+            raise ValueError("作者详情响应身份不一致")
+        topics = payload.get("data", {}).get("topic_list", [])
+        preview_topics = [
+            {"topic_id": item.get("topic_id"), "title": str(item.get("title") or item.get("brief_content") or "")[:120], "publish_time": item.get("publish_time")}
+            for item in topics[:10] if isinstance(item, dict)
+        ]
+        request.session[_official_preview_key(appid)] = {
+            "user_id": request.user.pk, "openid": openid, "nick_name": str(user.get("nick_name") or "")[:255],
+            "verified_at": timezone.now().isoformat(), "total": payload.get("data", {}).get("total"), "topics": preview_topics,
+        }
+        messages.success(request, "作者信息已核验，请确认加入官方作者名单。")
+    except (GameCircleIpcError, KeyError, TypeError, ValueError) as exc:
+        messages.error(request, str(exc) if str(exc) else "作者信息核验失败。")
+    return redirect(f"{reverse('official-author-management')}?appid={appid}")
+
+
+@login_required
+@require_POST
+def confirm_official_author(request):
+    appid = request.POST.get("appid", "").strip()
+    preview = request.session.get(_official_preview_key(appid))
+    try:
+        verified_at = datetime.fromisoformat(str(preview["verified_at"])) if isinstance(preview, dict) else None
+        if (not isinstance(preview, dict) or preview.get("user_id") != request.user.pk or not verified_at
+                or timezone.now() - verified_at > timedelta(minutes=10)):
+            raise ValueError("作者核验已过期，请重新查询")
+        enable_official_author(appid=appid, openid=str(preview["openid"]), nick_name=str(preview.get("nick_name") or ""), user=request.user)
+        del request.session[_official_preview_key(appid)]
+        messages.success(request, "已加入官方作者名单；同游戏的历史与后续帖子会即时按身份展示。")
+    except (KeyError, TypeError, ValueError) as exc:
+        messages.error(request, str(exc) if str(exc) else "作者核验无效。")
+    return redirect(f"{reverse('official-author-management')}?appid={appid}")
+
+
+@login_required
+@require_POST
+def disable_official_author_view(request, author_id: int):
+    appid = request.POST.get("appid", "").strip()
+    author = get_object_or_404(OfficialAuthor, pk=author_id, source_appid=appid, disabled_at__isnull=True)
+    disable_official_author(author=author, user=request.user)
+    messages.success(request, "已移除官方作者配置；帖子身份标记已即时取消。")
+    return redirect(f"{reverse('official-author-management')}?appid={appid}")
+
+
 @login_required
 def operations_dashboard(request):
     normalized_query, query_was_normalized = _normalize_dashboard_query(request.GET)
@@ -433,6 +524,9 @@ def operations_dashboard(request):
         # background-refresh predicates identical.
         post_filter = parse_original_post_filter(QueryDict(""))
     filters = {
+        "post_id": "" if post_filter.post_id is None else str(post_filter.post_id),
+        "topic_label": post_filter.topic_label,
+        "has_topics": post_filter.has_topics,
         "category": list(post_filter.category),
         "risk": list(post_filter.risk),
         "suggested_action": list(post_filter.suggested_action),
@@ -481,6 +575,8 @@ def operations_dashboard(request):
                 posts = [selected_post, *posts][:100]
     for post in posts:
         _set_status_context(post)
+    game_name = ManagedGame.objects.filter(appid=appid).values_list("name", flat=True).first() or ""
+    apply_identity_presentation(posts, appid=appid, game_name=game_name)
     batch_candidates = _batch_ai_candidates(posts)
     batch_sink_count = sum(
         post.review_task.suggested_action == RecommendedAction.SINK for post in batch_candidates
@@ -615,6 +711,7 @@ def operations_dashboard(request):
         "next_post": posts[selected_index + 1] if selected_index + 1 < len(posts) else None,
         "search": post_filter.search,
         "appid": appid,
+        "game_name": game_name,
         "managed_games": managed_game_options(),
         "active_game": next((game for game in managed_game_options() if game.appid == appid), None),
         "game_context_query": _game_context_query(request),
@@ -731,6 +828,7 @@ def mute_management(request):
                 PERMANENT_MUTE_RENEWAL_TASK,
                 AUTHOR_MUTE_STATUS_REFRESH_TASK,
                 POST_AUTHOR_MUTE_STATUS_SYNC_TASK,
+                BLOCKED_USER_LIST_SYNC_TASK,
             ),
         ).first()
     return render(
@@ -766,9 +864,18 @@ def _permanent_mute_job_feedback(job: BackgroundJob | None) -> dict | None:
         PERMANENT_MUTE_RENEWAL_TASK: "永久禁言任务",
         AUTHOR_MUTE_STATUS_REFRESH_TASK: "禁言列表状态刷新任务",
         POST_AUTHOR_MUTE_STATUS_SYNC_TASK: "全量帖子作者禁言扫描任务",
+        BLOCKED_USER_LIST_SYNC_TASK: "平台当前禁言名单导入任务",
     }
     label = labels.get(job.task_type, "禁言管理任务")
-    detail = f"已处理 {processed} 位，成功 {succeeded} 位，失败 {failed} 位。"
+    if job.task_type == BLOCKED_USER_LIST_SYNC_TASK:
+        total = checkpoint.get("total")
+        total_label = f"平台共 {total} 位；" if isinstance(total, int) else ""
+        detail = (
+            f"{total_label}已读取 {processed} 位，导入 {int(checkpoint.get('imported', 0))} 位，"
+            f"跳过 {int(checkpoint.get('skipped', 0))} 位。"
+        )
+    else:
+        detail = f"已处理 {processed} 位，成功 {succeeded} 位，失败 {failed} 位。"
     if skipped_missing_openid:
         detail += f"已跳过 {skipped_missing_openid} 条缺少作者 ID 的帖子。"
     if job.status == JobStatus.SUCCEEDED:
@@ -840,6 +947,23 @@ def enqueue_post_author_mute_status_sync_request(request):
     messages.success(
         request,
         f"{outcome}全量帖子作者禁言扫描任务；仅将当前游戏或全局被禁言作者补充到禁言列表，不设置自动续期。",
+    )
+    return redirect(_mute_management_return_url(request, job_id=result.job.pk))
+
+
+@login_required
+@require_POST
+def enqueue_blocked_user_list_sync_request(request):
+    """Queue the platform's current blocked-user list import without source I/O in Web."""
+    try:
+        result = enqueue_blocked_user_list_sync()
+    except ValueError as exc:
+        messages.error(request, str(exc))
+        return redirect(_mute_management_return_url(request))
+    outcome = "已创建" if result.created else "已复用正在处理的"
+    messages.success(
+        request,
+        f"{outcome}平台当前禁言名单导入任务；仅同步仍在名单中的作者与当前游戏截止时间，不设置自动续期或解除本地状态。",
     )
     return redirect(_mute_management_return_url(request, job_id=result.job.pk))
 
@@ -1030,10 +1154,19 @@ def _persist_human_mute_intent(
 @login_required
 def post_detail(request, topic_id: int):
     post = get_object_or_404(_with_latest_metrics(OriginalPost.objects.all()), topic_id=topic_id)
+    game_name = (
+        ManagedGame.objects.filter(appid=post.source_appid).values_list("name", flat=True).first()
+        or ""
+    )
+    apply_identity_presentation([post], appid=post.source_appid, game_name=game_name)
     return render(
         request,
         "posts/post_detail.html",
-        {"post": post, "metrics": post.interaction_snapshots.order_by("-captured_at")[:10]},
+        {
+            "post": post,
+            "game_name": game_name,
+            "metrics": post.interaction_snapshots.order_by("-captured_at")[:10],
+        },
     )
 
 

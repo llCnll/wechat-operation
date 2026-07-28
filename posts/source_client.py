@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from datetime import UTC, datetime
 from time import monotonic, sleep
-from collections.abc import Callable
 from typing import Any
 
 from config.cdp import CdpGameFrame, CdpTargetUnavailableError, CdpUnavailableError
@@ -17,6 +17,9 @@ from jobs.adapters import (
     SourceContractError,
     SourceTransportError,
 )
+
+BLOCKED_USER_LIST_PAGE_SIZE_REJECTED = "BLOCKED_USER_LIST_PAGE_SIZE_REJECTED"
+_PAGE_SIZE_ERROR_MARKERS = ("page_size", "page size", "分页大小", "页大小")
 
 
 class CdpGameCircleClient:
@@ -43,7 +46,12 @@ class CdpGameCircleClient:
         self._last_request_at = 0.0
 
     def _request_path(
-        self, path: str, *, params: dict[str, Any] | None = None, body: dict[str, Any] | None = None
+        self,
+        path: str,
+        *,
+        params: dict[str, Any] | None = None,
+        body: dict[str, Any] | None = None,
+        allow_application_error: bool = False,
     ) -> dict[str, Any]:
         http_method = "POST" if body is not None else "GET"
         delay = self.min_interval_seconds - (monotonic() - self._last_request_at)
@@ -116,6 +124,8 @@ class CdpGameCircleClient:
                     self.token = self._rebind_identity()
                     continue
                 raise PluginSessionExpiredError("来源身份会话已失效")
+            if allow_application_error:
+                return payload
             if path.endswith("/topicsearchgetdetail") and payload.get("errcode") == -10075007:
                 raise SourceBusinessDeletedError("原平台帖子已从管理队列删除")
             raise SourceTransportError("原平台返回错误")
@@ -123,6 +133,16 @@ class CdpGameCircleClient:
 
     def _get(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
         return self._request_path("/cgi-bin/gamecircleopenmpweb/" + method, params=params)
+
+    def _get_gameopenmpwap(
+        self, method: str, params: dict[str, Any], *, allow_application_error: bool = False
+    ) -> dict[str, Any]:
+        """Read one fixed game-management endpoint through the bound frame."""
+        return self._request_path(
+            "/cgi-bin/gameopenmpwap/" + method,
+            params=params,
+            allow_application_error=allow_application_error,
+        )
 
     def _post_json(self, method: str, body: dict[str, Any]) -> dict[str, Any]:
         return self._request_path("/cgi-bin/gamecircleopenmpweb/" + method, body=body)
@@ -200,12 +220,54 @@ class CdpGameCircleClient:
                         "topic_req": {"order_by": 1, "is_desc": True},
                         "openid": openid,
                         "page": 0,
-                        "page_size": 10,
+                        "page_size": 3,
                         "need_user_info": True,
                     }
                 )
             },
         )
+
+    def list_blocked_users(self, *, page: int, page_size: int) -> dict[str, Any]:
+        """Read a minimal current-game blocked-user page without author history."""
+        if not isinstance(page, int) or page < 0:
+            raise SourceContractError("禁言名单页码无效")
+        if not isinstance(page_size, int) or not 1 <= page_size <= 500:
+            raise SourceContractError("禁言名单分页大小无效")
+        payload = self._get_gameopenmpwap(
+            "cfcommcgi/spacexcontent_gamecircletopicmanage_getblockuserlist",
+            {"data": json.dumps({"page": page, "page_size": page_size}, separators=(",", ":"))},
+            allow_application_error=True,
+        )
+        if payload.get("errcode") != 0:
+            message = payload.get("errmsg")
+            if isinstance(message, str) and any(
+                marker in message.casefold() for marker in _PAGE_SIZE_ERROR_MARKERS
+            ):
+                raise SourceContractError(
+                    "平台禁言名单不接受当前分页大小",
+                    safe_reason=BLOCKED_USER_LIST_PAGE_SIZE_REJECTED,
+                )
+            raise SourceTransportError("平台禁言名单读取失败")
+        try:
+            data = payload["data"]
+            total = int(data["total"])
+            items = data["blocked_user_list"]
+        except (KeyError, TypeError, ValueError) as exc:
+            raise SourceContractError("平台禁言名单响应结构无效") from exc
+        if total < 0 or not isinstance(items, list):
+            raise SourceContractError("平台禁言名单响应结构无效")
+        return {
+            "total": total,
+            "items": [
+                {
+                    "openid": item.get("openid"),
+                    "nick_name": item.get("name"),
+                    "end_date": item.get("end_date"),
+                }
+                for item in items
+                if isinstance(item, dict)
+            ],
+        }
 
     def get_author_detail_with_timeout(
         self, openid: str, *, timeout_seconds: float

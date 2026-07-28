@@ -2,6 +2,7 @@ import re
 from datetime import UTC, datetime
 from html import unescape
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from django.db import transaction
 from django.db.models import Q
@@ -9,6 +10,7 @@ from django.utils import timezone
 
 from jobs.adapters import SourceBusinessDeletedError, SourceContractError
 
+from .content import split_trailing_topics
 from .models import (
     AuthorMuteStatus,
     CandidatePost,
@@ -20,6 +22,8 @@ from .models import (
     mark_post_deleted,
     normalize_post_status,
 )
+
+SHANGHAI = ZoneInfo("Asia/Shanghai")
 
 
 def _future_timestamp(value: Any, *, observed_at) -> datetime | None:
@@ -173,6 +177,58 @@ def sync_author_mute_status_from_user_detail(
         post=post,
         create_if_inactive=create_if_inactive,
     )
+
+
+@transaction.atomic
+def sync_author_mute_status_from_blocked_user_list(
+    entry: dict[str, Any],
+    *,
+    source_appid: str,
+    source_requested_at=None,
+) -> AuthorMuteStatus | None:
+    """Project one current platform block-list entry without borrowing user-detail semantics."""
+    if not isinstance(entry, dict) or not source_appid:
+        return None
+    openid = entry.get("openid")
+    end_date = entry.get("end_date")
+    if not isinstance(openid, str) or not openid or not isinstance(end_date, str):
+        return None
+    try:
+        local_until = datetime.strptime(end_date, "%Y-%m-%d %H:%M:%S").replace(tzinfo=SHANGHAI)
+    except ValueError:
+        return None
+    observed_at = timezone.now()
+    if local_until <= observed_at:
+        return None
+    requested_at = source_requested_at or observed_at
+    nick_name = entry.get("nick_name")
+    if not isinstance(nick_name, str):
+        nick_name = ""
+
+    state = AuthorMuteStatus.objects.select_for_update().filter(
+        openid=openid, source_appid=source_appid
+    ).first()
+    if state is not None and state.source_requested_at > requested_at:
+        return state
+    if state is None:
+        return AuthorMuteStatus.objects.create(
+            openid=openid,
+            source_appid=source_appid,
+            nick_name=nick_name,
+            local_muted_until=local_until,
+            last_synced_at=observed_at,
+            source_requested_at=requested_at,
+        )
+
+    update_fields = ["local_muted_until", "last_synced_at", "source_requested_at", "updated_at"]
+    state.local_muted_until = local_until
+    state.last_synced_at = observed_at
+    state.source_requested_at = requested_at
+    if nick_name:
+        state.nick_name = nick_name
+        update_fields.append("nick_name")
+    state.save(update_fields=update_fields)
+    return state
 
 
 def refresh_one_post_from_source(
@@ -334,13 +390,15 @@ def classify_content_card(candidate: CandidatePost, card: dict[str, Any]) -> Ori
             publish_time = None
     else:
         publish_time = None
+    content_text, topics = split_trailing_topics(html_to_text(content_html))
     post, _ = OriginalPost.objects.update_or_create(
         topic_id=candidate.topic_id,
         defaults={
             "content_id": candidate.content_id,
             "title": str(base.get("title", "")),
             "content_html": content_html,
-            "content_text": html_to_text(content_html),
+            "content_text": content_text,
+            "topics": list(topics),
             "ballot_text": normalize_ballot_text(ballot_info),
             "publish_time": publish_time,
             "status": normalize_post_status(base.get("status")),

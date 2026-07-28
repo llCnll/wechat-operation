@@ -1,12 +1,20 @@
 import json
+from datetime import timedelta
 
 import httpx
 import pytest
 from django.db import connection
+from django.utils import timezone
 
 from config.settings import runtime
 from jobs.models import BackgroundJob
-from posts.models import POST_STATUS_DELETED, CandidatePost, OriginalPost, OriginType
+from posts.models import (
+    POST_STATUS_DELETED,
+    AuthorMuteStatus,
+    CandidatePost,
+    OriginalPost,
+    OriginType,
+)
 from reviews import reply_faq
 from reviews.adapters import (
     AssessmentOutput,
@@ -32,6 +40,7 @@ from reviews.reply_faq import CITY_LORD_APPID, select_reply_faq_rules
 from reviews.services import (
     _read_mute_state_with_verification,
     create_confirmed_operation,
+    execute_author_operation,
     execute_confirmed_operation,
     is_operation_enabled,
     persist_assessment,
@@ -414,7 +423,7 @@ def test_valuable_feedback_is_not_sunk():
         post,
         AssessmentOutput(
             content_category="FEEDBACK",
-            feedback_value="VALUABLE",
+            feedback_value="HIGH",
             recommended_action="SINK",
             overall_confidence=0.99,
         ),
@@ -908,11 +917,12 @@ def test_confirmed_mute_reads_back_only_block_deadlines(monkeypatch):
 
     class Source:
         reads = 0
+        expected_end_time = 0
 
         def get_author_detail(self, openid):
             assert openid == "mute-author"
             self.reads += 1
-            block_end_time = 0 if self.reads == 1 else 2_000_000_000
+            block_end_time = 0 if self.reads == 1 else self.expected_end_time
             return {
                 "data": {
                     "user": {
@@ -931,19 +941,123 @@ def test_confirmed_mute_reads_back_only_block_deadlines(monkeypatch):
             assert payload["mute_days"] == 7
             assert payload["block_reason_code"] == 8
             assert payload["reason"] == "广告欺诈"
+            self.expected_end_time = payload["mute_end_time"]
             return {"errcode": 0, "errmsg": "ok"}
 
+    source = Source()
     audit = execute_confirmed_operation(
         task,
         user=None,
         action=RecommendedAction.MUTE,
         reason="广告欺诈",
-        source=Source(),
+        source=source,
         upstream_payload={"mute_days": 7, "block_reason_code": 8},
     )
     assert audit.result_code == "OK"
     assert "openid" not in str(audit.before_state)
-    assert audit.after_state["local_block_end_time"] == 2_000_000_000
+    assert audit.after_state["local_block_end_time"] == source.expected_end_time
+
+
+@pytest.mark.django_db
+def test_author_mute_overwrites_an_already_active_deadline(monkeypatch):
+    monkeypatch.setattr(runtime, "enable_upstream_writes", True)
+    monkeypatch.setattr(runtime, "enable_mute_writes", True)
+    monkeypatch.setattr("reviews.services.sleep", lambda _seconds: None)
+    current_end_time = int((timezone.now() + timedelta(days=1)).timestamp())
+    status = AuthorMuteStatus.objects.create(
+        openid="already-muted-author",
+        source_appid="wx-test",
+        local_muted_until=timezone.now() + timedelta(days=1),
+        last_synced_at=timezone.now(),
+        source_requested_at=timezone.now(),
+    )
+
+    class Source:
+        writes = 0
+        expected_end_time = 0
+
+        def get_author_detail(self, openid):
+            return {
+                "data": {
+                    "user": {
+                        "openid": openid,
+                        "block_info": {
+                            "appid": "wx-test",
+                            "block_end_time": self.expected_end_time or current_end_time,
+                        },
+                        "global_block_end_time": 0,
+                    }
+                }
+            }
+
+        def perform_confirmed_operation(self, **kwargs):
+            self.writes += 1
+            self.expected_end_time = kwargs["payload"]["mute_end_time"]
+            return {"errcode": 0}
+
+    source = Source()
+    audit = execute_author_operation(
+        status,
+        user=None,
+        action=RecommendedAction.MUTE,
+        reason="覆盖为三天禁言",
+        source=source,
+        upstream_payload={"mute_days": 3, "block_reason_code": 1},
+        confirmation_key="overwrite-active-mute",
+    )
+
+    assert audit.result_code == "OK"
+    assert source.writes == 1
+    assert audit.before_state["local_block_end_time"] == current_end_time
+    assert audit.after_state["local_block_end_time"] == source.expected_end_time
+
+
+@pytest.mark.django_db
+def test_author_mute_does_not_accept_an_unrelated_longer_existing_deadline(monkeypatch):
+    monkeypatch.setattr(runtime, "enable_upstream_writes", True)
+    monkeypatch.setattr(runtime, "enable_mute_writes", True)
+    monkeypatch.setattr("reviews.services.sleep", lambda _seconds: None)
+    longer_deadline = int((timezone.now() + timedelta(days=30)).timestamp())
+    status = AuthorMuteStatus.objects.create(
+        openid="longer-muted-author",
+        source_appid="wx-test",
+        local_muted_until=timezone.now() + timedelta(days=30),
+        last_synced_at=timezone.now(),
+        source_requested_at=timezone.now(),
+    )
+
+    class Source:
+        writes = 0
+
+        def get_author_detail(self, openid):
+            return {
+                "data": {
+                    "user": {
+                        "openid": openid,
+                        "block_info": {"appid": "wx-test", "block_end_time": longer_deadline},
+                        "global_block_end_time": 0,
+                    }
+                }
+            }
+
+        def perform_confirmed_operation(self, **_kwargs):
+            self.writes += 1
+            return {"errcode": 0}
+
+    source = Source()
+    audit = execute_author_operation(
+        status,
+        user=None,
+        action=RecommendedAction.MUTE,
+        reason="设置较短测试期限",
+        source=source,
+        upstream_payload={"mute_days": 3, "block_reason_code": 1},
+        confirmation_key="reject-unrelated-longer-deadline",
+    )
+
+    assert audit.result_code == "ACTION_FAILED"
+    assert audit.error_summary == "禁言状态回读与预期不一致"
+    assert source.writes == 1
 
 
 @pytest.mark.django_db
@@ -966,6 +1080,7 @@ def test_confirmed_unmute_requires_active_local_mute_and_reads_back_release(monk
     class Source:
         reads = 0
         writes = 0
+        expected_end_time = 0
 
         def get_author_detail(self, openid):
             assert openid == "unmute-author"
@@ -1149,10 +1264,11 @@ def test_mute_reads_at_bounded_timepoints_without_repeating_write(monkeypatch):
     class Source:
         reads = 0
         writes = 0
+        expected_end_time = 0
 
         def get_author_detail(self, openid):
             self.reads += 1
-            end = 2_000_000_000 if self.reads == 3 else 0
+            end = self.expected_end_time if self.reads == 3 else 0
             return {
                 "data": {
                     "user": {
@@ -1168,6 +1284,7 @@ def test_mute_reads_at_bounded_timepoints_without_repeating_write(monkeypatch):
 
         def perform_confirmed_operation(self, **kwargs):
             self.writes += 1
+            self.expected_end_time = kwargs["payload"]["mute_end_time"]
             return {"errcode": 0}
 
     source = Source()
@@ -1285,11 +1402,12 @@ def test_deleted_post_with_known_author_can_execute_mute_without_candidate(monke
 
     class Source:
         reads = 0
+        expected_end_time = 0
 
         def get_author_detail(self, openid):
             assert openid == "deleted-author"
             self.reads += 1
-            block_end_time = 0 if self.reads == 1 else 2_000_000_000
+            block_end_time = 0 if self.reads == 1 else self.expected_end_time
             return {
                 "data": {
                     "user": {
@@ -1307,6 +1425,7 @@ def test_deleted_post_with_known_author_can_execute_mute_without_candidate(monke
             assert topic_id == post.topic_id
             assert action == RecommendedAction.MUTE
             assert payload["author_openid"] == post.author_openid
+            self.expected_end_time = payload["mute_end_time"]
             return {"errcode": 0, "errmsg": "ok"}
 
     audit = execute_confirmed_operation(

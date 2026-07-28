@@ -1,8 +1,10 @@
 from datetime import date, datetime, timedelta
 from io import BytesIO
+from unittest.mock import Mock
 from zipfile import ZipFile
 from zoneinfo import ZoneInfo
 
+import httpx
 import pytest
 from django.contrib.auth import get_user_model
 from django.test import Client
@@ -19,14 +21,29 @@ from posts.models import (
     OriginalPost,
 )
 from reporting.models import (
+    GameCircleMetricSnapshot,
+    MetricPublicationState,
+    MetricSource,
     PublicOpinionReportRun,
     PublicOpinionReportRunStatus,
     PublicOpinionReportSource,
     PublicOpinionReportSourceKind,
 )
+from reporting.public_opinion_analysis import (
+    InteractionInput,
+    LEGACY_ANALYSIS_VERSION,
+    ReportSourceInput,
+    build_report_result,
+)
+from reporting.public_opinion_conclusion import (
+    ConclusionError,
+    PublicOpinionConclusionClient,
+    validate_conclusion,
+)
 from reporting.public_opinion_jobs import (
     PUBLIC_OPINION_REPORT_HANDLERS,
     create_public_opinion_report,
+    execute_public_opinion_report,
     purge_expired_public_opinion_reports,
     rerun_public_opinion_report,
 )
@@ -148,6 +165,351 @@ def test_report_locks_sources_and_rerun_only_refreshes_interactions():
     assert second_run.result_payload["summary"]["source_count"] == 2
     assert second_run.metrics_as_of >= first_run.metrics_as_of
     assert result.report.runs.count() == 2
+
+
+@pytest.mark.django_db
+def test_v2_report_keeps_topics_verified_daily_metrics_and_model_failure_as_success(monkeypatch):
+    monkeypatch.setattr(
+        "reporting.public_opinion_conclusion.runtime.public_opinion_conclusion_enabled", False
+    )
+    appid = "public-opinion-v2-evidence"
+    day = date(2026, 7, 20)
+    post = _post(topic_id=120, appid=appid, day=day, content="玩法反馈")
+    post.topics = ["城主攻略"]
+    post.save(update_fields=["topics"])
+    _assessment(post)
+    GameCircleMetricSnapshot.objects.create(
+        appid=appid, source=MetricSource.GROUP_PUBLISH_DAILY, period_start=day, period_end=day,
+        scope="ALL", metrics={"publish_pv": 10, "publish_uv": 5},
+        publication_state=MetricPublicationState.VERIFIED, captured_at=timezone.now(),
+    )
+    result = create_public_opinion_report(source_appid=appid, start_day=day, end_day=day)
+    _execute_one()
+    run = PublicOpinionReportRun.objects.get(pk=result.run.pk)
+    assert run.status == PublicOpinionReportRunStatus.SUCCEEDED
+    assert run.result_payload["player_topics"][0]["label"] == "城主攻略"
+    assert run.result_payload["daily_metrics"][0]["source"] == MetricSource.GROUP_PUBLISH_DAILY
+    assert run.result_payload["conclusion"]["status"] == "UNAVAILABLE"
+    assert run.deterministic_payload
+    document = render_public_opinion_word(report=result.report, run=run, game_name="测试游戏")
+    with ZipFile(BytesIO(document)) as archive:
+        body = archive.read("word/document.xml").decode()
+    assert "内容创作（日）" in body
+    assert "发帖次数" in body
+    assert "GROUP_PUBLISH_DAILY" not in body
+    assert "publish_pv" not in body
+
+    run.result_payload["conclusion"]["error_code"] = "MODEL_READ_TIMEOUT"
+    run.save(update_fields=("result_payload", "updated_at"))
+    timeout_document = render_public_opinion_word(
+        report=result.report, run=run, game_name="测试游戏"
+    )
+    with ZipFile(BytesIO(timeout_document)) as archive:
+        timeout_body = archive.read("word/document.xml").decode()
+    assert "模型响应超时" in timeout_body
+
+    run.result_payload["conclusion"] = {
+        "status": "AVAILABLE",
+        "items": [{
+            "kind": "OVERVIEW",
+            "text": "当前固定范围可作为人工运营观察的参考。",
+            "evidence_ids": ["summary", "player_topics"],
+        }],
+    }
+    run.save(update_fields=("result_payload", "updated_at"))
+    conclusion_document = render_public_opinion_word(
+        report=result.report, run=run, game_name="测试游戏"
+    )
+    with ZipFile(BytesIO(conclusion_document)) as archive:
+        conclusion_body = archive.read("word/document.xml").decode()
+    assert "整体概览" in conclusion_body
+    assert "报告概览" in conclusion_body
+    assert "玩家话题" in conclusion_body
+
+
+def test_conclusion_validation_rejects_unknown_evidence_and_forbidden_language():
+    evidence = {"summary": {}, "data_quality": {}, "categories": [], "sentiments": [], "risks": [], "topics": [], "player_topics": [], "hotwords": {}, "daily_trend": [], "daily_metrics": [], "representative_posts": {}}
+    assert validate_conclusion({"items": [{"text": "当前仅观察到同期变化。", "evidence_ids": ["summary"]}]}, evidence=evidence)["status"] == "AVAILABLE"
+    with pytest.raises(ValueError, match="引用不存在"):
+        validate_conclusion({"items": [{"text": "观察", "evidence_ids": ["missing"]}]}, evidence=evidence)
+    with pytest.raises(ValueError, match="运营参考限制"):
+        validate_conclusion({"items": [{"text": "必须封禁该用户", "evidence_ids": ["summary"]}]}, evidence=evidence)
+    with pytest.raises(ValueError, match="运营参考限制"):
+        validate_conclusion({"items": [{"text": "建议对相关用户禁言", "evidence_ids": ["summary"]}]}, evidence=evidence)
+    with pytest.raises(ValueError, match="运营参考限制"):
+        validate_conclusion({"items": [{"text": "负面反馈上升 20%", "evidence_ids": ["sentiments"]}]}, evidence=evidence)
+    with pytest.raises(ValueError, match="类型无效"):
+        validate_conclusion({"items": [{"kind": "ACTION", "text": "当前仅观察到同期变化。", "evidence_ids": ["summary"]}]}, evidence=evidence)
+
+
+def test_conclusion_evidence_includes_only_player_representatives():
+    from reporting.public_opinion_conclusion import evidence_for_payload
+
+    evidence = evidence_for_payload(
+        {
+            "representative_posts": {
+                "by_total": [
+                    {
+                        "topic_id": 1,
+                        "title": "安全标题",
+                        "interaction_total": 10,
+                        "official_identity": "VERIFIED_OFFICIAL",
+                    },
+                    {
+                        "topic_id": 2,
+                        "title": "玩家标题",
+                        "interaction_total": 8,
+                        "official_identity": "PLAYER",
+                    },
+                ]
+            }
+        }
+    )
+
+    assert [row["topic_id"] for row in evidence["representative_posts"]["by_total"]] == [2]
+    row = evidence["representative_posts"]["by_total"][0]
+    assert "official_identity" not in row
+
+
+def test_official_high_interaction_is_not_presented_as_player_signal():
+    official = ReportSourceInput(
+        topic_id=1, publish_time=None, title="官方公告", content_text="活动", ballot_text="",
+        has_ai_assessment=False, ai_category="", ai_sentiment="", ai_feedback_value="",
+        ai_risk_summary=(), official_identity="VERIFIED_OFFICIAL",
+    )
+    player = ReportSourceInput(
+        topic_id=2, publish_time=None, title="玩家反馈", content_text="反馈", ballot_text="",
+        has_ai_assessment=False, ai_category="", ai_sentiment="", ai_feedback_value="",
+        ai_risk_summary=(), official_identity="PLAYER",
+    )
+    payload, _ = build_report_result(
+        current=(official, player), baseline=(),
+        interactions=(
+            InteractionInput(1, 100, 20, 10, 0, timezone.now()),
+            InteractionInput(2, 100, 10, 5, 0, timezone.now()),
+        ),
+        source_locked_at=timezone.now(), metrics_as_of=timezone.now(),
+    )
+
+    messages = {item["kind"]: item["message"] for item in payload["observations"]}
+    assert "官方内容帖子 1" in messages["OFFICIAL_HIGH_INTERACTION"]
+    assert "不纳入玩家关注或反馈信号" in messages["OFFICIAL_HIGH_INTERACTION"]
+    assert next(
+        item for item in payload["observations"] if item["kind"] == "OFFICIAL_HIGH_INTERACTION"
+    )["verify"] is False
+    assert "不纳入玩家关注或反馈信号" in next(
+        item for item in payload["observations"] if item["kind"] == "OFFICIAL_HIGH_INTERACTION"
+    )["message"]
+    assert "玩家内容帖子 2" in messages["PLAYER_HIGH_INTERACTION"]
+
+
+def test_report_presentation_uses_chinese_evidence_and_corrects_legacy_official_observation():
+    from reporting.views import _report_payload_for_display
+
+    raw_payload = {
+        "summary": {"source_count": 12},
+        "data_quality": {"source_count": 12, "ai_assessment_count": 10, "interaction_snapshot_count": 11},
+        "categories": [{"label": "反馈", "count": 5}],
+        "player_topics": [{"label": "城主攻略", "count": 3}],
+        "representative_posts": {"by_total": [{"topic_id": 1441287140, "interaction_total": 99, "official_identity": "VERIFIED_OFFICIAL"}]},
+        "observations": [{"kind": "HIGH_INTERACTION", "message": "帖子 1441287140 的互动总量为 99。", "verify": True}],
+        "conclusion": {"status": "AVAILABLE", "items": [{"kind": "OVERVIEW", "text": "当前内容结构可作为人工运营观察的固定范围。", "evidence_ids": ["summary", "categories", "player_topics", "representative_posts"]}]},
+    }
+
+    projected = _report_payload_for_display(raw_payload)
+
+    evidence = projected["conclusion"]["items"][0]["evidence"]
+    assert [(item["label"], item["summary"]) for item in evidence] == [
+        ("报告概览", "锁定来源 12 帖"),
+        ("内容类别", "前列类别：反馈 5"),
+        ("玩家话题", "前列玩家话题：城主攻略 3"),
+        ("玩家高互动代表帖", "仅纳入 0 条玩家内容代表帖"),
+    ]
+    assert "官方内容帖子 1441287140" in projected["observations"][-1]["message"]
+    assert projected["observations"][-1]["verify"] is False
+    assert "不纳入玩家关注或反馈信号" in projected["observations"][-1]["message"]
+    assert raw_payload["observations"][0]["message"] == "帖子 1441287140 的互动总量为 99。"
+
+
+def test_observation_presentation_supplies_expandable_verification_guidance_for_history():
+    from reporting.public_opinion_presentation import present_observations
+
+    observations = present_observations(
+        {"observations": [{"kind": "TOPIC_VOLUME", "message": "玩法/策略主题命中 8 帖。", "verify": True}]}
+    )
+
+    assert observations[0]["verification_note"] == (
+        "抽样核对命中帖子与主题词的语义相关性；同一帖子可命中多个主题，主题计数不能直接与帖子总量比较。"
+    )
+
+
+def test_conclusion_snapshot_records_the_generation_contract(monkeypatch):
+    from reporting.public_opinion_conclusion import conclusion_snapshot
+
+    monkeypatch.setattr("reporting.public_opinion_conclusion.runtime.ai_model", "test-model")
+    snapshot = conclusion_snapshot(
+        {"status": "UNAVAILABLE", "items": []},
+        input_hash="a" * 64,
+        error_code="MODEL_TRANSPORT",
+    )
+
+    assert snapshot == {
+        "status": "UNAVAILABLE",
+        "items": [],
+        "model_version": "test-model",
+        "prompt_version": "public-opinion-conclusion-v2",
+        "evidence_schema_version": "public-opinion-evidence-v1",
+        "input_hash": "a" * 64,
+        "error_code": "MODEL_TRANSPORT",
+    }
+
+
+def test_conclusion_client_classifies_non_json_and_schema_failure_without_network(monkeypatch):
+    evidence = {"summary": {}, "data_quality": {}, "categories": [], "sentiments": [], "risks": [], "topics": [], "player_topics": [], "hotwords": {}, "daily_trend": [], "daily_metrics": [], "representative_posts": {}}
+    monkeypatch.setattr("reporting.public_opinion_conclusion.runtime.public_opinion_conclusion_enabled", True)
+    monkeypatch.setattr("reporting.public_opinion_conclusion.runtime.ai_base_url", "https://model.invalid")
+    monkeypatch.setattr("reporting.public_opinion_conclusion.runtime.ai_api_key", "test")
+    monkeypatch.setattr("reporting.public_opinion_conclusion.runtime.ai_model", "test-model")
+    response = Mock()
+    response.raise_for_status.return_value = None
+    response.json.return_value = {"choices": [{"message": {"content": "not-json"}}]}
+    monkeypatch.setattr("reporting.public_opinion_conclusion.httpx.post", lambda *args, **kwargs: response)
+    with pytest.raises(ConclusionError, match="MODEL_NON_JSON"):
+        PublicOpinionConclusionClient().conclude(evidence)
+    response.json.return_value = {"choices": [{"message": {"content": '{"items":[{"text":"无证据","evidence_ids":[]}]}'}}]}
+    with pytest.raises(ConclusionError, match="MODEL_SCHEMA_INVALID"):
+        PublicOpinionConclusionClient().conclude(evidence)
+
+
+def test_conclusion_client_classifies_response_timeout_without_exposing_exception(monkeypatch):
+    evidence = {
+        "summary": {}, "data_quality": {}, "categories": [], "sentiments": [], "risks": [],
+        "topics": [], "player_topics": [], "hotwords": {}, "daily_trend": [],
+        "daily_metrics": [], "representative_posts": {},
+    }
+    monkeypatch.setattr("reporting.public_opinion_conclusion.runtime.public_opinion_conclusion_enabled", True)
+    monkeypatch.setattr("reporting.public_opinion_conclusion.runtime.ai_base_url", "https://model.invalid")
+    monkeypatch.setattr("reporting.public_opinion_conclusion.runtime.ai_api_key", "test")
+    monkeypatch.setattr("reporting.public_opinion_conclusion.runtime.ai_model", "test-model")
+    monkeypatch.setattr(
+        "reporting.public_opinion_conclusion.httpx.post",
+        lambda *args, **kwargs: (_ for _ in ()).throw(httpx.ReadTimeout("sensitive upstream detail")),
+    )
+
+    with pytest.raises(ConclusionError, match="MODEL_READ_TIMEOUT"):
+        PublicOpinionConclusionClient().conclude(evidence)
+
+
+def test_report_display_exposes_only_the_fixed_conclusion_failure_label():
+    from reporting.views import _report_payload_for_display
+
+    payload = _report_payload_for_display(
+        {"summary": {}, "representative_posts": {}, "conclusion": {
+            "status": "UNAVAILABLE", "error_code": "MODEL_READ_TIMEOUT",
+        }}
+    )
+
+    assert payload["conclusion"]["error_label"] == "模型响应超时"
+    assert "upstream" not in str(payload)
+
+
+def test_historical_invalid_feedback_is_a_coverage_gap_not_a_business_bucket():
+    source = ReportSourceInput(
+        topic_id=1, publish_time=None, title="", content_text="正文", ballot_text="",
+        has_ai_assessment=True, ai_category="", ai_sentiment="", ai_feedback_value="",
+        ai_feedback_state="INVALID", ai_risk_summary=(),
+    )
+    payload, quality = build_report_result(
+        current=(source,), baseline=(), interactions=(),
+        source_locked_at=timezone.now(), metrics_as_of=timezone.now(),
+    )
+    assert quality["feedback_value_invalid_count"] == 1
+    assert quality["feedback_value_missing_count"] == 0
+    assert payload["summary"]["feedback_values"] == []
+
+
+def test_feedback_value_display_keeps_historical_canonical_labels():
+    from reporting.public_opinion_analysis import feedback_value_display
+
+    assert feedback_value_display("LOW") == "低"
+    assert feedback_value_display("低") == "低"
+    assert feedback_value_display("无明确反馈价值") == "无明确反馈价值"
+    assert feedback_value_display("自由文本") == ""
+
+
+def test_report_display_summarizes_daily_metrics_within_each_source_only():
+    from reporting.views import _report_payload_for_display
+
+    payload = _report_payload_for_display({
+        "summary": {},
+        "representative_posts": {},
+        "daily_metrics": [
+            {"source": "CIRCLE_FANS_DAILY", "day": "2026-07-01", "metrics": {"total_user": 100}, "captured_at": "2026-07-02T00:00:00+00:00"},
+            {"source": "CIRCLE_FANS_DAILY", "day": "2026-07-02", "metrics": {"total_user": 120}, "captured_at": "2026-07-03T00:00:00+00:00"},
+            {"source": "GROUP_CONSUME_DAILY", "day": "2026-07-01", "metrics": {"content_consume_cnt": 300}, "captured_at": "2026-07-02T00:00:00+00:00"},
+        ],
+    })
+
+    summaries = payload["daily_metric_summaries"]
+    assert [(item["source_label"], item["coverage_days"]) for item in summaries] == [
+        ("游戏圈粉丝（日）", 2),
+        ("内容消费（日）", 1),
+    ]
+    assert summaries[0]["metrics"] == [{
+        "label": "粉丝总量", "first_day": "2026-07-01", "last_day": "2026-07-02",
+        "first_value": "100", "last_value": "120", "delta": "+20", "rate": "+20.0%",
+    }]
+
+
+@pytest.mark.django_db
+def test_old_version_rerun_stays_without_new_evidence_or_model(monkeypatch):
+    appid = "public-opinion-v1"
+    day = date(2026, 7, 20)
+    post = _post(topic_id=130, appid=appid, day=day, content="旧版报告")
+    _assessment(post)
+    result = create_public_opinion_report(source_appid=appid, start_day=day, end_day=day)
+    type(result.report).objects.filter(pk=result.report.pk).update(analysis_version=LEGACY_ANALYSIS_VERSION)
+    monkeypatch.setattr("reporting.public_opinion_jobs.PublicOpinionConclusionClient.conclude", lambda *_: pytest.fail("旧版本不得调用模型"))
+    _execute_one()
+    run = PublicOpinionReportRun.objects.get(pk=result.run.pk)
+    assert run.result_payload["schema_version"] == LEGACY_ANALYSIS_VERSION
+    assert "daily_metrics" not in run.result_payload
+    assert run.conclusion_status == "NOT_APPLICABLE"
+
+
+@pytest.mark.django_db
+def test_unknown_version_refuses_without_overwriting_existing_run():
+    appid = "public-opinion-unknown"
+    day = date(2026, 7, 20)
+    post = _post(topic_id=140, appid=appid, day=day, content="未知版本")
+    _assessment(post)
+    result = create_public_opinion_report(source_appid=appid, start_day=day, end_day=day)
+    type(result.report).objects.filter(pk=result.report.pk).update(analysis_version="removed-v9")
+    job = execute_next_job(PUBLIC_OPINION_REPORT_HANDLERS, task_types=(PUBLIC_OPINION_REPORT_TASK,))
+    assert job.status == "FAILED"
+    run = PublicOpinionReportRun.objects.get(pk=result.run.pk)
+    assert run.result_payload == {}
+
+
+@pytest.mark.django_db
+def test_interrupted_conclusion_finishes_from_checkpoint_without_reloading_or_recalling_model(monkeypatch):
+    appid = "public-opinion-interrupted"
+    day = date(2026, 7, 20)
+    post = _post(topic_id=150, appid=appid, day=day, content="可恢复报告")
+    _assessment(post)
+    result = create_public_opinion_report(source_appid=appid, start_day=day, end_day=day)
+    _execute_one()
+    run = PublicOpinionReportRun.objects.get(pk=result.run.pk)
+    run.status = PublicOpinionReportRunStatus.PENDING
+    run.result_payload = {}
+    run.save(update_fields=("status", "result_payload", "updated_at"))
+    monkeypatch.setattr("reporting.public_opinion_jobs.load_interactions", lambda **_: pytest.fail("不得重新读取互动"))
+    monkeypatch.setattr("reporting.public_opinion_jobs.PublicOpinionConclusionClient.conclude", lambda *_: pytest.fail("不得二次调用模型"))
+    execute_public_opinion_report(run.job)
+    run.refresh_from_db()
+    assert run.status == PublicOpinionReportRunStatus.SUCCEEDED
+    assert run.conclusion_status == "UNAVAILABLE"
+    assert run.conclusion_error_code == "MODEL_INTERRUPTED"
 
 
 @pytest.mark.django_db

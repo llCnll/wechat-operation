@@ -41,7 +41,12 @@ def enqueue_job(
 
 
 def enqueue_job_with_result(
-    *, task_type: str, idempotency_key: str, parameter_summary: dict, max_retries: int = 3
+    *,
+    task_type: str,
+    idempotency_key: str,
+    parameter_summary: dict,
+    checkpoint: dict | None = None,
+    max_retries: int = 3,
 ) -> EnqueueResult:
     """Create or return a job while preserving the idempotent creation result."""
     job, created = BackgroundJob.objects.get_or_create(
@@ -49,6 +54,7 @@ def enqueue_job_with_result(
         defaults={
             "task_type": task_type,
             "parameter_summary": parameter_summary,
+            "checkpoint": checkpoint or {},
             "max_retries": max_retries,
         },
     )

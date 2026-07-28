@@ -14,12 +14,15 @@ from jobs.models import BackgroundJob, JobStatus
 from jobs.services import JobDeferred, complete_job
 from jobs.permanent_mute import (
     AUTHOR_MUTE_STATUS_REFRESH_TASK,
+    BLOCKED_USER_LIST_SYNC_TASK,
     PERMANENT_MUTE_RENEWAL_TASK,
     POST_AUTHOR_MUTE_STATUS_SYNC_TASK,
     author_mute_status_refresh_handler,
+    blocked_user_list_sync_handler,
     _next_status,
     _maintain_one,
     enqueue_author_mute_status_refresh,
+    enqueue_blocked_user_list_sync,
     enqueue_post_author_mute_status_sync,
     enqueue_scheduled_permanent_mute_renewal,
     post_author_mute_status_sync_handler,
@@ -176,6 +179,7 @@ def test_mute_maintenance_worker_registers_only_author_mute_maintenance_jobs():
         PERMANENT_MUTE_RENEWAL_TASK,
         AUTHOR_MUTE_STATUS_REFRESH_TASK,
         POST_AUTHOR_MUTE_STATUS_SYNC_TASK,
+        BLOCKED_USER_LIST_SYNC_TASK,
     }
 
 
@@ -488,7 +492,120 @@ def test_mute_management_queues_a_post_author_scan_without_permanent_intent():
 
 
 @pytest.mark.django_db
-def test_renewal_unmutes_then_remutes_and_keeps_intent_when_remute_fails():
+def test_mute_management_queues_platform_blocked_user_import():
+    game = _activate()
+    user = get_user_model().objects.create_user(username="blocked-user-import-operator")
+    client = Client()
+    client.force_login(user)
+
+    response = client.post(
+        "/mute-management/import-platform-blocked-users/",
+        {"return_query": f"appid={game.appid}"},
+    )
+
+    assert response.status_code == 302
+    job = BackgroundJob.objects.get(task_type=BLOCKED_USER_LIST_SYNC_TASK)
+    assert job.checkpoint["page"] == 0
+    assert job.checkpoint["page_size"] is None
+
+
+@pytest.mark.django_db
+def test_platform_blocked_user_import_uses_zero_based_page_and_minimal_projection():
+    game = _activate()
+    linked_post = OriginalPost.objects.create(
+        topic_id=99001,
+        content_id="existing-author-post",
+        source_appid=game.appid,
+        author_openid="existing-author",
+    )
+    existing = AuthorMuteStatus.objects.create(
+        openid="existing-author",
+        source_appid=game.appid,
+        nick_name="旧昵称",
+        global_muted_until=timezone.now() + timedelta(days=3),
+        permanent_mute_enabled=True,
+        last_source_post=linked_post,
+        last_synced_at=timezone.now(),
+        source_requested_at=timezone.now(),
+    )
+    page = enqueue_blocked_user_list_sync()
+    end_date = (timezone.now().astimezone(ZoneInfo("Asia/Shanghai")) + timedelta(days=10)).strftime(
+        "%Y-%m-%d %H:%M:%S"
+    )
+    source = SimpleNamespace(
+        list_blocked_users=Mock(
+            return_value={
+                "total": 2,
+                "items": [
+                    {"openid": "existing-author", "nick_name": "新昵称", "end_date": end_date},
+                    {"openid": "new-author", "nick_name": "新作者", "end_date": end_date},
+                ],
+            }
+        )
+    )
+
+    with patch("jobs.permanent_mute.GameCirclePostClient", return_value=nullcontext(source)):
+        blocked_user_list_sync_handler(page.job)
+
+    page.job.refresh_from_db()
+    existing.refresh_from_db()
+    imported = AuthorMuteStatus.objects.get(openid="new-author", source_appid=game.appid)
+    assert source.list_blocked_users.call_args_list == [call(page=0, page_size=500)]
+    assert page.job.checkpoint["processed"] == page.job.checkpoint["imported"] == 2
+    assert existing.nick_name == "新昵称"
+    assert existing.global_muted_until is not None
+    assert existing.permanent_mute_enabled is True
+    assert existing.last_source_post_id == linked_post.pk
+    assert imported.permanent_mute_enabled is False
+    assert imported.global_muted_until is None
+
+
+@pytest.mark.django_db
+def test_platform_blocked_user_import_lowers_page_size_when_first_page_is_incomplete():
+    _activate()
+    page = enqueue_blocked_user_list_sync()
+    end_date = (timezone.now().astimezone(ZoneInfo("Asia/Shanghai")) + timedelta(days=10)).strftime(
+        "%Y-%m-%d %H:%M:%S"
+    )
+    source = SimpleNamespace(
+        list_blocked_users=Mock(
+            side_effect=[
+                {"total": 1, "items": []},
+                {"total": 1, "items": [{"openid": "fallback-author", "nick_name": "回退作者", "end_date": end_date}]},
+            ]
+        )
+    )
+
+    with patch("jobs.permanent_mute.GameCirclePostClient", return_value=nullcontext(source)):
+        blocked_user_list_sync_handler(page.job)
+
+    page.job.refresh_from_db()
+    assert source.list_blocked_users.call_args_list == [
+        call(page=0, page_size=500),
+        call(page=0, page_size=200),
+    ]
+    assert page.job.checkpoint["page_size"] == 200
+    assert page.job.checkpoint["completed"] is True
+
+
+@pytest.mark.django_db
+def test_platform_blocked_user_import_keeps_absent_local_author_unchanged():
+    game = _activate()
+    status = _status(permanent=True, local_until=timezone.now() + timedelta(days=2))
+    page = enqueue_blocked_user_list_sync()
+    source = SimpleNamespace(list_blocked_users=Mock(return_value={"total": 0, "items": []}))
+
+    with patch("jobs.permanent_mute.GameCirclePostClient", return_value=nullcontext(source)):
+        blocked_user_list_sync_handler(page.job)
+
+    status.refresh_from_db()
+    assert status.source_appid == game.appid
+    assert status.permanent_mute_enabled is True
+    assert status.local_muted_until is not None
+
+
+@pytest.mark.django_db
+def test_renewal_overwrites_without_unmuting_and_keeps_intent_when_write_fails():
     _activate()
     status = _status(permanent=True, local_until=timezone.now() + timedelta(days=1))
     job = BackgroundJob.objects.create(
@@ -502,13 +619,13 @@ def test_renewal_unmutes_then_remutes_and_keeps_intent_when_remute_fails():
         patch("jobs.permanent_mute._refresh_status", return_value=status),
         patch(
             "jobs.permanent_mute.execute_author_operation",
-            side_effect=[successful_audit, successful_audit],
+                return_value=successful_audit,
         ) as execute,
     ):
         _maintain_one(
             job=job, status=status, scope=ExecutionScope("permanent-game", 1)
         )
-    assert [call.kwargs["action"] for call in execute.call_args_list] == ["UNMUTE", "MUTE"]
+    assert [call.kwargs["action"] for call in execute.call_args_list] == ["MUTE"]
 
     status.permanent_mute_enabled = True
     status.save(update_fields=["permanent_mute_enabled"])
@@ -517,7 +634,7 @@ def test_renewal_unmutes_then_remutes_and_keeps_intent_when_remute_fails():
         patch("jobs.permanent_mute._refresh_status", return_value=status),
         patch(
             "jobs.permanent_mute.execute_author_operation",
-            side_effect=[successful_audit, SimpleNamespace(result_code="ACTION_FAILED")],
+                return_value=SimpleNamespace(result_code="ACTION_FAILED"),
         ),
         pytest.raises(ValueError, match="禁言回读未确认"),
     ):

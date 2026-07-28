@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import hmac
 import json
+import logging
 import os
 import secrets
-import signal
 import shutil
+import signal
 import socket
 import subprocess
 import sys
@@ -85,6 +86,9 @@ SERVICE_SHUTDOWN_ORDER = (
     "web",
 )
 
+logger = logging.getLogger(__name__)
+LEASE_RENEWAL_FAILURE_LOG_INTERVAL_SECONDS = 60.0
+
 
 class SupervisorError(RuntimeError):
     """A safe-to-display Supervisor failure."""
@@ -120,6 +124,9 @@ class Supervisor:
         self._stopping = threading.Event()
         self._log_handles: dict[str, Any] = {}
         self._instance_id = ""
+        self._lease_renewal_failed = False
+        self._lease_renewal_failure_count = 0
+        self._last_lease_renewal_failure_log_at: float | None = None
 
     def definitions(self) -> dict[str, ServiceDefinition]:
         python = sys.executable
@@ -368,7 +375,21 @@ class Supervisor:
 
     def run_forever(self) -> None:
         while not self._stopping.wait(2):
-            self._renew_lease()
+            try:
+                self._renew_lease()
+            except OSError as exc:
+                self._lease_renewal_failed = True
+                self._record_lease_renewal_failure(exc)
+                continue
+            if self._lease_renewal_failed:
+                logger.warning(
+                    "Supervisor 租约续租已恢复: service=supervisor "
+                    "operation=write_instance_lease failure_count=%s",
+                    self._lease_renewal_failure_count,
+                )
+                self._lease_renewal_failed = False
+                self._lease_renewal_failure_count = 0
+                self._last_lease_renewal_failure_log_at = None
             self.reconcile()
 
     def shutdown(self) -> None:
@@ -675,6 +696,30 @@ class Supervisor:
     def _renew_lease(self) -> None:
         if self._instance_id:
             self.store.write_instance_lease(self._instance_id)
+
+    def _record_lease_renewal_failure(self, exc: OSError) -> None:
+        self._lease_renewal_failure_count += 1
+        now = time.monotonic()
+        if (
+            self._last_lease_renewal_failure_log_at is not None
+            and now - self._last_lease_renewal_failure_log_at
+            < LEASE_RENEWAL_FAILURE_LOG_INTERVAL_SECONDS
+        ):
+            return
+        self._last_lease_renewal_failure_log_at = now
+        self._log_lease_renewal_failure(exc, self._lease_renewal_failure_count)
+
+    @staticmethod
+    def _log_lease_renewal_failure(exc: OSError, failure_count: int) -> None:
+        logger.warning(
+            "Supervisor 租约续租失败: service=supervisor operation=write_instance_lease "
+            "error_type=%s errno=%s winerror=%s attempts=%s failure_count=%s",
+            type(exc).__name__,
+            exc.errno,
+            getattr(exc, "winerror", None),
+            getattr(exc, "runtime_write_attempts", 1),
+            failure_count,
+        )
 
     def _wait_for_previous_services(self) -> None:
         self._terminate_previous_services()

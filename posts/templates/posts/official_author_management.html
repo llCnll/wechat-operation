@@ -1,0 +1,31 @@
+{% extends "posts/operations_base.html" %}
+{% load static %}
+{% block title %}官方作者配置 | 游戏圈运营{% endblock %}
+{% block extra_head %}<link href="{% static 'posts/official_author_management.css' %}" rel="stylesheet">{% endblock %}
+{% block content %}
+<section class="masthead compact-head official-authors-head">
+  <div><p class="eyebrow">SYSTEM CONFIGURATION / OFFICIAL AUTHORS</p><h1>官方作者</h1><p>按游戏维护已核验 OpenID。昵称与游戏名相同只会显示“名称匹配”，不会成为已核验官方。</p></div>
+  <a class="official-authors-back" href="/admin/">返回系统配置</a>
+</section>
+
+<section class="official-authors-layout">
+  <aside class="official-authors-context">
+    <p class="eyebrow">CONFIGURATION SCOPE</p><h2>配置范围</h2>
+    <form method="get" class="official-game-switch"><label for="official-game">操作游戏</label><select id="official-game" name="appid">{% for item in managed_games %}<option value="{{ item.appid }}" {% if item.appid == appid %}selected{% endif %}>{{ item.name }}</option>{% endfor %}</select><button type="submit">切换范围</button></form>
+    <p>只切换本页配置范围，不会更改系统的当前操作游戏。</p>
+  </aside>
+
+  <section class="official-authors-workspace">
+    <section class="official-author-card official-author-lookup">
+      <header><span class="official-author-card-icon" aria-hidden="true">{% include "posts/includes/lucide_icon.html" with name="shield-check" %}</span><div><p class="eyebrow">VERIFY AUTHOR</p><h2>核验并添加作者</h2><p>先查询作者详情，确认后才会写入本地白名单。</p></div></header>
+      <form method="post" action="{% url 'preview-official-author' %}" class="official-author-form">{% csrf_token %}<input type="hidden" name="appid" value="{{ appid }}"><label for="official-openid">作者 OpenID</label><div><input id="official-openid" name="openid" required maxlength="255" autocomplete="off" placeholder="粘贴完整 OpenID"><button type="submit">查询作者</button></div></form>
+      {% if preview %}<section class="official-author-preview"><div><span>已核验作者</span><strong>{{ preview.nick_name|default:'昵称未知' }}</strong><small>上游本次可见帖子 {{ preview.total|default:'--' }} 条</small></div><ul>{% for topic in preview.topics %}<li><b>#{{ topic.topic_id }}</b><span>{{ topic.title|default:'无标题或正文摘要' }}</span></li>{% empty %}<li>本次响应未返回可见帖子。</li>{% endfor %}</ul><form method="post" action="{% url 'confirm-official-author' %}">{% csrf_token %}<input type="hidden" name="appid" value="{{ appid }}"><button type="submit" class="official-primary-action">确认加入官方作者</button></form></section>{% endif %}
+    </section>
+
+    <section class="official-author-card official-author-list">
+      <header><div><p class="eyebrow">VERIFIED LIST</p><h2>{{ game.name }} 的官方作者</h2><p>停用后，存量和未来帖子会立即恢复为名称匹配或玩家身份。</p></div><b>{{ authors|length }}</b></header>
+      <div class="official-author-list-body">{% for author in authors %}<article><span class="official-identity-badge" title="官方作者（已核验）" aria-label="官方作者（已核验）"><span class="official-identity-badge-icon" aria-hidden="true">{% include "posts/includes/lucide_icon.html" with name="shield-check" %}</span></span><div><strong>{{ author.nick_name|default:'昵称未知' }}</strong><small>{{ author.openid }} · 核验于 {{ author.verified_at|date:'Y-m-d H:i' }}</small></div><form method="post" action="{% url 'disable-official-author' author.pk %}">{% csrf_token %}<input type="hidden" name="appid" value="{{ appid }}"><button type="submit">移除</button></form></article>{% empty %}<div class="official-author-empty"><span class="official-author-card-icon" aria-hidden="true">{% include "posts/includes/lucide_icon.html" with name="plus" %}</span><p>尚未添加官方作者。</p><small>完成上方核验后，这里会显示本游戏的 OpenID 白名单。</small></div>{% endfor %}</div>
+    </section>
+  </section>
+</section>
+{% endblock %}

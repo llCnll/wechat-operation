@@ -11,10 +11,12 @@ from django.db.models import Max, OuterRef, Q, Subquery
 from django.utils import timezone
 
 from config.game_circle_ipc import GameCircleIpcError, GameCirclePostClient
+from jobs.adapters import SourceContractError
 from jobs.models import BackgroundJob, JobStatus
-from jobs.services import EnqueueResult, JobDeferred, JobTerminalError
+from jobs.services import EnqueueResult, JobDeferred, JobTerminalError, enqueue_active_coalesced_job
 from jobs.task_types import (
     AUTHOR_MUTE_STATUS_REFRESH_TASK,
+    BLOCKED_USER_LIST_SYNC_TASK,
     PERMANENT_MUTE_RENEWAL_TASK,
     POST_AUTHOR_MUTE_STATUS_SYNC_TASK,
 )
@@ -28,8 +30,10 @@ from posts.models import AuthorMuteStatus, OriginalPost
 from posts.services import (
     mute_management_status_queryset,
     set_permanent_mute_intent,
+    sync_author_mute_status_from_blocked_user_list,
     sync_author_mute_status_from_user_detail,
 )
+from posts.source_client import BLOCKED_USER_LIST_PAGE_SIZE_REJECTED
 from reviews.models import (
     MuteOperationTrigger,
     OperationAudit,
@@ -42,8 +46,14 @@ PERMANENT_MUTE_DAYS = 30
 RENEWAL_THRESHOLD = timedelta(days=5)
 SHANGHAI = ZoneInfo("Asia/Shanghai")
 MAINTENANCE_READ_TASKS = frozenset(
-    (AUTHOR_MUTE_STATUS_REFRESH_TASK, POST_AUTHOR_MUTE_STATUS_SYNC_TASK)
+    (
+        AUTHOR_MUTE_STATUS_REFRESH_TASK,
+        POST_AUTHOR_MUTE_STATUS_SYNC_TASK,
+        BLOCKED_USER_LIST_SYNC_TASK,
+    )
 )
+BLOCKED_USER_LIST_PAGE_SIZE_CANDIDATES = (500, 200, 100, 50, 20, 10)
+BLOCKED_USER_LIST_FIRST_PAGE = 0
 
 
 def _renewal_key(scope: ExecutionScope, slot: str) -> str:
@@ -61,6 +71,17 @@ def enqueue_permanent_mute_renewal(
     else:
         slot = f"manual-{uuid4().hex}"
     key = _renewal_key(scope, slot)
+    if source == "manual":
+        return enqueue_active_coalesced_job(
+            task_type=PERMANENT_MUTE_RENEWAL_TASK,
+            idempotency_key=key,
+            active_coalescing_key=(
+                f"permanent-mute:renewal:manual:{scope.target_appid}:v{scope.scope_version}"
+            ),
+            parameter_summary={"source": source},
+            checkpoint={"execution_scope": scope.as_checkpoint(), "last_status_id": 0},
+            max_retries=3,
+        )
     job, created = BackgroundJob.objects.get_or_create(
         idempotency_key=key,
         defaults={
@@ -124,6 +145,26 @@ def enqueue_post_author_mute_status_sync(*, source: str = "manual") -> EnqueueRe
             "last_post_id": 0,
             "upper_post_id": upper_post_id,
             "skipped_missing_openid": skipped_missing_openid,
+        },
+    )
+
+
+def enqueue_blocked_user_list_sync(*, source: str = "manual") -> EnqueueResult:
+    """Queue one current-game, read-only platform blocked-user list import."""
+    scope = current_execution_scope(persist_default=False)
+    return _enqueue_or_reuse_read_maintenance_job(
+        task_type=BLOCKED_USER_LIST_SYNC_TASK,
+        scope=scope,
+        source=source,
+        checkpoint={
+            "execution_scope": scope.as_checkpoint(),
+            "page": BLOCKED_USER_LIST_FIRST_PAGE,
+            "page_size": None,
+            "total": None,
+            "processed": 0,
+            "imported": 0,
+            "skipped": 0,
+            "completed": False,
         },
     )
 
@@ -263,16 +304,12 @@ def _verified_result(audit: OperationAudit, *, action: str) -> None:
 
 
 def _maintain_one(*, job: BackgroundJob, status: AuthorMuteStatus, scope: ExecutionScope) -> None:
-    """Renew one marked author; an empty local deadline is an explicit remute case."""
+    """Renew one marked author by directly replacing the target mute deadline."""
     with GameCirclePostClient(scope=scope) as source:
         status = _refresh_status(status=status, source=source, scope=scope)
         now = timezone.now()
         if not _needs_renewal(status, now=now):
             return
-        locally_muted = bool(status.local_muted_until and status.local_muted_until > now)
-        # Do not assume the upstream can extend a live mute.  A verified local
-        # mute is explicitly released, read back by the operation service, then
-        # a fresh 30-day mute is applied and read back again.
         repair_pending = OperationAudit.objects.filter(
             author_status=status,
             action=RecommendedAction.MUTE,
@@ -283,19 +320,6 @@ def _maintain_one(*, job: BackgroundJob, status: AuthorMuteStatus, scope: Execut
             if repair_pending
             else MuteOperationTrigger.SYSTEM_RENEWAL
         )
-        if locally_muted:
-            unmute = execute_author_operation(
-                status,
-                user=None,
-                action=RecommendedAction.UNMUTE,
-                reason="永久禁言续期：为重新设置 30 天期限先解除当前游戏禁言。",
-                source=source,
-                confirmation_key=f"permanent-mute:{job.pk}:{status.pk}:unmute",
-                execution_source=OperationExecutionSource.SYSTEM_MAINTENANCE,
-                mute_trigger=trigger,
-            )
-            _verified_result(unmute, action="解除禁言")
-
         mute = execute_author_operation(
             status,
             user=None,
@@ -545,8 +569,88 @@ def post_author_mute_status_sync_handler(job: BackgroundJob) -> None:
     )
 
 
+def _blocked_user_page_size(job: BackgroundJob, source: GameCirclePostClient) -> tuple[int, dict]:
+    """Read one page, lowering size only when the fixed source rejects that parameter."""
+    checkpoint = job.checkpoint or {}
+    page = int(checkpoint.get("page", BLOCKED_USER_LIST_FIRST_PAGE))
+    if page < 0:
+        raise ValueError("平台禁言名单导入页码无效")
+    stored_size = checkpoint.get("page_size")
+    if stored_size is not None:
+        if stored_size not in BLOCKED_USER_LIST_PAGE_SIZE_CANDIDATES:
+            raise ValueError("平台禁言名单导入分页大小无效")
+        return int(stored_size), source.list_blocked_users(page=page, page_size=int(stored_size))
+
+    for page_size in BLOCKED_USER_LIST_PAGE_SIZE_CANDIDATES:
+        try:
+            result = source.list_blocked_users(page=page, page_size=page_size)
+        except SourceContractError as exc:
+            if exc.safe_reason != BLOCKED_USER_LIST_PAGE_SIZE_REJECTED:
+                raise
+            continue
+        expected_first_page_size = min(page_size, result["total"])
+        if page == 0 and len(result["items"]) != expected_first_page_size:
+            continue
+        return page_size, result
+    raise ValueError("平台禁言名单不接受受控分页大小")
+
+
+def blocked_user_list_sync_handler(job: BackgroundJob) -> None:
+    """Import only the current platform block-list projection; never infer unblocks by absence."""
+    scope = resolve_execution_scope(job)
+    with GameCirclePostClient(scope=scope) as source:
+        while True:
+            checkpoint = dict(job.checkpoint or {})
+            if checkpoint.get("completed") is True:
+                return
+            frozen_total = checkpoint.get("total")
+            processed_before = int(checkpoint.get("processed", 0))
+            if isinstance(frozen_total, int) and processed_before >= frozen_total:
+                checkpoint["completed"] = True
+                job.checkpoint = checkpoint_with_execution_scope(job, checkpoint)
+                job.save(update_fields=["checkpoint", "updated_at"])
+                return
+            page_size, result = _blocked_user_page_size(job, source)
+            page = int(checkpoint.get("page", BLOCKED_USER_LIST_FIRST_PAGE))
+            items = result.get("items")
+            total = result.get("total")
+            if not isinstance(items, list) or not isinstance(total, int) or total < 0:
+                raise ValueError("平台禁言名单响应结构无效")
+            effective_total = frozen_total if isinstance(frozen_total, int) else total
+            expected_count = min(page_size, effective_total - processed_before)
+            if len(items) != expected_count:
+                raise ValueError("平台禁言名单分页结果不完整，未导入不确定数据")
+
+            requested_at = timezone.now()
+            imported = 0
+            skipped = 0
+            for item in items:
+                state = sync_author_mute_status_from_blocked_user_list(
+                    item,
+                    source_appid=scope.target_appid,
+                    source_requested_at=requested_at,
+                )
+                if state is None:
+                    skipped += 1
+                else:
+                    imported += 1
+
+            checkpoint["page"] = page + 1
+            checkpoint["page_size"] = page_size
+            checkpoint["total"] = total if checkpoint.get("total") is None else checkpoint["total"]
+            checkpoint["processed"] = processed_before + len(items)
+            checkpoint["imported"] = int(checkpoint.get("imported", 0)) + imported
+            checkpoint["skipped"] = int(checkpoint.get("skipped", 0)) + skipped
+            checkpoint["completed"] = checkpoint["processed"] >= int(checkpoint["total"])
+            job.checkpoint = checkpoint_with_execution_scope(job, checkpoint)
+            job.save(update_fields=["checkpoint", "updated_at"])
+            if checkpoint["completed"]:
+                return
+
+
 WORKER_HANDLERS = {
     PERMANENT_MUTE_RENEWAL_TASK: permanent_mute_handler,
     AUTHOR_MUTE_STATUS_REFRESH_TASK: author_mute_status_refresh_handler,
     POST_AUTHOR_MUTE_STATUS_SYNC_TASK: post_author_mute_status_sync_handler,
+    BLOCKED_USER_LIST_SYNC_TASK: blocked_user_list_sync_handler,
 }

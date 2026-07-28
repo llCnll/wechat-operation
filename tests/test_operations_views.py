@@ -45,6 +45,18 @@ from reviews.video import media_fingerprint
 from reviews.video_tasks import VIDEO_EXTRACTOR_VERSION
 
 
+@pytest.mark.django_db
+def test_ai_operation_reviews_page_renders_without_review_records(client):
+    user = get_user_model().objects.create_user(username="review-page")
+    game = ManagedGame.objects.create(appid="review-page-game", name="复审页游戏")
+    set_active_game(appid=game.appid)
+    client.force_login(user)
+
+    response = client.get(f"/ai-operation-reviews/?appid={game.appid}")
+
+    assert response.status_code == 200
+
+
 def _activate_game(appid: str) -> None:
     game, _ = ManagedGame.objects.get_or_create(appid=appid, defaults={"name": f"测试-{appid}"})
     set_active_game(appid=game.appid)
@@ -101,6 +113,51 @@ def test_operations_dashboard_renders_original_post_metrics():
     assert 'data-operation="SKIP"' in response.content.decode()
     assert 'data-operation="UNMUTE"' in response.content.decode()
     assert f"/posts/{post.topic_id}/refresh/" in response.content.decode()
+
+
+@pytest.mark.django_db
+def test_operations_dashboard_filters_by_independent_topic_exactly():
+    user = get_user_model().objects.create_user(username="topic-filter", password="test-password")
+    appid = "topic-filter-game"
+    _activate_game(appid)
+    OriginalPost.objects.create(
+        topic_id=991,
+        content_id="topic-filter-match",
+        content_text="精确话题帖子",
+        topics=["城主别慌张攻略"],
+        source_appid=appid,
+    )
+    OriginalPost.objects.create(
+        topic_id=992,
+        content_id="topic-filter-other",
+        content_text="其他话题帖子",
+        topics=["城主别慌张活动"],
+        source_appid=appid,
+    )
+    OriginalPost.objects.create(
+        topic_id=993,
+        content_id="topic-filter-none",
+        content_text="无话题帖子",
+        source_appid=appid,
+    )
+    client = Client()
+    client.force_login(user)
+
+    exact = client.get("/", {"appid": appid, "topic_label": "#城主别慌张攻略"}).content.decode()
+    any_topic = client.get("/", {"appid": appid, "has_topics": "yes"}).content.decode()
+    by_post_id = client.get("/", {"appid": appid, "post_id": "992"}).content.decode()
+
+    assert "精确话题帖子" in exact
+    assert "其他话题帖子" not in exact
+    assert "无话题帖子" not in exact
+    assert "仅看带话题的帖子" in exact
+    assert "function updateTopicFilter()" in exact
+    assert "精确话题帖子" in any_topic
+    assert "其他话题帖子" in any_topic
+    assert "无话题帖子" not in any_topic
+    assert "其他话题帖子" in by_post_id
+    assert "精确话题帖子" not in by_post_id
+    assert 'name="post_id"' in by_post_id
 
 
 @pytest.mark.django_db
@@ -862,6 +919,60 @@ def test_dashboard_rejects_upstream_operation_for_self_visible_post(monkeypatch)
 
     assert response.status_code == 302
     assert not ReviewTask.objects.filter(post=post).exists()
+
+
+@pytest.mark.django_db
+def test_dashboard_allows_self_visible_post_author_mute_without_post_operation(monkeypatch):
+    """Only actions that alter a post remain unavailable for self-visible posts."""
+    monkeypatch.setattr(runtime, "enable_upstream_writes", True)
+    monkeypatch.setattr(runtime, "enable_mute_writes", True)
+    user = get_user_model().objects.create_user(username="self-visible-author-action")
+    post = OriginalPost.objects.create(
+        topic_id=1011,
+        content_id="self-visible-author-action-content",
+        status=POST_STATUS_SELF_VISIBLE,
+        source_appid="wx-game",
+        author_openid="self-visible-author",
+    )
+    source = object()
+    executed = []
+
+    @contextmanager
+    def source_session(_post):
+        yield source
+
+    def execute(*args, **kwargs):
+        executed.append(kwargs)
+        assert kwargs["action"] == RecommendedAction.MUTE
+        assert kwargs["source"] is source
+        assert kwargs["openid"] == post.author_openid
+        assert kwargs["source_appid"] == post.source_appid
+        return SimpleNamespace(result_code="OK")
+
+    monkeypatch.setattr("posts.views._source_for_post", source_session)
+    monkeypatch.setattr("posts.views.execute_author_operation_for_identity", execute)
+    monkeypatch.setattr("posts.views._persist_human_mute_intent", lambda **kwargs: None)
+    client = Client()
+    client.force_login(user)
+
+    page = client.get(f"/?appid={post.source_appid}&topic={post.topic_id}").content.decode()
+    assert 'data-operation="MUTE"' in page
+    assert 'data-operation="UNMUTE"' in page
+    assert 'postBoundActions=new Set(["SINK","BLOCK","RESTORE","BLOCK_AND_MUTE"])' in page
+    assert "帖子状态不可覆盖；已保存作者身份时仍可独立执行禁言或解除禁言。" in page
+
+    response = client.post(
+        f"/posts/{post.topic_id}/operate/MUTE/",
+        {
+            "reason": "作者状态核验后禁言",
+            "block_reason": "1",
+            "mute_days": "30",
+            "confirmation_key": "self-visible-author-mute",
+        },
+    )
+
+    assert response.status_code == 302
+    assert len(executed) == 1
 
 
 @pytest.mark.django_db

@@ -11,6 +11,7 @@ from django.utils.dateparse import parse_datetime
 from config.runtime_config import public_runtime_config
 from config.supervisor import SupervisorClient, SupervisorUnavailableError
 from reviews.video import media_tools_available
+from reporting.public_opinion_configuration import public_opinion_conclusion_configuration
 
 MANAGED_SERVICE_NAMES = (
     "controlled_chrome",
@@ -377,7 +378,7 @@ def _build_runtime_console(
         snapshot,
         "mute-maintenance",
         "禁言维护 Worker",
-        "维护已明确标记的永久禁言，并消费作者禁言状态刷新任务。",
+        "维护已明确标记的永久禁言，并消费作者禁言状态刷新、作者扫描与平台禁言名单导入任务。",
         service="mute_maintenance",
         business_condition="只读状态刷新可直接消费；仅永久禁言续期 Job 另需对应写入授权。",
         missing_behavior="未授权时仅续期 Job 不执行写入；只读刷新不受影响。",
@@ -559,6 +560,40 @@ def admin_console_overview(request):
     active_scope = ActiveGameScope.objects.select_related("active_game").filter(pk=1).first()
     game_summary = ManagedGame.objects.aggregate(last_synced_at=Max("last_synced_at"))
     runtime_config = public_runtime_config()
+    today = timezone.localdate()
+    yesterday = today - timedelta(days=1)
+    manual_daily_metric_quick_ranges = (
+        {"label": "昨天", "start_date": yesterday, "end_date": yesterday},
+        {
+            "label": "近 7 天",
+            "start_date": yesterday - timedelta(days=6),
+            "end_date": yesterday,
+        },
+        {
+            "label": "近 30 天",
+            "start_date": yesterday - timedelta(days=29),
+            "end_date": yesterday,
+        },
+    )
+    last_completed_week_end = today - timedelta(days=today.weekday() + 1)
+    last_completed_week_start = last_completed_week_end - timedelta(days=6)
+    manual_weekly_metric_quick_ranges = (
+        {
+            "label": "上周",
+            "start_date": last_completed_week_start,
+            "end_date": last_completed_week_end,
+        },
+        {
+            "label": "近 4 周",
+            "start_date": last_completed_week_start - timedelta(weeks=3),
+            "end_date": last_completed_week_end,
+        },
+        {
+            "label": "近 12 周",
+            "start_date": last_completed_week_start - timedelta(weeks=11),
+            "end_date": last_completed_week_end,
+        },
+    )
     scheduled_producers = []
     active_rules = ScheduledProducerRuleConfig.objects.filter(archived_at__isnull=True).order_by(
         "pk"
@@ -710,6 +745,10 @@ def admin_console_overview(request):
             for rule in producer["rules"]
         ),
     )
+    public_opinion_conclusion_config = public_opinion_conclusion_configuration(
+        appid=active_scope.active_appid if active_scope else "",
+        runtime_config=runtime_config,
+    )
     return {
         "admin_console": {
             "active_policy": active_policy,
@@ -724,6 +763,9 @@ def admin_console_overview(request):
             "running_job_count": BackgroundJob.objects.filter(status=JobStatus.RUNNING).count(),
             "failed_job_count": BackgroundJob.objects.filter(status=JobStatus.FAILED).count(),
             "runtime_config": runtime_config,
+            "manual_daily_metric_quick_ranges": manual_daily_metric_quick_ranges,
+            "manual_weekly_metric_quick_ranges": manual_weekly_metric_quick_ranges,
+            "public_opinion_conclusion_config": public_opinion_conclusion_config,
             "scheduled_producers": scheduled_producers,
             "services": services,
             "supervisor_error": supervisor_error,

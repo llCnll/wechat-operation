@@ -85,20 +85,34 @@ def test_execution_scope_rejects_a_compatibility_appid_outside_current_scope():
         resolve_execution_scope(job)
 
 
-def test_staff_scope_change_uses_explicit_session_controls_and_only_manual_keepalive_is_queued(client):
+def test_staff_scope_change_uses_producer_entrypoints_for_one_off_jobs(client):
     first = _game("game-first")
     second = _game("game-second")
     user = User.objects.create(username="operator", is_staff=True, is_superuser=True)
     client.force_login(user)
 
     response = client.post("/admin/runtime/active-game/", {"appid": first.appid, "return_to": "/admin/"})
-    keepalive = client.post("/admin/runtime/session-keepalive/", {"return_to": "/admin/"})
+    keepalive = client.post(
+        "/admin/scheduled-producers/session_keepalive/run/", {"return_to": "/admin/"}
+    )
+    repeated_keepalive = client.post(
+        "/admin/scheduled-producers/session_keepalive/run/", {"return_to": "/admin/"}
+    )
+    renewal = client.post(
+        "/admin/scheduled-producers/permanent_mute_renewal/run/", {"return_to": "/admin/"}
+    )
+    repeated_renewal = client.post(
+        "/admin/scheduled-producers/permanent_mute_renewal/run/", {"return_to": "/admin/"}
+    )
     probe = client.post("/admin/runtime/session-check/", {"return_to": "/admin/"})
     recover = client.post("/admin/runtime/current-game-frame/", {"return_to": "/admin/"})
     switched = client.post("/admin/runtime/active-game/", {"appid": second.appid, "return_to": "/admin/"})
 
     assert response.status_code == 302
     assert keepalive.status_code == 302
+    assert repeated_keepalive.status_code == 302
+    assert renewal.status_code == 302
+    assert repeated_renewal.status_code == 302
     assert probe.status_code == 302
     assert recover.status_code == 302
     assert switched.status_code == 302
@@ -109,7 +123,29 @@ def test_staff_scope_change_uses_explicit_session_controls_and_only_manual_keepa
     assert keepalive_jobs.get().checkpoint == {
         "execution_scope": {"target_appid": first.appid, "scope_version": 1}
     }
-    assert BackgroundJob.objects.count() == 1
+    renewal_jobs = BackgroundJob.objects.filter(task_type="PERMANENT_MUTE_RENEWAL")
+    assert renewal_jobs.count() == 1
+    assert renewal_jobs.get().parameter_summary == {"source": "manual"}
+    assert renewal_jobs.get().checkpoint["execution_scope"] == {
+        "target_appid": first.appid,
+        "scope_version": 1,
+    }
+    assert BackgroundJob.objects.count() == 2
+
+
+def test_legacy_manual_job_routes_do_not_create_jobs(client):
+    user = User.objects.create(username="legacy-route-operator", is_staff=True, is_superuser=True)
+    client.force_login(user)
+
+    for path in (
+        "/admin/runtime/session-keepalive/",
+        "/admin/runtime/permanent-mute-renewal/",
+        "/admin/runtime/ingestion/enqueue/",
+    ):
+        response = client.post(path)
+        assert response.status_code == 404
+
+    assert not BackgroundJob.objects.exists()
 
 
 def test_staff_catalog_sync_uses_the_session_backed_catalog_service(client, monkeypatch):

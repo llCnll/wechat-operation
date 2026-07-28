@@ -53,6 +53,16 @@
     document.querySelectorAll("[data-config-dialog-close]").forEach((button) => {
       button.addEventListener("click", () => button.closest("dialog")?.close());
     });
+    document.querySelectorAll("[data-manual-date-range]").forEach((button) => {
+      button.addEventListener("click", () => {
+        const dialog = button.closest("dialog");
+        const startDate = dialog?.querySelector('input[name="start_date"]');
+        const endDate = dialog?.querySelector('input[name="end_date"]');
+        if (!startDate || !endDate) return;
+        startDate.value = button.dataset.startDate || "";
+        endDate.value = button.dataset.endDate || "";
+      });
+    });
     document.querySelectorAll("[data-supervisor-log-close]").forEach((button) => {
       button.addEventListener("click", () => button.closest("dialog")?.close());
     });

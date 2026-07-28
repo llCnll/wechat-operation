@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 from datetime import datetime
+from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 from django.db import transaction
 from django.utils import timezone
 
 from jobs.models import BackgroundJob, JobStatus
-from jobs.services import EnqueueResult
+from jobs.services import EnqueueResult, enqueue_active_coalesced_job
 from jobs.task_types import GAME_CIRCLE_SESSION_KEEPALIVE_TASK
 from posts.game_catalog import current_execution_scope
 
@@ -34,11 +35,21 @@ def enqueue_keepalive(*, trigger: str, now: datetime | None = None) -> EnqueueRe
         key = f"game-circle-session:keepalive:{bucket}"
         parameters = {"trigger": "schedule", "automation_key": "session_keepalive", "bucket": bucket}
     else:
-        key = f"game-circle-session:keepalive:manual:{timezone.now().strftime('%Y%m%d%H%M%S%f')}"
+        key = f"game-circle-session:keepalive:manual:{uuid4().hex}"
         parameters = {"trigger": "manual"}
     with transaction.atomic():
         scope = current_execution_scope(persist_default=False)
         parameters["scope_version"] = scope.scope_version
+        if trigger == "manual":
+            return enqueue_active_coalesced_job(
+                task_type=GAME_CIRCLE_SESSION_KEEPALIVE_TASK,
+                idempotency_key=key,
+                active_coalescing_key=(
+                    f"game-circle-session:keepalive:manual:{scope.target_appid}:v{scope.scope_version}"
+                ),
+                parameter_summary=parameters,
+                checkpoint={"execution_scope": scope.as_checkpoint()},
+            )
         job, created = BackgroundJob.objects.get_or_create(
             idempotency_key=key,
             defaults={
