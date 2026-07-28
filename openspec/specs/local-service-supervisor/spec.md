@@ -1,23 +1,21 @@
 # Purpose
 
 定义本机 Supervisor 对 Web 与固定 Worker 的生命周期、状态恢复、日志和受认证控制边界。
-
 ## Requirements
-
 ### Requirement: Supervisor 启动与服务所有权
-系统 SHALL 提供独立于 Django Web 的本机 Supervisor 入口，作为 `controlled_chrome`、`web`、`scheduler`、`game_circle_session`、`ingestion`、`backfill_ingestion`、`metric_sync`、`review`、`video_extraction`、`ai_moderation` 与 `mute_maintenance` 固定服务的唯一进程所有者。`ingestion` SHALL 运行实时采集 Worker，`backfill_ingestion` SHALL 运行人工补采 Worker，`metric_sync` SHALL 运行固定的指标同步管理命令。Supervisor SHALL 在启动时创建所需运行态目录，执行幂等迁移、静态资源收集和默认策略初始化预检，然后启动 Web 并等待健康检查成功；日常部署 MUST 通过 Supervisor 启动和控制受管服务。
+系统 SHALL 提供独立于 Django Web 的本机 Supervisor 入口，作为 `controlled_chrome`、`web`、`scheduler`、`game_circle_session`、`ingestion`、`backfill_ingestion`、`metric_sync`、`review`、`video_extraction`、`ai_moderation`、`mute_maintenance` 与 `public_opinion_reporting` 固定服务的唯一进程所有者。`ingestion` SHALL 运行实时采集 Worker，`backfill_ingestion` SHALL 运行人工补采 Worker，`metric_sync` SHALL 运行固定的指标同步管理命令，`public_opinion_reporting` SHALL 只运行舆情报告 Worker。Supervisor SHALL 在启动时创建所需运行态目录，执行幂等迁移、静态资源收集和默认策略初始化预检，然后启动 Web 并等待健康检查成功；日常部署 MUST 通过 Supervisor 启动和控制受管服务。
 
 #### Scenario: 首次或日常启动 Supervisor
 - **WHEN** 运营人员启动 Supervisor 且预检成功
 - **THEN** Supervisor SHALL 启动 Web 服务并在健康检查成功后报告可访问状态，且不得要求运营人员另行执行 Web 启动命令
-- **THEN** 它 SHALL 按期望状态启动 `metric_sync`，且不得要求运营人员另行执行指标 Worker 命令
+- **THEN** 它 SHALL 按期望状态启动 `metric_sync` 与 `public_opinion_reporting`，且不得要求运营人员另行执行对应 Worker 命令
 
 #### Scenario: 启动预检失败
 - **WHEN** 迁移、静态资源收集或默认策略初始化失败
 - **THEN** Supervisor SHALL 记录脱敏阶段错误并以非成功状态退出，且 MUST NOT 启动 Web 或任一 Worker
 
 ### Requirement: 固定服务的受限生命周期控制
-Supervisor SHALL 使用跨平台独占运行态文件锁保证同一部署仅有一个实例。`web` 仅接受 `status`、日志读取和延迟 `restart`；`controlled_chrome`、`scheduler`、`game_circle_session`、`ingestion`、`backfill_ingestion`、`metric_sync`、`review`、`video_extraction`、`ai_moderation` 与 `mute_maintenance` 接受 `start`、`stop`、`restart`、`status` 和日志读取操作。Supervisor SHALL 使用固定的受管 Python 与管理命令启动服务，且 MUST NOT 接受浏览器、数据库或配置文件提供的任意可执行命令、参数、路径或 PID。
+Supervisor SHALL 使用跨平台独占运行态文件锁保证同一部署仅有一个实例。`web` 仅接受 `status`、日志读取和延迟 `restart`；`controlled_chrome`、`scheduler`、`game_circle_session`、`ingestion`、`backfill_ingestion`、`metric_sync`、`review`、`video_extraction`、`ai_moderation`、`mute_maintenance` 与 `public_opinion_reporting` 接受 `start`、`stop`、`restart`、`status` 和日志读取操作。Supervisor SHALL 使用固定的受管 Python 与管理命令启动服务，且 MUST NOT 接受浏览器、数据库或配置文件提供的任意可执行命令、参数、路径或 PID。
 
 #### Scenario: 启动已配置的 Worker
 - **WHEN** Supervisor 收到对已停止的任一可控 Worker 或 `controlled_chrome` 的启动请求
@@ -118,3 +116,16 @@ Supervisor SHALL 仅监听本机回环地址，并使用存放在受限 `runtime
 #### Scenario: Supervisor 控制通道不可用
 - **WHEN** Django 无法连接 Supervisor 或令牌校验失败
 - **THEN** 系统配置页 SHALL 以只读方式显示 Supervisor 不可用及脱敏错误，且 MUST NOT 直接执行本机进程命令
+
+### Requirement: 舆情报告 Worker 的受管边界
+Supervisor SHALL 将 `public_opinion_reporting` 作为默认受管的固定 Worker。该 Worker SHALL 只认领 `PUBLIC_OPINION_REPORT`，只读取本地数据库并写入报告快照；不得建立 CDP 会话、获得会话 IPC capability、调用上游、执行审核或发起写操作。系统配置 SHALL 展示该 Worker 的状态、日志以及启动、停止和重启控制。
+
+#### Scenario: Worker 停止时创建报告
+- **WHEN** 运营人员创建报告且 `public_opinion_reporting` 未运行
+- **THEN** 系统 SHALL 创建或复用报告 Job，并明确提示该任务等待 Worker 启动
+- **THEN** Web 请求不得自行计算报告或启动 Worker
+
+#### Scenario: Worker 只认领报告任务
+- **WHEN** `public_opinion_reporting` 与其他固定 Worker 同时运行
+- **THEN** 它 SHALL 只认领 `PUBLIC_OPINION_REPORT`
+- **THEN** 其他 Worker 不得认领该任务或将其标记为未注册

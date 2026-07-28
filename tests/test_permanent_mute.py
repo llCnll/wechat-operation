@@ -243,8 +243,7 @@ def test_renewal_remutes_a_permanently_marked_author_when_platform_deadline_is_z
     with (
         patch("jobs.permanent_mute.GameCirclePostClient", return_value=nullcontext(object())),
         patch("jobs.permanent_mute._refresh_status", return_value=status),
-        patch("jobs.permanent_mute._task_for_status", return_value=SimpleNamespace()),
-        patch("jobs.permanent_mute.execute_confirmed_operation", return_value=successful_audit) as execute,
+        patch("jobs.permanent_mute.execute_author_operation", return_value=successful_audit) as execute,
     ):
         _maintain_one(job=job, status=status, scope=ExecutionScope("permanent-game", 1))
 
@@ -264,12 +263,10 @@ def test_renewal_skips_a_stale_candidate_after_user_detail_shows_a_long_deadline
     with (
         patch("jobs.permanent_mute.GameCirclePostClient", return_value=nullcontext(object())),
         patch("jobs.permanent_mute._refresh_status", return_value=status),
-        patch("jobs.permanent_mute._task_for_status") as task_for_status,
-        patch("jobs.permanent_mute.execute_confirmed_operation") as execute,
+        patch("jobs.permanent_mute.execute_author_operation") as execute,
     ):
         _maintain_one(job=job, status=status, scope=ExecutionScope("permanent-game", 1))
 
-    task_for_status.assert_not_called()
     execute.assert_not_called()
 
 
@@ -499,14 +496,12 @@ def test_renewal_unmutes_then_remutes_and_keeps_intent_when_remute_fails():
         idempotency_key="permanent-renewal-state-machine",
         checkpoint={"execution_scope": ExecutionScope("permanent-game", 1).as_checkpoint()},
     )
-    task = SimpleNamespace()
     successful_audit = SimpleNamespace(result_code="OK")
     with (
         patch("jobs.permanent_mute.GameCirclePostClient", return_value=nullcontext(object())),
         patch("jobs.permanent_mute._refresh_status", return_value=status),
-        patch("jobs.permanent_mute._task_for_status", return_value=task),
         patch(
-            "jobs.permanent_mute.execute_confirmed_operation",
+            "jobs.permanent_mute.execute_author_operation",
             side_effect=[successful_audit, successful_audit],
         ) as execute,
     ):
@@ -520,9 +515,8 @@ def test_renewal_unmutes_then_remutes_and_keeps_intent_when_remute_fails():
     with (
         patch("jobs.permanent_mute.GameCirclePostClient", return_value=nullcontext(object())),
         patch("jobs.permanent_mute._refresh_status", return_value=status),
-        patch("jobs.permanent_mute._task_for_status", return_value=task),
         patch(
-            "jobs.permanent_mute.execute_confirmed_operation",
+            "jobs.permanent_mute.execute_author_operation",
             side_effect=[successful_audit, SimpleNamespace(result_code="ACTION_FAILED")],
         ),
         pytest.raises(ValueError, match="禁言回读未确认"),
@@ -546,9 +540,8 @@ def test_renewal_defers_when_the_session_service_is_recovering():
     with (
         patch("jobs.permanent_mute.GameCirclePostClient", return_value=nullcontext(object())),
         patch("jobs.permanent_mute._refresh_status", return_value=status),
-        patch("jobs.permanent_mute._task_for_status", return_value=SimpleNamespace()),
         patch(
-            "jobs.permanent_mute.execute_confirmed_operation",
+            "jobs.permanent_mute.execute_author_operation",
             return_value=SimpleNamespace(result_code="SESSION_RECOVERING"),
         ),
         pytest.raises(JobDeferred),
@@ -593,7 +586,7 @@ def test_human_mute_writes_permanent_intent_only_after_verified_readback(
     with (
         patch("posts.views.is_operation_enabled", return_value=True),
         patch("posts.views._source_for_post", return_value=nullcontext(object())),
-        patch("posts.views.execute_confirmed_operation", return_value=audit),
+            patch("posts.views.execute_author_operation_for_identity", return_value=audit),
     ):
         response = client.post(
             f"/posts/{post.topic_id}/operate/MUTE/",

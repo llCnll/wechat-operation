@@ -105,8 +105,10 @@ def test_staff_scope_change_uses_explicit_session_controls_and_only_manual_keepa
     assert ActiveGameScope.objects.get().active_appid == second.appid
     keepalive_jobs = BackgroundJob.objects.filter(task_type="GAME_CIRCLE_SESSION_KEEPALIVE")
     assert keepalive_jobs.count() == 1
-    assert keepalive_jobs.get().parameter_summary == {"trigger": "manual"}
-    assert keepalive_jobs.get().checkpoint == {}
+    assert keepalive_jobs.get().parameter_summary == {"trigger": "manual", "scope_version": 1}
+    assert keepalive_jobs.get().checkpoint == {
+        "execution_scope": {"target_appid": first.appid, "scope_version": 1}
+    }
     assert BackgroundJob.objects.count() == 1
 
 

@@ -6,7 +6,7 @@ from contextlib import contextmanager
 from datetime import datetime
 from typing import Any
 
-from django.db.models import Q
+from django.db.models import OuterRef, Q, Subquery
 from django.utils import timezone
 
 from jobs.adapters import SourceBusinessDeletedError, SourceContractError, SourceTransportError
@@ -15,6 +15,8 @@ from jobs.services import JobDeferred
 from jobs.task_types import (
     AUTHOR_MUTE_STATUS_BACKFILL_V2_TASK,
     LEGACY_INGEST_WINDOW_TASK,
+    FILTERED_POST_REFRESH_TASK,
+    MANUAL_CURRENT_INGEST_WINDOW_TASK,
     MANUAL_INGEST_WINDOW_TASK,
     METRICS_REFRESH_WINDOW_TASK,
     SCHEDULED_INGEST_WINDOW_TASK,
@@ -26,9 +28,10 @@ from jobs.once.author_mute_status_backfill import (
 from reviews.models import ReviewStatus
 
 from .ingestion import ingest_page
-from .game_catalog import checkpoint_with_execution_scope, resolve_execution_scope
-from .models import OriginalPost, mark_post_deleted
-from .services import store_post_interaction_metrics, store_post_metrics
+from .dashboard_filters import filter_original_posts, original_post_filter_from_parameters
+from .game_catalog import checkpoint_with_execution_scope, resolve_execution_scope, resolve_fixed_execution_scope
+from .models import InteractionSnapshot, OriginalPost
+from .services import refresh_one_post_from_source, store_post_interaction_metrics
 from config.game_circle_ipc import (
     GameCircleIpcError,
     GameCirclePostClient,
@@ -132,28 +135,23 @@ def sync_pending_status_handler(job: BackgroundJob) -> None:
     attempted = 0
     refreshed = 0
     failed = 0
+    fallback_author_openids: set[str] = set()
     with _source_client(scope) as client:
         for post in posts:
             attempted += 1
             try:
-                requested_at = timezone.now()
-                payload = client.get_post_metrics(post.topic_id)
-            except SourceBusinessDeletedError:
-                post.status = mark_post_deleted(post.status)
-                post.save(update_fields=["status", "updated_at"])
+                refresh_one_post_from_source(
+                    client,
+                    post,
+                    source_appid=appid,
+                    fallback_author_openids=fallback_author_openids,
+                )
             except (SourceContractError, SourceTransportError) as exc:
                 _raise_if_session_recovering(exc)
                 failed += 1
                 continue
-            else:
-                try:
-                    store_post_metrics(post, payload, source_requested_at=requested_at)
-                except (SourceContractError, SourceTransportError) as exc:
-                    _raise_if_session_recovering(exc)
-                    failed += 1
-                    continue
-                # Rotate the next scan toward older pending posts when the status is unchanged.
-                post.save(update_fields=["updated_at"])
+            # Rotate the next scan toward older pending posts when the status is unchanged.
+            post.save(update_fields=["updated_at"])
             refreshed += 1
     job.checkpoint = checkpoint_with_execution_scope(
         job,
@@ -167,6 +165,91 @@ def sync_pending_status_handler(job: BackgroundJob) -> None:
     job.save(update_fields=["checkpoint", "updated_at"])
     if failed:
         raise SourceTransportError("状态巡检存在未完成的来源读取")
+
+
+def filtered_post_refresh_handler(job: BackgroundJob) -> None:
+    """Refresh all posts matching the submit-time predicate with a stable topic cursor."""
+    try:
+        scope = resolve_fixed_execution_scope(job)
+        filters = original_post_filter_from_parameters((job.parameter_summary or {}).get("filters"))
+    except ValueError as exc:
+        raise SourceContractError(str(exc)) from exc
+    checkpoint = job.checkpoint or {}
+    cursor = int(checkpoint.get("last_topic_id", 0))
+    attempted = int(checkpoint.get("attempted", 0))
+    refreshed = int(checkpoint.get("refreshed", 0))
+    deleted = int(checkpoint.get("deleted", 0))
+    author_fallback = int(checkpoint.get("author_fallback", 0))
+    skipped_missing_author = int(checkpoint.get("skipped_missing_author", 0))
+    failed = int(checkpoint.get("failed", 0))
+    fallback_author_openids: set[str] = set()
+
+    def save_checkpoint(*, complete: bool) -> None:
+        job.checkpoint = checkpoint_with_execution_scope(
+            job,
+            {
+                "last_topic_id": cursor,
+                "attempted": attempted,
+                "refreshed": refreshed,
+                "deleted": deleted,
+                "author_fallback": author_fallback,
+                "skipped_missing_author": skipped_missing_author,
+                "failed": failed,
+                "complete": complete,
+            },
+        )
+        job.save(update_fields=("checkpoint", "updated_at"))
+
+    base = OriginalPost.objects.annotate(
+        latest_view_count=Subquery(
+            InteractionSnapshot.objects.filter(post_id=OuterRef("pk"))
+            .order_by("-captured_at")
+            .values("view_count")[:1]
+        )
+    )
+    with _source_client(scope) as client:
+        while True:
+            post = (
+                filter_original_posts(base, source_appid=scope.target_appid, filters=filters)
+                .filter(topic_id__gt=cursor)
+                .order_by("topic_id")
+                .first()
+            )
+            if post is None:
+                save_checkpoint(complete=True)
+                if failed:
+                    raise SourceTransportError("筛选刷新存在未完成的来源读取")
+                return
+            attempted += 1
+            try:
+                outcome = refresh_one_post_from_source(
+                    client,
+                    post,
+                    source_appid=scope.target_appid,
+                    fallback_author_openids=fallback_author_openids,
+                )
+            except (SourceContractError, SourceTransportError) as exc:
+                _raise_if_session_recovering(exc)
+                failed += 1
+                # A cursor is an acknowledgement of one completed target.
+                # Advancing past a retryable failure would make the final Job
+                # status truthful but silently omit that post on the next
+                # attempt.  Persist only aggregate progress and let the job
+                # retry the same topic.
+                save_checkpoint(complete=False)
+                raise SourceTransportError("筛选刷新存在未完成的来源读取") from exc
+            else:
+                if outcome == "refreshed":
+                    refreshed += 1
+                elif outcome == "author_fallback":
+                    deleted += 1
+                    author_fallback += 1
+                else:
+                    deleted += 1
+                    if not post.author_openid:
+                        skipped_missing_author += 1
+            cursor = post.topic_id
+            save_checkpoint(complete=False)
 
 
 def refresh_metrics_window_handler(job: BackgroundJob) -> None:
@@ -249,6 +332,8 @@ REALTIME_INGESTION_WORKER_HANDLERS = {
 BACKFILL_INGESTION_WORKER_HANDLERS = {
     LEGACY_INGEST_WINDOW_TASK: ingest_window_handler,
     MANUAL_INGEST_WINDOW_TASK: ingest_window_handler,
+    MANUAL_CURRENT_INGEST_WINDOW_TASK: ingest_window_handler,
+    FILTERED_POST_REFRESH_TASK: filtered_post_refresh_handler,
     METRICS_REFRESH_WINDOW_TASK: refresh_metrics_window_handler,
     AUTHOR_MUTE_STATUS_BACKFILL_V2_TASK: author_mute_status_backfill_handler,
 }

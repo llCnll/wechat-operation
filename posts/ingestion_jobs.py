@@ -2,18 +2,25 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from hashlib import sha256
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 from django.conf import settings
+from django.db import transaction
+from django.utils import timezone
 
 from jobs.models import BackgroundJob, JobStatus
-from jobs.services import enqueue_job_with_result
+from jobs.services import enqueue_active_coalesced_job, enqueue_job_with_result
 
-from .game_catalog import active_game_appid
+from .dashboard_filters import OriginalPostFilter
+from .game_catalog import active_game_appid, current_execution_scope
 from .tasks import (
+    FILTERED_POST_REFRESH_TASK,
+    MANUAL_CURRENT_INGEST_WINDOW_TASK,
     MANUAL_INGEST_WINDOW_TASK,
     METRICS_REFRESH_WINDOW_TASK,
     SCHEDULED_INGEST_WINDOW_TASK,
@@ -124,6 +131,61 @@ def enqueue_manual_ingestion_window(
         task_type=MANUAL_INGEST_WINDOW_TASK,
         idempotency_prefix="manual-ingest-window",
     )
+
+
+def enqueue_manual_current_ingestion_window(
+    *, now: datetime | None = None
+) -> IngestionEnqueueResult:
+    """Queue the producer-owned, fixed current window under the submit-time scope."""
+    local_now = (now or timezone.now()).astimezone(SHANGHAI).replace(second=0, microsecond=0)
+    window = IngestionWindow(
+        start_time=int((local_now - timedelta(minutes=30)).timestamp()),
+        end_time=int(local_now.timestamp()),
+    )
+    with transaction.atomic():
+        scope = current_execution_scope(persist_default=False)
+        parameters = {
+            "appid": scope.target_appid,
+            "start_time": window.start_time,
+            "end_time": window.end_time,
+            "page_size": 20,
+        }
+        result = enqueue_active_coalesced_job(
+            task_type=MANUAL_CURRENT_INGEST_WINDOW_TASK,
+            idempotency_key=(
+                f"manual-current-ingest:{scope.target_appid}:{scope.scope_version}:"
+                f"{window.start_time}:{window.end_time}:20:{uuid4().hex}"
+            ),
+            active_coalescing_key=(
+                f"manual-current-ingest:{scope.target_appid}:v{scope.scope_version}:"
+                f"{window.start_time}:{window.end_time}:20"
+            ),
+            parameter_summary=parameters,
+            checkpoint={"execution_scope": scope.as_checkpoint()},
+        )
+    return IngestionEnqueueResult(job=result.job, created=result.created)
+
+
+def enqueue_filtered_post_refresh(*, filters: OriginalPostFilter) -> IngestionEnqueueResult:
+    """Queue a fixed predicate; the Worker resolves matching local posts when it runs."""
+    with transaction.atomic():
+        scope = current_execution_scope(persist_default=False)
+        parameters = {"appid": scope.target_appid, "filters": filters.as_parameters()}
+        predicate_key = sha256(
+            json.dumps(parameters["filters"], ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+        result = enqueue_active_coalesced_job(
+            task_type=FILTERED_POST_REFRESH_TASK,
+            idempotency_key=(
+                f"filtered-post-refresh:{scope.target_appid}:{scope.scope_version}:{uuid4().hex}"
+            ),
+            active_coalescing_key=(
+                f"filtered-post-refresh:{scope.target_appid}:v{scope.scope_version}:{predicate_key}"
+            ),
+            parameter_summary=parameters,
+            checkpoint={"execution_scope": scope.as_checkpoint()},
+        )
+    return IngestionEnqueueResult(job=result.job, created=result.created)
 
 
 def enqueue_ingestion_window(

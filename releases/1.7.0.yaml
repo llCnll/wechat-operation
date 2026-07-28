@@ -1,0 +1,24 @@
+version: 1.7.0
+previous: 1.6.1
+changes:
+  - 重构作者禁言治理：禁言和解除禁言以“作者 + 当前游戏”为主体，删除或仅自己可见的帖子不再阻断已核验作者操作；写后在第 2、5、8、10 秒有限回读，绝不自动重发写请求。
+  - 优化 AI 操作复审：运营人员可一次提交最终帖子状态与作者禁言决定；已人工纠正记录同时展示 AI 原执行和经审计确认的最终状态覆盖结果。
+  - 新增自动任务生产者的受控立即执行入口，支持当前窗口帖子采集、会话保活、永久禁言续期，以及日/周指标的受限日期范围运行。
+  - 新增原创帖子当前筛选结果的异步刷新：统一同步帖子状态、互动指标和作者状态；仅在已确认删除或不可读取时按已保存作者身份回退读取作者状态。
+upgrade:
+  dependencies: none
+  database: migrate
+  static: collectstatic
+  restart:
+    mode: supervisor
+    services: []
+  once_jobs: []
+  manual: []
+verification:
+  - uv run python manage.py validate_releases
+  - uv run pytest -q tests/test_release_protocol.py tests/test_release_source_archive.py
+  - uv run python manage.py check
+  - 完整重启 Supervisor 后，确认 Web、游戏圈会话服务、实时采集、人工补采、指标、复审、禁言维护、调度与 AI 自动处置 Worker 均按既有 desired 状态恢复。
+  - 使用删除或仅自己可见且已保存作者身份的受控样本，确认禁言管理入口不读取帖子详情；如经运营负责人明确授权进行一次真实禁言，确认仅有一次上游写入，作者详情仅在写后第 2、5、8、10 秒有限回读，审计不保存认证材料。
+  - 在 AI 复审中以沉底覆盖一条 AI 屏蔽样本，确认记录保留“正常 → 已屏蔽”的 AI 原执行，并展示经最终审计确认的“已屏蔽 → 已沉底”；不得执行恢复或重复写入。
+  - 分别提交有效日指标和周指标范围，以及当前筛选帖子刷新，确认仅创建受控业务 Job，周范围按周一至周日归一化；切换当前游戏不得改变已入队 Job 的冻结范围。

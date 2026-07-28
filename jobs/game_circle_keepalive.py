@@ -5,11 +5,13 @@ from __future__ import annotations
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
+from django.db import transaction
 from django.utils import timezone
 
 from jobs.models import BackgroundJob, JobStatus
 from jobs.services import EnqueueResult
 from jobs.task_types import GAME_CIRCLE_SESSION_KEEPALIVE_TASK
+from posts.game_catalog import current_execution_scope
 
 
 SHANGHAI = ZoneInfo("Asia/Shanghai")
@@ -24,7 +26,7 @@ def keepalive_bucket(now: datetime) -> str:
 
 
 def enqueue_keepalive(*, trigger: str, now: datetime | None = None) -> EnqueueResult:
-    """Queue a job without an AppID or scope snapshot; the consumer freezes it."""
+    """Queue a keepalive job with the submit-time game scope frozen in its checkpoint."""
     if trigger not in {"schedule", "manual"}:
         raise ValueError("会话保活触发方式无效")
     if trigger == "schedule":
@@ -34,8 +36,15 @@ def enqueue_keepalive(*, trigger: str, now: datetime | None = None) -> EnqueueRe
     else:
         key = f"game-circle-session:keepalive:manual:{timezone.now().strftime('%Y%m%d%H%M%S%f')}"
         parameters = {"trigger": "manual"}
-    job, created = BackgroundJob.objects.get_or_create(
-        idempotency_key=key,
-        defaults={"task_type": GAME_CIRCLE_SESSION_KEEPALIVE_TASK, "parameter_summary": parameters},
-    )
+    with transaction.atomic():
+        scope = current_execution_scope(persist_default=False)
+        parameters["scope_version"] = scope.scope_version
+        job, created = BackgroundJob.objects.get_or_create(
+            idempotency_key=key,
+            defaults={
+                "task_type": GAME_CIRCLE_SESSION_KEEPALIVE_TASK,
+                "parameter_summary": parameters,
+                "checkpoint": {"execution_scope": scope.as_checkpoint()},
+            },
+        )
     return EnqueueResult(job, created)

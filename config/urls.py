@@ -127,6 +127,11 @@ urlpatterns = [
         name="save-runtime-configuration",
     ),
     path("admin/scheduled-producers/<int:producer_id>/", supervisor_views.save_scheduled_producer, name="save-scheduled-producer"),
+    path(
+        "admin/scheduled-producers/<str:producer_key>/run/",
+        supervisor_views.run_scheduled_producer_now,
+        name="run-scheduled-producer-now",
+    ),
     path("admin/scheduled-producers/<int:producer_id>/rules/", supervisor_views.create_scheduled_producer_rule, name="create-scheduled-producer-rule"),
     path("admin/scheduled-producer-rules/<int:rule_id>/", supervisor_views.save_scheduled_producer_rule, name="save-scheduled-producer-rule"),
     path("admin/scheduled-producer-rules/<int:rule_id>/delete/", supervisor_views.delete_scheduled_producer_rule, name="delete-scheduled-producer-rule"),
@@ -146,6 +151,11 @@ urlpatterns = [
         "mute-management/permanent/",
         post_views.apply_permanent_mute_intent,
         name="apply-permanent-mute-intent",
+    ),
+    path(
+        "mute-management/<int:status_id>/operate/<str:action>/",
+        post_views.confirm_author_mute_operation,
+        name="confirm-author-mute-operation",
     ),
     path(
         "mute-management/<int:status_id>/posts/",
@@ -175,6 +185,11 @@ urlpatterns = [
         "posts/<int:topic_id>/refresh/",
         post_views.refresh_dashboard_post,
         name="refresh-dashboard-post",
+    ),
+    path(
+        "posts/refresh-filtered/",
+        post_views.enqueue_filtered_post_refresh_request,
+        name="enqueue-filtered-post-refresh",
     ),
     path(
         "posts/<int:topic_id>/operate/<str:action>/",

@@ -1121,11 +1121,18 @@ def test_mute_rejects_when_preflight_author_differs_from_saved_value(monkeypatch
 
 
 @pytest.mark.django_db
-def test_mute_reads_at_bounded_delays_without_repeating_write(monkeypatch):
+def test_mute_reads_at_bounded_timepoints_without_repeating_write(monkeypatch):
     monkeypatch.setattr(runtime, "enable_upstream_writes", True)
     monkeypatch.setattr(runtime, "enable_mute_writes", True)
+    clock = [0.0]
     delays = []
-    monkeypatch.setattr("reviews.services.sleep", delays.append)
+    monkeypatch.setattr("reviews.services.monotonic", lambda: clock[0])
+
+    def advance_sleep(seconds):
+        delays.append(seconds)
+        clock[0] += seconds
+
+    monkeypatch.setattr("reviews.services.sleep", advance_sleep)
     post = OriginalPost.objects.create(
         topic_id=214, content_id="mute-delayed", source_appid="wx-test", author_openid="delayed-author"
     )
@@ -1175,7 +1182,7 @@ def test_mute_reads_at_bounded_delays_without_repeating_write(monkeypatch):
     assert audit.result_code == "OK"
     assert source.writes == 1
     assert source.reads == 3
-    assert delays == [2]
+    assert delays == [2, 3]
 
 
 @pytest.mark.django_db
@@ -1216,7 +1223,7 @@ def test_mute_readback_never_exceeds_the_twenty_second_budget(monkeypatch):
 
     assert len(source.timeout_values) == 1
     assert source.timeout_values[0] < 20
-    assert sleeps == []
+    assert sleeps == [2]
     assert clock[0] < 20
 
 
