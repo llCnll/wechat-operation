@@ -6,7 +6,10 @@ from io import BytesIO
 
 from docx import Document
 
+from posts.official_authors import OFFICIAL_IDENTITY_LABELS
+
 from .public_opinion_analysis import feedback_value_display
+from .public_opinion_presentation import present_daily_metrics
 
 
 def _table(document: Document, headings: tuple[str, ...], rows: list[tuple[object, ...]]) -> None:
@@ -55,6 +58,29 @@ def render_public_opinion_word(*, report, run, game_name: str) -> bytes:
     )
     for limitation in payload["limitations"]:
         document.add_paragraph(str(limitation), style="List Bullet")
+    if payload.get("player_topics"):
+        document.add_heading("玩家话题", level=1)
+        _table(document, ("话题", "数量"), [(f"#{item['label']}", item["count"]) for item in payload["player_topics"]])
+    daily_metrics = present_daily_metrics(payload.get("daily_metrics"))
+    if daily_metrics:
+        document.add_heading("日指标证据", level=1)
+        _table(
+            document,
+            ("日期", "来源", "指标", "采集时间"),
+            [
+                (
+                    item.get("day", ""),
+                    item["source_label"],
+                    "\n".join(
+                        f"{metric['label']}：{metric['value']}"
+                        for metric in item["metric_items"]
+                    )
+                    or "未提供可展示指标",
+                    item["captured_at_label"],
+                )
+                for item in daily_metrics
+            ],
+        )
     for title, key in (
         ("内容类别", "categories"),
         ("情绪", "sentiments"),
@@ -114,11 +140,12 @@ def render_public_opinion_word(*, report, run, game_name: str) -> bytes:
     document.add_heading("高互动代表帖", level=1)
     _table(
         document,
-        ("帖子 ID", "标题", "互动总量", "互动率", "快照时间"),
+        ("帖子 ID", "标题", "身份", "互动总量", "互动率", "快照时间"),
         [
             (
                 item["topic_id"],
                 item["title"],
+                OFFICIAL_IDENTITY_LABELS.get(item.get("official_identity"), "玩家内容"),
                 item["interaction_total"],
                 f"{item['engagement_rate']:.2%}",
                 item["captured_at"],
@@ -129,6 +156,23 @@ def render_public_opinion_word(*, report, run, game_name: str) -> bytes:
     document.add_heading("运营观察", level=1)
     for item in payload["observations"]:
         document.add_paragraph(f"{item['message']} 需人工核验。", style="List Bullet")
+    document.add_heading("模型结论", level=1)
+    conclusion = payload.get("conclusion") or {}
+    if conclusion.get("status") == "AVAILABLE":
+        for item in conclusion.get("items", []):
+            document.add_paragraph(f"{item['text']}（证据：{'、'.join(item['evidence_ids'])}）", style="List Bullet")
+    else:
+        document.add_paragraph("模型结论暂不可用；确定性统计仍可作为运营参考。")
+    if conclusion.get("prompt_version"):
+        document.add_paragraph(
+            " · ".join(
+                (
+                    f"模型：{conclusion.get('model_version', '未记录')}",
+                    f"提示词：{conclusion['prompt_version']}",
+                    f"证据 Schema：{conclusion.get('evidence_schema_version', '未记录')}",
+                )
+            )
+        )
     output = BytesIO()
     document.save(output)
     return output.getvalue()

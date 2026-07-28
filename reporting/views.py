@@ -34,6 +34,7 @@ from .public_opinion_jobs import (
 from .public_opinion_jobs import (
     rerun_public_opinion_report as rerun_report_job,
 )
+from .public_opinion_presentation import present_daily_metrics, summarize_daily_metrics
 from .public_opinion_word import render_public_opinion_word
 from .services import (
     analysis_datetime_range,
@@ -189,7 +190,14 @@ def _report_payload_for_display(payload: dict) -> dict:
             for item in representatives.get(key) or []
             if isinstance(item, dict)
         ]
-    return {**payload, "summary": summary, "representative_posts": representatives}
+    daily_metrics = present_daily_metrics(payload.get("daily_metrics"))
+    return {
+        **payload,
+        "summary": summary,
+        "representative_posts": representatives,
+        "daily_metrics": daily_metrics,
+        "daily_metric_summaries": summarize_daily_metrics(daily_metrics),
+    }
 
 
 @login_required

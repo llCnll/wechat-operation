@@ -1,6 +1,11 @@
 import pytest
 
-from config.runtime_config import affected_services, display_service_names, public_runtime_config, update_runtime_config
+from config.runtime_config import (
+    affected_services,
+    display_service_names,
+    public_runtime_config,
+    update_runtime_config,
+)
 
 
 def test_runtime_configuration_preserves_blank_secrets(tmp_path):
@@ -49,7 +54,7 @@ def test_runtime_configuration_rejects_out_of_range_video_values(tmp_path):
 
 
 def test_runtime_configuration_maps_restarts_to_affected_services():
-    assert affected_services({"AI_MODEL"}) == {"review"}
+    assert affected_services({"AI_MODEL"}) == {"public_opinion_reporting", "review"}
     assert affected_services({"ENABLE_BLOCK_WRITES"}) == {"web", "ai_moderation"}
     assert affected_services({"ENABLE_AI_SINK_WRITES"}) == {"web", "ai_moderation"}
     assert affected_services({"SESSION_REPAIR_ENABLED"}) == {"game_circle_session", "scheduler"}

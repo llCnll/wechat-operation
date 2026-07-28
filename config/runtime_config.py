@@ -13,6 +13,7 @@ EDITABLE_KEYS = (
     "AI_API_KEY",
     "AI_MODEL",
     "AI_TIMEOUT_SECONDS",
+    "PUBLIC_OPINION_CONCLUSION_ENABLED",
     "OCR_BASE_URL",
     "OCR_API_KEY",
     "OCR_MODEL",
@@ -48,6 +49,7 @@ BOOLEAN_KEYS = frozenset(key for key in EDITABLE_KEYS if key.startswith("ENABLE_
     "VIDEO_ENABLED",
     "VIDEO_PREFLIGHT_VERIFIED",
     "SESSION_REPAIR_ENABLED",
+    "PUBLIC_OPINION_CONCLUSION_ENABLED",
 }
 SESSION_MAINTENANCE_KEYS = frozenset(("SESSION_REPAIR_ENABLED",))
 VIDEO_DEFAULTS = {
@@ -210,6 +212,8 @@ def affected_services(changed: set[str]) -> set[str]:
     }
     if changed & review_model_keys:
         services.add("review")
+    if changed & (review_model_keys | {"PUBLIC_OPINION_CONCLUSION_ENABLED"}):
+        services.add("public_opinion_reporting")
     if changed & video_keys:
         services.add("video_extraction")
     if changed & (BOOLEAN_KEYS - SESSION_MAINTENANCE_KEYS):

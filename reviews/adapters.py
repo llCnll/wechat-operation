@@ -55,7 +55,7 @@ class AssessmentOutput(BaseModel):
     secondary_categories: list[str] = Field(default_factory=list)
     risk_labels: list[RiskOutput] = Field(default_factory=list)
     sentiment: str = ""
-    feedback_value: str = ""
+    feedback_value: Literal["", "NONE", "LOW", "MEDIUM", "HIGH"] = ""
     recommended_action: str
     overall_confidence: float = Field(ge=0, le=1)
     needs_human_review: Literal[True] = True
@@ -67,6 +67,9 @@ def normalize_assessment_output(payload: object) -> dict:
     if not isinstance(payload, dict):
         return payload
     normalized = dict(payload)
+    feedback_value = normalized.get("feedback_value")
+    if isinstance(feedback_value, str):
+        normalized["feedback_value"] = feedback_value.strip().upper()
     risks = normalized.get("risk_labels")
     if isinstance(risks, list):
         normalized_risks = []
@@ -222,6 +225,7 @@ def review_system_prompt(
         "OFF_TOPIC、OTHER。\n"
         "recommended_action 只能是 KEEP、SINK、BLOCK、MUTE、BLOCK_AND_MUTE、HUMAN_REVIEW。\n"
         "overall_confidence 和每项风险 confidence 必须是 0 到 1 的数字。\n"
+        "feedback_value 只能是空字符串、NONE、LOW、MEDIUM 或 HIGH。\n"
         "必须包含 content_category、secondary_categories、risk_labels、sentiment、feedback_value、"
         "recommended_action、overall_confidence、needs_human_review 和 reply_suggestion。\n"
         'risk_labels 必须是对象数组，例如 [{"label":"TRAFFIC_DIVERSION","confidence":0.98,'

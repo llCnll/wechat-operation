@@ -8,6 +8,7 @@ from django.db.models import F, Q, Value
 
 from reviews.models import ReviewStatus
 
+from .content import normalize_topic_label
 from .models import (
     POST_STATUS_BLOCKED,
     POST_STATUS_DELETED,
@@ -15,6 +16,7 @@ from .models import (
     POST_STATUS_SELF_VISIBLE,
     POST_STATUS_SUNK,
 )
+from .topic_filters import filter_posts_with_topic
 
 
 POST_STATUS_FILTER_FLAGS = {
@@ -28,6 +30,9 @@ POST_STATUS_FILTER_FLAGS = {
 @dataclass(frozen=True)
 class OriginalPostFilter:
     search: str = ""
+    post_id: int | None = None
+    topic_label: str = ""
+    has_topics: bool = False
     category: tuple[str, ...] = ()
     risk: tuple[str, ...] = ()
     suggested_action: tuple[str, ...] = ()
@@ -40,6 +45,9 @@ class OriginalPostFilter:
     def as_parameters(self) -> dict[str, object]:
         return {
             "search": self.search,
+            "post_id": self.post_id,
+            "topic_label": self.topic_label,
+            "has_topics": self.has_topics,
             "category": list(self.category),
             "risk": list(self.risk),
             "suggested_action": list(self.suggested_action),
@@ -65,11 +73,28 @@ def parse_original_post_filter(values) -> OriginalPostFilter:
         except ValueError as exc:
             raise ValueError(f"筛选条件 {name} 无效") from exc
 
+    def positive_integer(name: str) -> int | None:
+        raw = values.get(name, "").strip()
+        if not raw:
+            return None
+        if not raw.isdecimal():
+            raise ValueError(f"筛选条件 {name} 无效")
+        value = int(raw)
+        if value <= 0:
+            raise ValueError(f"筛选条件 {name} 无效")
+        return value
+
     reviewed = values.get("reviewed", "").strip()
     if reviewed not in {"", "yes", "no"}:
         raise ValueError("筛选条件 reviewed 无效")
+    has_topics = values.get("has_topics", "").strip()
+    if has_topics not in {"", "yes"}:
+        raise ValueError("筛选条件 has_topics 无效")
     return OriginalPostFilter(
         search=values.get("q", "").strip()[:200],
+        post_id=positive_integer("post_id"),
+        topic_label=normalize_topic_label(values.get("topic_label", "")),
+        has_topics=has_topics == "yes",
         category=items("category"),
         risk=items("risk"),
         suggested_action=items("suggested_action"),
@@ -101,11 +126,24 @@ def original_post_filter_from_parameters(parameters: object) -> OriginalPostFilt
         return float(value)
 
     search = parameters.get("search", "")
+    post_id = parameters.get("post_id")
+    topic_label = parameters.get("topic_label", "")
+    has_topics = parameters.get("has_topics", False)
     reviewed = parameters.get("reviewed", "")
-    if not isinstance(search, str) or not isinstance(reviewed, str) or reviewed not in {"", "yes", "no"}:
+    if (
+        not isinstance(search, str)
+        or (post_id is not None and (isinstance(post_id, bool) or not isinstance(post_id, int) or post_id <= 0))
+        or not isinstance(topic_label, str)
+        or not isinstance(has_topics, bool)
+        or not isinstance(reviewed, str)
+        or reviewed not in {"", "yes", "no"}
+    ):
         raise ValueError("筛选刷新任务参数无效")
     return OriginalPostFilter(
         search=search,
+        post_id=post_id,
+        topic_label=normalize_topic_label(topic_label),
+        has_topics=has_topics,
         category=sequence("category"),
         risk=sequence("risk"),
         suggested_action=sequence("suggested_action"),
@@ -129,6 +167,12 @@ def filter_original_posts(queryset, *, source_appid: str | None, filters: Origin
             | Q(content_text__icontains=filters.search)
             | Q(ballot_text__icontains=filters.search)
         )
+    if filters.post_id is not None:
+        posts = posts.filter(topic_id=filters.post_id)
+    if filters.has_topics:
+        posts = posts.exclude(topics=[])
+    if filters.topic_label:
+        posts = filter_posts_with_topic(posts, filters.topic_label)
     if filters.category:
         posts = posts.filter(review_task__assessment__category__in=filters.category)
     if filters.risk:

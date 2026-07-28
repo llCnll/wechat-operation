@@ -31,6 +31,7 @@ class RuntimeSettings(BaseSettings):
     ai_api_key: str = ""
     ai_model: str = ""
     ai_timeout_seconds: float = Field(default=30, ge=1, le=120)
+    public_opinion_conclusion_enabled: bool = False
     ocr_base_url: str = ""
     ocr_api_key: str = ""
     ocr_model: str = ""

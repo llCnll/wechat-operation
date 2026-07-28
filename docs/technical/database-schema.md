@@ -53,6 +53,7 @@
 | `title` | 字符串，最长 500，可留空 | 帖子标题；游戏圈通常为空。 |
 | `content_html` | 文本，可留空 | 原始富文本内容。 |
 | `content_text` | 文本，可留空 | 用于展示、搜索与 AI 的纯文本内容。 |
+| `topics` | JSON 数组，可留空 | 从正文末尾独立话题行解析的有序去重话题；不混入正文。 |
 | `ballot_text` | 文本，可留空 | 投票标题和选项拼接文本，用于识别投票内引流。 |
 | `publish_time` | 日期时间，可空 | 原平台发布时间。 |
 | `status` | 整数，可空 | 帖子管理状态；包含本地删除状态位。 |
@@ -78,6 +79,19 @@
 | `NULL` 或其他值 | 尚未同步或原平台未知状态。 |
 
 `2` 是唯一正常基值，不参与按位组合。屏蔽、沉底和删除使用按位与判定；例如 `status & 128 != 0` 表示原平台已删除。`16` 是独立的上游仅自己可见状态：可在工作台筛选、查看和刷新，但系统不会发送沉底、屏蔽、恢复或禁言操作覆盖该状态。删除确认时间不再独立保存，可通过 `updated_at` 与后台任务记录辅助追溯。
+
+## `posts_officialauthor`（官方作者配置）
+
+按 `(source_appid, openid)` 唯一维护已核验官方作者。`disabled_at` 非空表示已移除，保留最小配置审计；该表不承载禁言状态，也不批量回写原创帖。内容页动态按有效 OpenID 白名单、再按游戏名称精确匹配判定身份。
+
+| 字段 | 类型与约束 | 含义 |
+| --- | --- | --- |
+| `source_appid` / `openid` | 字符串，联合唯一 | 官方身份的游戏作用域与经核验作者 ID。 |
+| `nick_name` | 字符串，可留空 | 最近一次成功核验的最小展示投影。 |
+| `verified_at` | 日期时间 | 最近成功核验时间。 |
+| `created_by_id` | 外键，可空 | 首次加入的后台操作者。 |
+| `disabled_at` / `disabled_by_id` | 日期时间/外键，可空 | 停用审计；停用不删除历史事实。 |
+| `created_at` / `updated_at` | 日期时间 | 本地配置创建与最近修改时间。 |
 
 ## `posts_authormutestatus`（作者禁言状态）
 
@@ -452,9 +466,11 @@ AI 评估中的单项风险证据，可保存多段命中内容。
 | `PERMANENT_MUTE_RENEWAL` | 由自动任务生产者按受限定时规则为当前游戏临近到期或禁言时间为 0 的永久标记续期；不处理全局禁言或其他游戏。 | 禁言维护 Worker（Supervisor 服务 `mute_maintenance`） |
 | `AUTHOR_MUTE_STATUS_REFRESH` | 手动刷新当前游戏禁言列表作者的禁言时间；冻结列表判断时刻与作者集合并逐位读取用户详情，不执行上游写操作；同一范围仅保留一个活跃任务。 | 禁言维护 Worker（Supervisor 服务 `mute_maintenance`） |
 | `POST_AUTHOR_MUTE_STATUS_SYNC` | 扫描当前游戏全量帖子作者；按作者去重读取用户详情，只将仍禁言作者补充到禁言管理，不设置永久禁言；同一范围仅保留一个活跃任务。 | 禁言维护 Worker（Supervisor 服务 `mute_maintenance`） |
+| `BLOCKED_USER_LIST_SYNC` | 手动导入平台当前禁言名单；从零起始分页读取最小名单字段，只同步当前游戏禁言截止与昵称，不读取帖子/作者详情、不设置永久意图，名单缺席不清除本地状态。 | 禁言维护 Worker（Supervisor 服务 `mute_maintenance`） |
 | `AUTHOR_MUTE_STATUS_BACKFILL_V2` | 一次性补全历史原创帖作者昵称与禁言状态；已知作者按游戏去重读取作者详情。旧 `AUTHOR_MUTE_STATUS_BACKFILL` 不由新版 Worker 认领。 | 人工补采 Worker（Supervisor 服务 `backfill_ingestion`） |
+| `POST_TOPIC_BACKFILL_V1` | 一次性本地拆分历史原创帖尾部话题；仅保存主键游标与聚合计数，不访问上游。 | 人工补采 Worker（Supervisor 服务 `backfill_ingestion`） |
 | `METRIC_DAILY_SYNC` / `METRIC_WEEKLY_SYNC` / `METRIC_BACKFILL` | 游戏圈日/周聚合指标同步或人工范围回填；当前工作区已实现、待发布。 | 指标快照 Worker（Supervisor 服务 `metric_sync`） |
-| `PUBLIC_OPINION_REPORT` | 锁定本地正常原创帖来源后生成一份舆情报告运行版本；不调用 CDP、上游或模型。 | 舆情报告 Worker（Supervisor 服务 `public_opinion_reporting`） |
+| `PUBLIC_OPINION_REPORT` | 锁定本地正常原创帖来源后生成一份舆情报告运行版本；不调用 CDP 或上游。V2 可在确定性结果后按显式开关调用一次受约束模型结论。 | 舆情报告 Worker（Supervisor 服务 `public_opinion_reporting`） |
 
 ## `reporting_gamecirclemetricsnapshot`（游戏圈指标快照，待发布）
 
@@ -472,6 +488,21 @@ AI 评估中的单项风险证据，可保存多段命中内容。
 | `captured_at` | 日期时间 | 最近一次成功获取时间。 |
 | `latest_job_id` | 外键，可空，指向 `jobs_backgroundjob`，置空删除 | 最近写入该快照的后台任务。 |
 | `created_at` / `updated_at` | 日期时间，自动写入/更新 | 创建和最近更新时间。 |
+
+## `reporting_publicopinionreportsource` 与 `reporting_publicopinionreportrun`（舆情报告快照）
+
+报告来源保存受保护的、首次锁定的正文和 AI 输入；运行版本保存不可变的对外结果。来源中的作者 OpenID、昵称和头像均不保存。运行中的 `deterministic_payload` 仅用于 Worker 中断恢复，不向报告详情、来源页或 Word 导出渲染。
+
+| 表/字段 | 含义 |
+| --- | --- |
+| `PublicOpinionReportSource.topics` | 锁定的独立尾部话题，不属于正文热词输入。 |
+| `ai_feedback_value` / `ai_feedback_state` | 已归一化的封闭反馈价值及有效、缺失或无效覆盖状态；异常原文不进入报告。 |
+| `official_identity` | 锁定时的官方身份来源：已核验、名称匹配或玩家。 |
+| `PublicOpinionReportRun.metrics_as_of` | 本次运行读取互动和日指标的统一时点。 |
+| `data_quality` / `result_payload` | 对外可展示的质量摘要与不可变结果；不重新查询当前帖子、身份或指标。 |
+| `deterministic_payload` | 内部确定性检查点，包含固定证据和输入统计，禁止对外渲染。 |
+| `conclusion_status` / `conclusion_payload` | 受约束模型结论的终态与验证后内容；不可用不使报告失败。 |
+| `conclusion_attempted_at` / `conclusion_input_hash` / `conclusion_error_code` | 单次模型尝试审计、输入哈希与固定脱敏失败分类。 |
 
 ## `reporting_metricjoblease`（指标任务租约，待发布）
 

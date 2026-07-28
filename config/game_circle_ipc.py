@@ -38,6 +38,7 @@ POST_METHODS = frozenset(
         "POSTS_GET_CONTENT_CARD",
         "POSTS_GET_METRICS",
         "POSTS_GET_AUTHOR_DETAIL",
+        "POSTS_LIST_BLOCKED_USERS",
         "POSTS_OPERATION",
     }
 )
@@ -304,6 +305,23 @@ class GameCirclePostClient:
             "POSTS_GET_AUTHOR_DETAIL",
             {"openid": openid, "timeout_seconds": timeout_seconds},
         )
+
+    def list_blocked_users(self, *, page: int, page_size: int) -> dict[str, Any]:
+        """Read a minimal page from the platform's current blocked-user list."""
+        if not isinstance(page, int) or page < 0:
+            raise SourceContractError("禁言名单页码无效")
+        if not isinstance(page_size, int) or not 1 <= page_size <= 500:
+            raise SourceContractError("禁言名单分页大小无效")
+        result = self._ipc.call(
+            "POSTS_LIST_BLOCKED_USERS",
+            scope=self.scope,
+            params={"page": page, "page_size": page_size},
+        )
+        total = result.get("total")
+        items = result.get("items")
+        if not isinstance(total, int) or total < 0 or not isinstance(items, list):
+            raise SourceContractError("游戏圈禁言名单响应结构无效")
+        return {"total": total, "items": items}
 
     def perform_confirmed_operation(self, *, topic_id: int | None, action: str, payload: dict[str, Any], operation_id: str = "") -> dict[str, Any]:
         return self._payload("POSTS_OPERATION", {"topic_id": topic_id, "action": action, "payload": payload}, operation_id=operation_id or str(uuid4()))

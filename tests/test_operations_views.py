@@ -45,6 +45,18 @@ from reviews.video import media_fingerprint
 from reviews.video_tasks import VIDEO_EXTRACTOR_VERSION
 
 
+@pytest.mark.django_db
+def test_ai_operation_reviews_page_renders_without_review_records(client):
+    user = get_user_model().objects.create_user(username="review-page")
+    game = ManagedGame.objects.create(appid="review-page-game", name="复审页游戏")
+    set_active_game(appid=game.appid)
+    client.force_login(user)
+
+    response = client.get(f"/ai-operation-reviews/?appid={game.appid}")
+
+    assert response.status_code == 200
+
+
 def _activate_game(appid: str) -> None:
     game, _ = ManagedGame.objects.get_or_create(appid=appid, defaults={"name": f"测试-{appid}"})
     set_active_game(appid=game.appid)
@@ -101,6 +113,51 @@ def test_operations_dashboard_renders_original_post_metrics():
     assert 'data-operation="SKIP"' in response.content.decode()
     assert 'data-operation="UNMUTE"' in response.content.decode()
     assert f"/posts/{post.topic_id}/refresh/" in response.content.decode()
+
+
+@pytest.mark.django_db
+def test_operations_dashboard_filters_by_independent_topic_exactly():
+    user = get_user_model().objects.create_user(username="topic-filter", password="test-password")
+    appid = "topic-filter-game"
+    _activate_game(appid)
+    OriginalPost.objects.create(
+        topic_id=991,
+        content_id="topic-filter-match",
+        content_text="精确话题帖子",
+        topics=["城主别慌张攻略"],
+        source_appid=appid,
+    )
+    OriginalPost.objects.create(
+        topic_id=992,
+        content_id="topic-filter-other",
+        content_text="其他话题帖子",
+        topics=["城主别慌张活动"],
+        source_appid=appid,
+    )
+    OriginalPost.objects.create(
+        topic_id=993,
+        content_id="topic-filter-none",
+        content_text="无话题帖子",
+        source_appid=appid,
+    )
+    client = Client()
+    client.force_login(user)
+
+    exact = client.get("/", {"appid": appid, "topic_label": "#城主别慌张攻略"}).content.decode()
+    any_topic = client.get("/", {"appid": appid, "has_topics": "yes"}).content.decode()
+    by_post_id = client.get("/", {"appid": appid, "post_id": "992"}).content.decode()
+
+    assert "精确话题帖子" in exact
+    assert "其他话题帖子" not in exact
+    assert "无话题帖子" not in exact
+    assert "仅看带话题的帖子" in exact
+    assert "function updateTopicFilter()" in exact
+    assert "精确话题帖子" in any_topic
+    assert "其他话题帖子" in any_topic
+    assert "无话题帖子" not in any_topic
+    assert "其他话题帖子" in by_post_id
+    assert "精确话题帖子" not in by_post_id
+    assert 'name="post_id"' in by_post_id
 
 
 @pytest.mark.django_db

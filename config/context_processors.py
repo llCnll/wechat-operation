@@ -377,7 +377,7 @@ def _build_runtime_console(
         snapshot,
         "mute-maintenance",
         "禁言维护 Worker",
-        "维护已明确标记的永久禁言，并消费作者禁言状态刷新任务。",
+        "维护已明确标记的永久禁言，并消费作者禁言状态刷新、作者扫描与平台禁言名单导入任务。",
         service="mute_maintenance",
         business_condition="只读状态刷新可直接消费；仅永久禁言续期 Job 另需对应写入授权。",
         missing_behavior="未授权时仅续期 Job 不执行写入；只读刷新不受影响。",
