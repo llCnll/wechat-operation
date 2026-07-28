@@ -27,6 +27,9 @@ from .tasks import (
     STATUS_SYNC_TASK,
 )
 
+
+MAX_MANUAL_INGESTION_HOURS = 31 * 24
+
 SHANGHAI = ZoneInfo("Asia/Shanghai")
 
 
@@ -98,15 +101,18 @@ def _enqueue_ingestion_window(
     page_size: object,
     task_type: str,
     idempotency_prefix: str,
+    idempotency_scope_version: int | None = None,
+    checkpoint: dict | None = None,
 ) -> IngestionEnqueueResult:
     """Create one checkpointed ingestion window for an explicit consumer lane."""
     normalized_appid, window, normalized_page_size = validate_ingestion_window(
         appid=appid, start_time=start_time, end_time=end_time, page_size=page_size
     )
+    scope_key = f":v{idempotency_scope_version}" if idempotency_scope_version is not None else ""
     result = enqueue_job_with_result(
         task_type=task_type,
         idempotency_key=(
-            f"{idempotency_prefix}:{normalized_appid}:{window.start_time}:"
+            f"{idempotency_prefix}:{normalized_appid}{scope_key}:{window.start_time}:"
             f"{window.end_time}:{normalized_page_size}"
         ),
         parameter_summary={
@@ -115,6 +121,7 @@ def _enqueue_ingestion_window(
             "end_time": window.end_time,
             "page_size": normalized_page_size,
         },
+        checkpoint=checkpoint,
     )
     return IngestionEnqueueResult(job=result.job, created=result.created)
 
@@ -164,6 +171,32 @@ def enqueue_manual_current_ingestion_window(
             checkpoint={"execution_scope": scope.as_checkpoint()},
         )
     return IngestionEnqueueResult(job=result.job, created=result.created)
+
+
+def enqueue_manual_historical_ingestion_window(
+    *, hours: object, now: datetime | None = None
+) -> IngestionEnqueueResult:
+    """Create a bounded historical window for the current producer scope."""
+    try:
+        duration_hours = int(hours)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("补采时长必须是正整数小时。") from exc
+    if not 1 <= duration_hours <= MAX_MANUAL_INGESTION_HOURS:
+        raise ValueError(f"补采时长须在 1 至 {MAX_MANUAL_INGESTION_HOURS} 小时之间。")
+
+    local_now = (now or timezone.now()).astimezone(SHANGHAI).replace(second=0, microsecond=0)
+    with transaction.atomic():
+        scope = current_execution_scope(persist_default=False)
+        return _enqueue_ingestion_window(
+            appid=scope.target_appid,
+            start_time=int((local_now - timedelta(hours=duration_hours)).timestamp()),
+            end_time=int(local_now.timestamp()),
+            page_size=20,
+            task_type=MANUAL_INGEST_WINDOW_TASK,
+            idempotency_prefix="manual-ingest-window",
+            idempotency_scope_version=scope.scope_version,
+            checkpoint={"execution_scope": scope.as_checkpoint()},
+        )
 
 
 def enqueue_filtered_post_refresh(*, filters: OriginalPostFilter) -> IngestionEnqueueResult:

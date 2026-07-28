@@ -521,27 +521,26 @@ def test_admin_can_enqueue_bounded_manual_ingestion_for_a_managed_game(admin_cli
         captured.update(kwargs)
         return SimpleNamespace(created=True, job=SimpleNamespace(pk=123))
 
-    monkeypatch.setattr("config.supervisor_views.enqueue_manual_ingestion_window", enqueue)
+    monkeypatch.setattr(
+        "jobs.manual_producers.enqueue_manual_historical_ingestion_window", enqueue
+    )
 
     response = admin_client.post(
-        "/admin/runtime/ingestion/enqueue/",
-        {"return_to": "/admin/", "appid": game.appid, "hours": "12"},
+        "/admin/scheduled-producers/post_ingestion/run/",
+        {"return_to": "/admin/", "mode": "history", "hours": "12"},
     )
 
     assert response.status_code == 302
-    assert captured["appid"] == game.appid
-    assert captured["page_size"] == 20
-    assert captured["end_time"] - captured["start_time"] == 12 * 60 * 60
+    assert captured == {"hours": "12"}
     response_messages = " ".join(str(message) for message in get_messages(response.wsgi_request))
     assert "已创建" in response_messages
-    assert resolve("/admin/runtime/ingestion/enqueue/").func.__name__ == "enqueue_manual_ingestion"
 
 
 @pytest.mark.django_db
 def test_admin_rejects_manual_ingestion_outside_the_bounded_hour_range(admin_client):
     response = admin_client.post(
-        "/admin/runtime/ingestion/enqueue/",
-        {"return_to": "/admin/", "appid": "wx6d2454a8afcd9706", "hours": "745"},
+        "/admin/scheduled-producers/post_ingestion/run/",
+        {"return_to": "/admin/", "mode": "history", "hours": "745"},
     )
 
     assert response.status_code == 302
@@ -550,16 +549,111 @@ def test_admin_rejects_manual_ingestion_outside_the_bounded_hour_range(admin_cli
 
 
 @pytest.mark.django_db
-def test_admin_home_offers_manual_ingestion_with_the_current_game_selected(admin_client):
+def test_admin_home_offers_manual_ingestion_from_the_post_producer(admin_client):
     game = ManagedGame.objects.create(appid="wx-other-game", name="其他游戏")
     set_active_game(appid=game.appid)
 
     page = admin_client.get("/admin/").content.decode()
+    producer_action = 'action="/admin/scheduled-producers/post_ingestion/run/"'
+    producer_start = page.rfind("<dialog", 0, page.index(producer_action))
+    producer_end = page.index("</dialog>", producer_start) + len("</dialog>")
+    producer_dialog = page[producer_start:producer_end]
+    ingestion_start = page.index('id="service-ingestion"')
+    ingestion_end = page.index("</article>", ingestion_start) + len("</article>")
+    ingestion_card = page[ingestion_start:ingestion_end]
 
-    assert "创建历史补采" in page
-    assert 'action="/admin/runtime/ingestion/enqueue/"' in page
-    assert 'name="hours" type="number" min="1" max="744" value="12"' in page
-    assert 'value="wx-other-game" selected' in page
+    assert producer_dialog.count('class="console-producer-run-form"') == 2
+    assert producer_dialog.count(producer_action) == 2
+    assert 'name="mode" value="current"' in producer_dialog
+    assert 'name="mode" value="history"' in producer_dialog
+    assert 'name="hours" type="number" min="1" max="744" value="12"' in producer_dialog
+    assert "采集最近 30 分钟" in producer_dialog
+    assert "补齐过去的采集缺口" in producer_dialog
+    assert "创建最近 30 分钟采集任务" in producer_dialog
+    assert "创建历史补采任务" in producer_dialog
+    assert '<select name="mode">' not in producer_dialog
+    assert 'id="manual-ingestion-tasks"' not in page
+    assert "创建历史补采" not in ingestion_card
+
+
+@pytest.mark.django_db
+def test_all_producer_run_dialogs_share_the_operation_block_structure(admin_client):
+    page = admin_client.get("/admin/").content.decode()
+
+    for producer_key in (
+        "post_ingestion",
+        "metric_daily",
+        "metric_weekly",
+        "session_keepalive",
+        "permanent_mute_renewal",
+    ):
+        producer_action = f'action="/admin/scheduled-producers/{producer_key}/run/"'
+        producer_start = page.rfind("<dialog", 0, page.index(producer_action))
+        producer_end = page.index("</dialog>", producer_start) + len("</dialog>")
+        producer_dialog = page[producer_start:producer_end]
+
+        assert 'class="console-config-dialog console-producer-run-dialog"' in producer_dialog
+        assert 'class="console-producer-run-stack"' in producer_dialog
+        assert 'class="console-producer-run-form"' in producer_dialog
+        assert 'class="console-producer-run-body"' in producer_dialog
+        assert "对应 Worker 未运行时，任务会保持待执行。" in producer_dialog
+
+
+@pytest.mark.django_db
+def test_daily_metric_producer_offers_safe_quick_date_ranges(admin_client):
+    page = admin_client.get("/admin/").content.decode()
+    producer_action = 'action="/admin/scheduled-producers/metric_daily/run/"'
+    producer_start = page.rfind("<dialog", 0, page.index(producer_action))
+    producer_end = page.index("</dialog>", producer_start) + len("</dialog>")
+    producer_dialog = page[producer_start:producer_end]
+    yesterday = timezone.localdate() - timedelta(days=1)
+
+    assert 'data-manual-date-range' in producer_dialog
+    assert 'class="console-producer-run-quick-ranges"' in producer_dialog
+    assert "快捷选择" in producer_dialog
+    assert f'data-start-date="{yesterday.isoformat()}"' in producer_dialog
+    assert f'data-start-date="{(yesterday - timedelta(days=6)).isoformat()}"' in producer_dialog
+    assert f'data-start-date="{(yesterday - timedelta(days=29)).isoformat()}"' in producer_dialog
+    assert 'data-end-date="%s"' % yesterday.isoformat() in producer_dialog
+    assert "快捷选择均截至上海昨天" in producer_dialog
+
+
+@pytest.mark.django_db
+def test_weekly_metric_producer_offers_completed_week_quick_date_ranges(admin_client):
+    page = admin_client.get("/admin/").content.decode()
+    producer_action = 'action="/admin/scheduled-producers/metric_weekly/run/"'
+    producer_start = page.rfind("<dialog", 0, page.index(producer_action))
+    producer_end = page.index("</dialog>", producer_start) + len("</dialog>")
+    producer_dialog = page[producer_start:producer_end]
+    today = timezone.localdate()
+    last_week_end = today - timedelta(days=today.weekday() + 1)
+    last_week_start = last_week_end - timedelta(days=6)
+
+    assert 'data-manual-date-range' in producer_dialog
+    assert 'class="console-producer-run-quick-ranges"' in producer_dialog
+    assert "快捷选择" in producer_dialog
+    assert f'data-start-date="{last_week_start.isoformat()}"' in producer_dialog
+    assert f'data-start-date="{(last_week_start - timedelta(weeks=3)).isoformat()}"' in producer_dialog
+    assert f'data-start-date="{(last_week_start - timedelta(weeks=11)).isoformat()}"' in producer_dialog
+    assert f'data-end-date="{last_week_end.isoformat()}"' in producer_dialog
+    assert "快捷选择均为完整结束的自然周" in producer_dialog
+
+
+@pytest.mark.django_db
+def test_manual_ingestion_only_creates_a_pending_job_without_starting_workers(admin_client):
+    game = ManagedGame.objects.create(appid="wx-pending-ingestion", name="待执行补采游戏")
+    set_active_game(appid=game.appid)
+
+    response = admin_client.post(
+        "/admin/scheduled-producers/post_ingestion/run/",
+        {"return_to": "/admin/", "mode": "history", "hours": "12"},
+    )
+
+    assert response.status_code == 302
+    job = BackgroundJob.objects.get(task_type="MANUAL_INGEST_WINDOW")
+    assert job.status == JobStatus.PENDING
+    assert job.parameter_summary["appid"] == game.appid
+    assert job.parameter_summary["end_time"] - job.parameter_summary["start_time"] == 12 * 60 * 60
 
 
 @pytest.mark.django_db

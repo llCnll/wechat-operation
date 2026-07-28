@@ -90,18 +90,6 @@
   </form>
 </dialog>
 
-<dialog class="console-config-dialog" data-config-dialog-panel="manual-ingestion" aria-labelledby="manual-ingestion-title">
-  <form method="post" action="{% url 'enqueue-manual-ingestion' %}">{% csrf_token %}<input type="hidden" name="return_to" value="/admin/">
-    <header><div><p>MANUAL BACKFILL</p><h2 id="manual-ingestion-title">创建历史补采</h2></div><button type="button" class="console-dialog-close" data-config-dialog-close aria-label="关闭">关闭</button></header>
-    <p class="console-dialog-intro">按游戏和时间范围创建只读原创帖补采任务，由人工补采 Worker 异步处理。自动调度任务不受影响。</p>
-    <div class="console-dialog-fields">
-      <label class="console-dialog-field-wide">游戏<select name="appid" required>{% for game in admin_console.manual_ingestion_games %}<option value="{{ game.appid }}" {% if game.appid == admin_console.manual_ingestion_default_appid %}selected{% endif %}>{{ game.name }}</option>{% endfor %}</select></label>
-      <label>最近小时数<input name="hours" type="number" min="1" max="744" value="12" required inputmode="numeric"></label>
-    </div>
-    <footer><span>支持 1 至 744 小时；任务入队后可在“后台任务”查看进度。</span><button class="console-config-submit" type="submit">创建补采任务</button></footer>
-  </form>
-</dialog>
-
 <dialog class="console-config-dialog" data-config-dialog-panel="ai" aria-labelledby="ai-config-title">
   <form method="post" action="{% url 'save-runtime-configuration' %}">{% csrf_token %}<input type="hidden" name="return_to" value="/admin/"><input type="hidden" name="config_scope" value="ai">
     <header><div><p>MODEL CONNECTION</p><h2 id="ai-config-title">配置 AI 审核</h2></div><button type="button" class="console-dialog-close" data-config-dialog-close aria-label="关闭">关闭</button></header>
@@ -191,13 +179,34 @@
   </dialog>
   {% endfor %}
   {% for item in admin_console.scheduled_producers %}
-  <dialog class="console-config-dialog" data-config-dialog-panel="producer-run-{{ item.producer.pk }}" aria-labelledby="producer-run-{{ item.producer.pk }}-title">
+  <dialog class="console-config-dialog console-producer-run-dialog" data-config-dialog-panel="producer-run-{{ item.producer.pk }}" aria-labelledby="producer-run-{{ item.producer.pk }}-title">
     <header><div><p>一次性任务</p><h2 id="producer-run-{{ item.producer.pk }}-title">{{ item.label }} · 立即执行</h2></div><button type="button" class="console-dialog-close" data-config-dialog-close aria-label="关闭">关闭</button></header>
     <p class="console-dialog-intro">此操作仅创建后台任务，不改变自动规则、下次触发或自动覆盖进度。</p>
-    <form method="post" action="{% url 'run-scheduled-producer-now' producer_key=item.producer.producer_key %}">{% csrf_token %}<input type="hidden" name="return_to" value="/admin/">
-      {% if item.producer.producer_key == "metric_daily" or item.producer.producer_key == "metric_weekly" %}<div class="console-producer-fields"><label>开始日期<input type="date" name="start_date" required></label><label>结束日期<input type="date" name="end_date" required></label></div>{% else %}<p>无需额外参数。对应 Worker 未运行时，任务会保持待执行。</p>{% endif %}
-      <footer><button type="button" data-config-dialog-close>取消</button><button class="console-config-submit" type="submit">创建后台任务</button></footer>
-    </form>
+    <div class="console-producer-run-stack">
+      {% if item.producer.producer_key == "post_ingestion" %}
+      <form class="console-producer-run-form" method="post" action="{% url 'run-scheduled-producer-now' producer_key=item.producer.producer_key %}">{% csrf_token %}<input type="hidden" name="return_to" value="/admin/"><input type="hidden" name="mode" value="current">
+        <section class="console-producer-run-body"><p class="console-producer-run-kicker">当前窗口</p><h3>采集最近 30 分钟</h3><p>以提交时上海当前分钟为结束，向前采集 30 分钟；当前操作游戏和范围版本会在入队时冻结。</p></section>
+        <footer><span>固定每页 20 条；对应 Worker 未运行时，任务会保持待执行。</span><button class="console-config-submit" type="submit">创建最近 30 分钟采集任务</button></footer>
+      </form>
+      <form class="console-producer-run-form" method="post" action="{% url 'run-scheduled-producer-now' producer_key=item.producer.producer_key %}">{% csrf_token %}<input type="hidden" name="return_to" value="/admin/"><input type="hidden" name="mode" value="history">
+        <section class="console-producer-run-body"><p class="console-producer-run-kicker">历史补采</p><h3>补齐过去的采集缺口</h3><p>从提交时上海当前分钟向前回溯指定时长；当前操作游戏和范围版本会在入队时冻结。</p><div class="console-dialog-fields console-producer-run-fields"><label class="console-dialog-field-wide">回溯时长（小时）<input name="hours" type="number" min="1" max="744" value="12" required inputmode="numeric"><em>可选范围：1 至 744 小时</em></label></div></section>
+        <footer><span>固定每页 20 条；对应 Worker 未运行时，任务会保持待执行。</span><button class="console-config-submit" type="submit">创建历史补采任务</button></footer>
+      </form>
+      {% else %}
+      <form class="console-producer-run-form" method="post" action="{% url 'run-scheduled-producer-now' producer_key=item.producer.producer_key %}">{% csrf_token %}<input type="hidden" name="return_to" value="/admin/">
+        <section class="console-producer-run-body">
+          {% if item.producer.producer_key == "metric_daily" %}
+          <p class="console-producer-run-kicker">日期范围</p><h3>补齐日指标</h3><p>为所有已启用日指标来源创建同一日期范围的后台任务。</p><div class="console-dialog-fields console-producer-run-fields"><div class="console-producer-run-quick-ranges"><span>快捷选择</span><div class="console-dialog-quick-ranges" aria-label="日指标快捷日期范围">{% for quick_range in admin_console.manual_daily_metric_quick_ranges %}<button type="button" data-manual-date-range data-start-date="{{ quick_range.start_date|date:'Y-m-d' }}" data-end-date="{{ quick_range.end_date|date:'Y-m-d' }}">{{ quick_range.label }}</button>{% endfor %}</div></div><label>开始日期<input type="date" name="start_date" required></label><label>结束日期<input type="date" name="end_date" required></label></div>
+          {% elif item.producer.producer_key == "metric_weekly" %}
+          <p class="console-producer-run-kicker">完整自然周</p><h3>补齐周指标</h3><p>输入范围会按完整自然周处理，仅读取运营效果指标。</p><div class="console-dialog-fields console-producer-run-fields"><div class="console-producer-run-quick-ranges"><span>快捷选择</span><div class="console-dialog-quick-ranges" aria-label="周指标快捷日期范围">{% for quick_range in admin_console.manual_weekly_metric_quick_ranges %}<button type="button" data-manual-date-range data-start-date="{{ quick_range.start_date|date:'Y-m-d' }}" data-end-date="{{ quick_range.end_date|date:'Y-m-d' }}">{{ quick_range.label }}</button>{% endfor %}</div></div><label>开始日期<input type="date" name="start_date" required></label><label>结束日期<input type="date" name="end_date" required></label></div>
+          {% else %}
+          <p class="console-producer-run-kicker">固定动作</p><h3>创建{{ item.label }}任务</h3><p>无需额外参数；当前操作游戏和范围版本会在入队时冻结。</p>
+          {% endif %}
+        </section>
+        <footer><span>{% if item.producer.producer_key == "metric_daily" %}快捷选择均截至上海昨天；也可手动填写日期。{% elif item.producer.producer_key == "metric_weekly" %}快捷选择均为完整结束的自然周；也可手动填写日期。{% endif %}对应 Worker 未运行时，任务会保持待执行。</span><button class="console-config-submit" type="submit">{% if item.producer.producer_key == "metric_daily" %}创建日指标任务{% elif item.producer.producer_key == "metric_weekly" %}创建周指标任务{% else %}创建{{ item.label }}任务{% endif %}</button></footer>
+      </form>
+      {% endif %}
+    </div>
   </dialog>
   {% endfor %}
 </section>

@@ -11,7 +11,10 @@ from datetime import date
 
 from jobs.game_circle_keepalive import enqueue_keepalive
 from jobs.permanent_mute import enqueue_permanent_mute_renewal
-from posts.ingestion_jobs import enqueue_manual_current_ingestion_window
+from posts.ingestion_jobs import (
+    enqueue_manual_current_ingestion_window,
+    enqueue_manual_historical_ingestion_window,
+)
 from reporting.metric_jobs import (
     enqueue_manual_daily_metric_range,
     enqueue_manual_weekly_metric_range,
@@ -74,7 +77,15 @@ def run_manual_producer(*, producer_key: str, values: dict[str, object]) -> Manu
             actual_range=(actual_start, actual_end),
         )
     if producer_key == "post_ingestion":
-        result = enqueue_manual_current_ingestion_window()
+        if "appid" in values:
+            raise ValueError("历史补采使用当前操作游戏，不接受 AppID 参数")
+        mode = values.get("mode", "current")
+        if mode == "history":
+            result = enqueue_manual_historical_ingestion_window(hours=values.get("hours"))
+        elif mode == "current":
+            result = enqueue_manual_current_ingestion_window()
+        else:
+            raise ValueError("帖子采集执行模式无效")
     elif producer_key == "session_keepalive":
         result = enqueue_keepalive(trigger="manual")
     else:

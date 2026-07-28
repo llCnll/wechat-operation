@@ -2,7 +2,7 @@ from datetime import timedelta
 
 from django.contrib import admin
 from django.http import JsonResponse
-from django.urls import path
+from django.urls import path, re_path
 from django.utils import timezone
 
 from config import supervisor_views
@@ -81,13 +81,8 @@ urlpatterns = [
         supervisor_views.control_service,
         name="supervisor-control-service",
     ),
-    path(
-        "admin/runtime/ingestion/enqueue/",
-        supervisor_views.enqueue_manual_ingestion,
-        name="enqueue-manual-ingestion",
-    ),
-    path(
-        "admin/runtime/ingestion/<str:action>/",
+    re_path(
+        r"^admin/runtime/ingestion/(?P<action>start|stop|restart)/$",
         supervisor_views.control_ingestion_workers,
         name="supervisor-control-ingestion-workers",
     ),
@@ -105,16 +100,6 @@ urlpatterns = [
         "admin/runtime/current-game-frame/",
         supervisor_views.build_current_game_frame,
         name="build-current-game-frame",
-    ),
-    path(
-        "admin/runtime/session-keepalive/",
-        supervisor_views.enqueue_session_keepalive_request,
-        name="enqueue-session-keepalive",
-    ),
-    path(
-        "admin/runtime/permanent-mute-renewal/",
-        supervisor_views.enqueue_permanent_mute_renewal_request,
-        name="enqueue-permanent-mute-renewal",
     ),
     path(
         "admin/runtime/game-catalog/sync/",
