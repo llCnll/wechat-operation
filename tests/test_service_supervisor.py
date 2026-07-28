@@ -1,14 +1,21 @@
 from __future__ import annotations
 
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import httpx
 import pytest
 
 import service_supervisor.manager as supervisor_manager
+import service_supervisor.runtime as supervisor_runtime
 from service_supervisor.manager import Supervisor, SupervisorError
 from service_supervisor.runtime import RuntimeStore, SupervisorLeaseGuard, SupervisorLockedError
+
+
+def windows_replace_error(winerror: int, path: Path) -> PermissionError:
+    error = PermissionError(13, "sharing conflict", str(path))
+    error.winerror = winerror
+    return error
 
 
 def test_supervisor_allows_one_owner_per_runtime(tmp_path):
@@ -133,6 +140,75 @@ def test_web_health_check_retries_connection_refusals(tmp_path):
             assert supervisor._web_healthy(timeout_seconds=1) is False
 
 
+@pytest.mark.skipif(supervisor_runtime.os.name != "nt", reason="Windows 共享锁重试")
+@pytest.mark.parametrize("winerror", (5, 32))
+def test_write_json_retries_windows_sharing_errors(tmp_path, monkeypatch, winerror):
+    store = RuntimeStore(tmp_path)
+    store.ensure()
+    path = store.instance_lease_path
+    original_replace = supervisor_runtime.os.replace
+    failures = 0
+
+    def flaky_replace(source, destination):
+        nonlocal failures
+        failures += 1
+        if failures <= 2:
+            raise windows_replace_error(winerror, Path(destination))
+        return original_replace(source, destination)
+
+    monkeypatch.setattr(supervisor_runtime.os, "replace", flaky_replace)
+    monkeypatch.setattr(supervisor_runtime.time, "sleep", lambda _seconds: None)
+
+    store.write_json(path, {"version": 1})
+
+    assert failures == 3
+    assert store.read_json(path) == {"version": 1}
+    assert list(path.parent.glob("tmp*")) == []
+
+
+@pytest.mark.skipif(supervisor_runtime.os.name != "nt", reason="Windows 共享锁重试")
+def test_write_json_cleans_temporary_file_after_exhausted_windows_retry(tmp_path, monkeypatch):
+    store = RuntimeStore(tmp_path)
+    store.ensure()
+    path = store.instance_lease_path
+    failure = windows_replace_error(5, path)
+    clock_values = iter((0.0, 0.0, supervisor_runtime.ATOMIC_WRITE_RETRY_SECONDS))
+
+    monkeypatch.setattr(
+        supervisor_runtime.os,
+        "replace",
+        lambda *_args: (_ for _ in ()).throw(failure),
+    )
+    monkeypatch.setattr(supervisor_runtime.time, "monotonic", lambda: next(clock_values))
+    monkeypatch.setattr(supervisor_runtime.time, "sleep", lambda _seconds: None)
+
+    with pytest.raises(PermissionError) as raised:
+        store.write_json(path, {"version": 1})
+
+    assert raised.value is failure
+    assert failure.runtime_write_attempts == 2
+    assert list(path.parent.glob("tmp*")) == []
+
+
+def test_write_json_cleans_temporary_file_after_nonretryable_replace_failure(tmp_path, monkeypatch):
+    store = RuntimeStore(tmp_path)
+    store.ensure()
+    path = store.instance_lease_path
+    failure = OSError("runtime unavailable")
+
+    monkeypatch.setattr(
+        supervisor_runtime.os,
+        "replace",
+        lambda *_args: (_ for _ in ()).throw(failure),
+    )
+
+    with pytest.raises(OSError) as raised:
+        store.write_json(path, {"version": 1})
+
+    assert raised.value is failure
+    assert list(path.parent.glob("tmp*")) == []
+
+
 def test_supervisor_lease_guard_stops_after_instance_replacement(tmp_path):
     store = RuntimeStore(tmp_path)
     store.ensure()
@@ -159,6 +235,111 @@ def test_supervisor_lease_guard_stops_after_repeated_heartbeat_write_failures(tm
     )
 
     assert guard.check_and_heartbeat() is True
+    assert guard.check_and_heartbeat() is False
+
+
+def test_run_forever_recovers_after_a_transient_lease_renewal_failure(
+    tmp_path, monkeypatch, caplog
+):
+    supervisor = Supervisor(Path.cwd(), tmp_path)
+    supervisor._instance_id = "current"
+    renew = Mock(
+        side_effect=(OSError("runtime unavailable"), OSError("runtime unavailable"), None)
+    )
+    reconcile = Mock()
+    shutdown = Mock()
+
+    class StopAfterRecovery:
+        def __init__(self):
+            self.results = iter((False, False, False, True))
+
+        def wait(self, _seconds):
+            return next(self.results)
+
+    supervisor._stopping = StopAfterRecovery()
+    monkeypatch.setattr(supervisor, "_renew_lease", renew)
+    monkeypatch.setattr(supervisor, "reconcile", reconcile)
+    monkeypatch.setattr(supervisor, "shutdown", shutdown)
+
+    supervisor.run_forever()
+
+    assert renew.call_count == 3
+    assert reconcile.call_count == 1
+    assert shutdown.call_count == 0
+    assert "Supervisor 租约续租失败" in caplog.text
+    assert "Supervisor 租约续租已恢复" in caplog.text
+    assert "failure_count=2" in caplog.text
+
+
+def test_run_forever_rate_limits_persistent_lease_renewal_failure_logs(
+    tmp_path, monkeypatch
+):
+    supervisor = Supervisor(Path.cwd(), tmp_path)
+    supervisor._instance_id = "current"
+    renew = Mock(side_effect=OSError("runtime unavailable"))
+    reconcile = Mock()
+    logged = Mock()
+
+    class StopAfterFailures:
+        def __init__(self):
+            self.results = iter((False, False, False, True))
+
+        def wait(self, _seconds):
+            return next(self.results)
+
+    supervisor._stopping = StopAfterFailures()
+    monkeypatch.setattr(supervisor, "_renew_lease", renew)
+    monkeypatch.setattr(supervisor, "reconcile", reconcile)
+    monkeypatch.setattr(supervisor_manager.logger, "warning", logged)
+    monkeypatch.setattr(
+        supervisor_manager.time,
+        "monotonic",
+        Mock(side_effect=(0.0, 30.0, 60.0)),
+    )
+
+    supervisor.run_forever()
+
+    assert renew.call_count == 3
+    assert reconcile.call_count == 0
+    assert logged.call_count == 2
+    assert logged.call_args_list[0].args[-1] == 1
+    assert logged.call_args_list[1].args[-1] == 3
+
+
+def test_run_forever_preserves_the_existing_lease_during_persistent_failures(
+    tmp_path, monkeypatch
+):
+    supervisor = Supervisor(Path.cwd(), tmp_path)
+    supervisor.store.ensure()
+    supervisor._instance_id = "current"
+    supervisor.store.write_instance_lease("current")
+    lease_before = supervisor.store.read_instance_lease()
+    reconcile = Mock()
+
+    class StopAfterFailures:
+        def __init__(self):
+            self.results = iter((False, False, True))
+
+        def wait(self, _seconds):
+            return next(self.results)
+
+    supervisor._stopping = StopAfterFailures()
+    monkeypatch.setattr(
+        supervisor,
+        "_renew_lease",
+        lambda: (_ for _ in ()).throw(OSError("runtime unavailable")),
+    )
+    monkeypatch.setattr(supervisor, "reconcile", reconcile)
+
+    supervisor.run_forever()
+
+    assert supervisor.store.read_instance_lease() == lease_before
+    assert reconcile.call_count == 0
+    supervisor.store.write_json(
+        supervisor.store.instance_lease_path,
+        {"version": 1, "instance_id": "current", "expires_at_epoch": 0},
+    )
+    guard = SupervisorLeaseGuard(supervisor.store, "ingestion", "current")
     assert guard.check_and_heartbeat() is False
 
 
