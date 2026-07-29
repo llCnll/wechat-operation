@@ -100,6 +100,7 @@ def test_supervisor_control_protocol_rejects_web_start_and_invalid_action(tmp_pa
         supervisor.release()
 
 
+@pytest.mark.allow_http_hosts("127.0.0.1")
 def test_supervisor_control_server_requires_token_and_reports_status(tmp_path):
     supervisor = Supervisor(Path.cwd(), tmp_path)
     supervisor.acquire()
@@ -517,6 +518,7 @@ def test_default_supervisor_services_are_started_on_bootstrap(tmp_path, monkeypa
     monkeypatch.setattr(supervisor, "acquire", lambda: None)
     monkeypatch.setattr(supervisor, "start_controller", lambda: None)
     monkeypatch.setattr(supervisor, "preflight", lambda: None)
+    monkeypatch.setattr(supervisor, "_cleanup_chrome_port", lambda: None)
     monkeypatch.setattr(supervisor, "reconcile", lambda: calls.append("reconcile"))
     monkeypatch.setattr(supervisor, "_web_healthy", lambda **_kwargs: True)
     monkeypatch.setattr(supervisor, "_is_process_current", lambda *_args: True)

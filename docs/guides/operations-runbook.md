@@ -25,6 +25,7 @@ tar \
   --exclude='./.git' \
   --exclude='./.venv' \
   --exclude='./.pytest_cache' \
+  --exclude='./.pytest-runtime' \
   --exclude='./.ruff_cache' \
   --exclude='./.DS_Store' \
   -czf ../wechat-operation.tar.gz .
@@ -33,7 +34,7 @@ tar \
 Windows PowerShell：
 
 ```powershell
-$excluded = @('runtime', '.git', '.venv', '.pytest_cache', '.ruff_cache', '.DS_Store')
+$excluded = @('runtime', '.git', '.venv', '.pytest_cache', '.pytest-runtime', '.ruff_cache', '.DS_Store')
 $items = Get-ChildItem -Force | Where-Object { $_.Name -notin $excluded }
 Compress-Archive -Path $items.FullName -DestinationPath ../wechat-operation.zip -Force
 ```
