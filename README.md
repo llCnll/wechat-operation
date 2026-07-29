@@ -75,6 +75,7 @@ uv sync --locked --all-groups
 | 版本发布、端点增量升级、一次性 Job 与重启 | [发布与多端升级](docs/guides/release-and-upgrade.md) |
 | FFmpeg、视频样本预检、ASR 降级与视频 Worker | [视频审核手册](docs/guides/video-review-runbook.md) |
 | 备份、任务恢复、补采与故障诊断 | [运行与恢复手册](docs/guides/operations-runbook.md) |
+| 开发测试、并行执行与外部 HTTP 护栏 | [测试执行指南](docs/guides/testing.md) |
 | 系统模块、数据流、交互与安全边界 | [系统总览](docs/guides/system-overview.md) |
 | 产品、技术、接口调研与 OpenSpec | [文档中心](docs/README.md) |
 

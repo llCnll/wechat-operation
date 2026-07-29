@@ -1654,6 +1654,7 @@ def test_pending_login_contract_failure_keeps_the_maintenance_loop_observable(mo
         "_outer_session",
         lambda _home: (_ for _ in ()).throw(GameCircleContractError("temporary")),
     )
+    monkeypatch.setattr(service, "_login_wait_is_ready_for_verification", lambda _pending: True)
 
     service._observe_login_pending_locked()
 

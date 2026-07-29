@@ -21,6 +21,20 @@ def _load_builder():
 builder = _load_builder()
 
 
+@pytest.fixture
+def source_archive(tmp_path):
+    archive_path = tmp_path / "wechat-content-operations-1.2.3-src.zip"
+    checksum_path = tmp_path / "wechat-content-operations-1.2.3-src.zip.sha256"
+    archive_path.write_bytes(b"source archive")
+    checksum_path.write_text("checksum\n", encoding="utf-8")
+    return builder.SourceArchive(
+        version="1.2.3",
+        tag="v1.2.3",
+        commit="a" * 40,
+        archive_path=archive_path,
+        checksum_path=checksum_path,
+    )
+
 def _git(root: Path, *arguments: str):
     subprocess.run(["git", "-C", str(root), *arguments], check=True, capture_output=True)
 
@@ -141,9 +155,9 @@ def test_build_source_archive_rejects_tracked_runtime_directory(tmp_path):
     assert not list(output_dir.glob("*.zip"))
 
 
-def test_publish_source_archive_creates_release_and_uploads_both_assets(tmp_path, monkeypatch):
-    root = _release_repository(tmp_path)
-    artifact = builder.build_source_archive(root, "v1.2.3", tmp_path / "dist")
+def test_publish_source_archive_creates_release_and_uploads_both_assets(
+    tmp_path, monkeypatch, source_archive
+):
     commands = []
 
     notes = []
@@ -156,8 +170,9 @@ def test_publish_source_archive_creates_release_and_uploads_both_assets(tmp_path
         return ""
 
     monkeypatch.setattr(builder, "_gh", fake_gh)
+    monkeypatch.setattr(builder, "render_release_notes", lambda _root, _artifact: "release notes\n")
 
-    builder.publish_source_archive(root, artifact)
+    builder.publish_source_archive(tmp_path, source_archive)
 
     assert commands == [
         (
@@ -170,20 +185,17 @@ def test_publish_source_archive_creates_release_and_uploads_both_assets(tmp_path
             "--notes-file",
             commands[0][-1],
         ),
-        ("release", "upload", "v1.2.3", str(artifact.archive_path)),
-        ("release", "upload", "v1.2.3", str(artifact.checksum_path)),
+        ("release", "upload", "v1.2.3", str(source_archive.archive_path)),
+        ("release", "upload", "v1.2.3", str(source_archive.checksum_path)),
     ]
     assert notes == [
-        "## 平台功能更新\n"
-        "- 当前版本的平台功能\n\n"
-        "## 工程与文档维护\n"
-        "- 本版本没有工程或文档维护项。\n"
+        "release notes\n"
     ]
 
 
-def test_publish_source_archive_verifies_existing_assets_without_uploading(tmp_path, monkeypatch):
-    root = _release_repository(tmp_path)
-    artifact = builder.build_source_archive(root, "v1.2.3", tmp_path / "dist")
+def test_publish_source_archive_verifies_existing_assets_without_uploading(
+    tmp_path, monkeypatch, source_archive
+):
     verified = []
     commands = []
 
@@ -195,8 +207,8 @@ def test_publish_source_archive_verifies_existing_assets_without_uploading(tmp_p
             return json.dumps(
                 {
                     "assets": [
-                        {"name": artifact.archive_path.name},
-                        {"name": artifact.checksum_path.name},
+                        {"name": source_archive.archive_path.name},
+                        {"name": source_archive.checksum_path.name},
                     ]
                 }
             )
@@ -209,29 +221,27 @@ def test_publish_source_archive_verifies_existing_assets_without_uploading(tmp_p
         lambda tag, path: verified.append((tag, path.name)),
     )
 
-    builder.publish_source_archive(root, artifact)
+    monkeypatch.setattr(builder, "render_release_notes", lambda _root, _artifact: "release notes\n")
+    builder.publish_source_archive(tmp_path, source_archive)
 
     assert verified == [
-        ("v1.2.3", artifact.archive_path.name),
-        ("v1.2.3", artifact.checksum_path.name),
+        ("v1.2.3", source_archive.archive_path.name),
+        ("v1.2.3", source_archive.checksum_path.name),
     ]
     assert not any(command[:2] == ("release", "upload") for command in commands)
 
 
-def test_verify_existing_release_asset_rejects_different_bytes(tmp_path, monkeypatch):
-    artifact = builder.build_source_archive(
-        _release_repository(tmp_path), "v1.2.3", tmp_path / "dist"
-    )
+def test_verify_existing_release_asset_rejects_different_bytes(monkeypatch, source_archive):
 
     def fake_gh(*arguments):
         download_dir = Path(arguments[arguments.index("--dir") + 1])
-        (download_dir / artifact.archive_path.name).write_bytes(b"different archive")
+        (download_dir / source_archive.archive_path.name).write_bytes(b"different archive")
         return ""
 
     monkeypatch.setattr(builder, "_gh", fake_gh)
 
     with pytest.raises(builder.SourceArchiveError, match="不一致"):
-        builder._verify_existing_release_asset("v1.2.3", artifact.archive_path)
+        builder._verify_existing_release_asset("v1.2.3", source_archive.archive_path)
 
 
 def test_release_notes_use_manifest_for_platform_and_commits_for_maintenance(tmp_path, monkeypatch):

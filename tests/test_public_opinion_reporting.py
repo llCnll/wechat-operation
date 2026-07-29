@@ -104,6 +104,33 @@ def _execute_one():
     return job
 
 
+def _conclusion_evidence() -> dict[str, object]:
+    return {
+        "summary": {},
+        "data_quality": {},
+        "categories": [],
+        "sentiments": [],
+        "risks": [],
+        "topics": [],
+        "player_topics": [],
+        "hotwords": {},
+        "daily_trend": [],
+        "daily_metrics": [],
+        "representative_posts": {},
+    }
+
+
+def _enable_conclusion_client(monkeypatch):
+    monkeypatch.setattr(
+        "reporting.public_opinion_conclusion.runtime.public_opinion_conclusion_enabled", True
+    )
+    monkeypatch.setattr(
+        "reporting.public_opinion_conclusion.runtime.ai_base_url", "https://model.invalid"
+    )
+    monkeypatch.setattr("reporting.public_opinion_conclusion.runtime.ai_api_key", "test")
+    monkeypatch.setattr("reporting.public_opinion_conclusion.runtime.ai_model", "test-model")
+
+
 @pytest.mark.django_db
 def test_report_locks_sources_and_rerun_only_refreshes_interactions():
     appid = "public-opinion-game"
@@ -169,8 +196,14 @@ def test_report_locks_sources_and_rerun_only_refreshes_interactions():
 
 @pytest.mark.django_db
 def test_v2_report_keeps_topics_verified_daily_metrics_and_model_failure_as_success(monkeypatch):
+    _enable_conclusion_client(monkeypatch)
+
+    def unavailable_conclusion(_client, _evidence):
+        raise ConclusionError("MODEL_READ_TIMEOUT")
+
     monkeypatch.setattr(
-        "reporting.public_opinion_conclusion.runtime.public_opinion_conclusion_enabled", False
+        "reporting.public_opinion_jobs.PublicOpinionConclusionClient.conclude",
+        unavailable_conclusion,
     )
     appid = "public-opinion-v2-evidence"
     day = date(2026, 7, 20)
@@ -365,11 +398,8 @@ def test_conclusion_snapshot_records_the_generation_contract(monkeypatch):
 
 
 def test_conclusion_client_classifies_non_json_and_schema_failure_without_network(monkeypatch):
-    evidence = {"summary": {}, "data_quality": {}, "categories": [], "sentiments": [], "risks": [], "topics": [], "player_topics": [], "hotwords": {}, "daily_trend": [], "daily_metrics": [], "representative_posts": {}}
-    monkeypatch.setattr("reporting.public_opinion_conclusion.runtime.public_opinion_conclusion_enabled", True)
-    monkeypatch.setattr("reporting.public_opinion_conclusion.runtime.ai_base_url", "https://model.invalid")
-    monkeypatch.setattr("reporting.public_opinion_conclusion.runtime.ai_api_key", "test")
-    monkeypatch.setattr("reporting.public_opinion_conclusion.runtime.ai_model", "test-model")
+    evidence = _conclusion_evidence()
+    _enable_conclusion_client(monkeypatch)
     response = Mock()
     response.raise_for_status.return_value = None
     response.json.return_value = {"choices": [{"message": {"content": "not-json"}}]}
@@ -382,15 +412,8 @@ def test_conclusion_client_classifies_non_json_and_schema_failure_without_networ
 
 
 def test_conclusion_client_classifies_response_timeout_without_exposing_exception(monkeypatch):
-    evidence = {
-        "summary": {}, "data_quality": {}, "categories": [], "sentiments": [], "risks": [],
-        "topics": [], "player_topics": [], "hotwords": {}, "daily_trend": [],
-        "daily_metrics": [], "representative_posts": {},
-    }
-    monkeypatch.setattr("reporting.public_opinion_conclusion.runtime.public_opinion_conclusion_enabled", True)
-    monkeypatch.setattr("reporting.public_opinion_conclusion.runtime.ai_base_url", "https://model.invalid")
-    monkeypatch.setattr("reporting.public_opinion_conclusion.runtime.ai_api_key", "test")
-    monkeypatch.setattr("reporting.public_opinion_conclusion.runtime.ai_model", "test-model")
+    evidence = _conclusion_evidence()
+    _enable_conclusion_client(monkeypatch)
     monkeypatch.setattr(
         "reporting.public_opinion_conclusion.httpx.post",
         lambda *args, **kwargs: (_ for _ in ()).throw(httpx.ReadTimeout("sensitive upstream detail")),
@@ -398,6 +421,90 @@ def test_conclusion_client_classifies_response_timeout_without_exposing_exceptio
 
     with pytest.raises(ConclusionError, match="MODEL_READ_TIMEOUT"):
         PublicOpinionConclusionClient().conclude(evidence)
+
+
+def test_conclusion_client_accepts_a_fixed_valid_response_without_network(monkeypatch):
+    _enable_conclusion_client(monkeypatch)
+    response = Mock()
+    response.raise_for_status.return_value = None
+    response.json.return_value = {
+        "choices": [
+            {
+                "message": {
+                    "content": (
+                        '{"items":[{"kind":"OBSERVATION","text":"当前范围可供人工持续观察。",'
+                        '"evidence_ids":["summary"]}]}'
+                    )
+                }
+            }
+        ]
+    }
+    monkeypatch.setattr(
+        "reporting.public_opinion_conclusion.httpx.post", lambda *_args, **_kwargs: response
+    )
+
+    conclusion = PublicOpinionConclusionClient().conclude(_conclusion_evidence())
+
+    assert conclusion == {
+        "status": "AVAILABLE",
+        "items": [
+            {
+                "kind": "OBSERVATION",
+                "text": "当前范围可供人工持续观察。",
+                "evidence_ids": ["summary"],
+            }
+        ],
+    }
+
+
+@pytest.mark.parametrize(
+    ("error_type", "expected_code"),
+    [
+        (httpx.ConnectTimeout, "MODEL_CONNECT_TIMEOUT"),
+        (httpx.ReadTimeout, "MODEL_READ_TIMEOUT"),
+        (httpx.WriteTimeout, "MODEL_WRITE_TIMEOUT"),
+        (httpx.PoolTimeout, "MODEL_POOL_TIMEOUT"),
+        (httpx.ConnectError, "MODEL_CONNECTION_FAILED"),
+    ],
+)
+def test_conclusion_client_classifies_transport_failures_without_network(
+    monkeypatch, error_type, expected_code
+):
+    _enable_conclusion_client(monkeypatch)
+    monkeypatch.setattr(
+        "reporting.public_opinion_conclusion.httpx.post",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(error_type("sensitive upstream detail")),
+    )
+
+    with pytest.raises(ConclusionError, match=expected_code):
+        PublicOpinionConclusionClient().conclude(_conclusion_evidence())
+
+
+@pytest.mark.parametrize(
+    ("status_code", "expected_code"),
+    [
+        (401, "MODEL_AUTH_FAILED"),
+        (403, "MODEL_AUTH_FAILED"),
+        (404, "MODEL_ENDPOINT_NOT_FOUND"),
+        (429, "MODEL_RATE_LIMITED"),
+        (400, "MODEL_REQUEST_REJECTED"),
+        (500, "MODEL_SERVICE_ERROR"),
+    ],
+)
+def test_conclusion_client_classifies_http_status_without_network(
+    monkeypatch, status_code, expected_code
+):
+    _enable_conclusion_client(monkeypatch)
+    response = httpx.Response(
+        status_code,
+        request=httpx.Request("POST", "https://model.invalid/chat/completions"),
+    )
+    monkeypatch.setattr(
+        "reporting.public_opinion_conclusion.httpx.post", lambda *_args, **_kwargs: response
+    )
+
+    with pytest.raises(ConclusionError, match=expected_code):
+        PublicOpinionConclusionClient().conclude(_conclusion_evidence())
 
 
 def test_report_display_exposes_only_the_fixed_conclusion_failure_label():

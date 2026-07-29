@@ -22,11 +22,15 @@ dependencies = [
 dev = [
     "pytest>=8.4,<9",
     "pytest-django>=4.11,<5",
+    "pytest-xdist>=3.8,<4",
     "ruff>=0.12,<0.13",
 ]
 
 [tool.pytest.ini_options]
-DJANGO_SETTINGS_MODULE = "config.settings"
+DJANGO_SETTINGS_MODULE = "config.test_settings"
+markers = [
+    "allow_http_hosts(*hosts): allow an explicitly named local HTTP integration host",
+]
 python_files = ["test_*.py", "*_tests.py"]
 testpaths = ["tests"]
 
