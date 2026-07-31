@@ -163,6 +163,10 @@ urlpatterns = [
         name="update-ai-operation-review",
     ),
     path("reports/", reporting_views.live_operations_analysis, name="live-operations-analysis"),
+    path("comment-export/", post_views.comment_export_workspace, name="comment-export-workspace"),
+    path("comment-export/tasks/", post_views.comment_export_runs, name="comment-export-runs"),
+    path("comment-export/tasks/<int:run_id>/", post_views.comment_export_run_detail, name="comment-export-run-detail"),
+    path("comment-export/tasks/<int:run_id>/csv/", post_views.export_comment_export_csv, name="comment-export-csv"),
     path(
         "reports/refresh-metrics/",
         reporting_views.refresh_operations_analysis_metrics,

@@ -5,6 +5,7 @@
     <a {% if request.resolver_match.url_name == 'ai-operation-reviews' %}class="active"{% endif %} href="{% url 'ai-operation-reviews' %}">AI 操作复审</a>
     <a {% if request.resolver_match.url_name == 'live-operations-analysis' %}class="active"{% endif %} href="{% url 'live-operations-analysis' %}">运营分析</a>
     <a {% if request.resolver_match.url_name == 'public-opinion-reports' or request.resolver_match.url_name == 'public-opinion-report-detail' or request.resolver_match.url_name == 'public-opinion-report-sources' %}class="active"{% endif %} href="{% url 'public-opinion-reports' %}">舆情报告</a>
+    <a {% if request.resolver_match.url_name == 'comment-export-workspace' or request.resolver_match.url_name == 'comment-export-runs' or request.resolver_match.url_name == 'comment-export-run-detail' %}class="active"{% endif %} href="{% url 'comment-export-workspace' %}">评论导出</a>
     <a {% if request.resolver_match.namespace == 'admin' %}class="active"{% endif %} href="{% url 'admin:index' %}">系统配置</a>
   </nav>
   {% if request.user.is_authenticated %}

@@ -9,36 +9,42 @@ from typing import Any
 from django.db.models import OuterRef, Q, Subquery
 from django.utils import timezone
 
-from jobs.adapters import SourceBusinessDeletedError, SourceContractError, SourceTransportError
-from jobs.models import BackgroundJob
-from jobs.services import JobDeferred
-from jobs.task_types import (
-    AUTHOR_MUTE_STATUS_BACKFILL_V2_TASK,
-    POST_TOPIC_BACKFILL_V1_TASK,
-    LEGACY_INGEST_WINDOW_TASK,
-    FILTERED_POST_REFRESH_TASK,
-    MANUAL_CURRENT_INGEST_WINDOW_TASK,
-    MANUAL_INGEST_WINDOW_TASK,
-    METRICS_REFRESH_WINDOW_TASK,
-    SCHEDULED_INGEST_WINDOW_TASK,
-    STATUS_SYNC_TASK,
-)
-from jobs.once.author_mute_status_backfill import (
-    author_mute_status_backfill_handler,
-)
-from jobs.once.backfill_post_topics import post_topic_backfill_handler
-from reviews.models import ReviewStatus
-
-from .ingestion import ingest_page
-from .dashboard_filters import filter_original_posts, original_post_filter_from_parameters
-from .game_catalog import checkpoint_with_execution_scope, resolve_execution_scope, resolve_fixed_execution_scope
-from .models import InteractionSnapshot, OriginalPost
-from .services import refresh_one_post_from_source, store_post_interaction_metrics
 from config.game_circle_ipc import (
     GameCircleIpcError,
     GameCirclePostClient,
     is_session_recovering_error,
 )
+from jobs.adapters import SourceBusinessDeletedError, SourceContractError, SourceTransportError
+from jobs.models import BackgroundJob
+from jobs.once.author_mute_status_backfill import (
+    author_mute_status_backfill_handler,
+)
+from jobs.once.backfill_post_topics import post_topic_backfill_handler
+from jobs.services import JobDeferred
+from jobs.task_types import (
+    AUTHOR_MUTE_STATUS_BACKFILL_V2_TASK,
+    COMMENT_EXPORT_V1_TASK,
+    FILTERED_POST_REFRESH_TASK,
+    LEGACY_INGEST_WINDOW_TASK,
+    MANUAL_CURRENT_INGEST_WINDOW_TASK,
+    MANUAL_INGEST_WINDOW_TASK,
+    METRICS_REFRESH_WINDOW_TASK,
+    POST_TOPIC_BACKFILL_V1_TASK,
+    SCHEDULED_INGEST_WINDOW_TASK,
+    STATUS_SYNC_TASK,
+)
+from reviews.models import ReviewStatus
+
+from .comment_exports import comment_export_handler
+from .dashboard_filters import filter_original_posts, original_post_filter_from_parameters
+from .game_catalog import (
+    checkpoint_with_execution_scope,
+    resolve_execution_scope,
+    resolve_fixed_execution_scope,
+)
+from .ingestion import ingest_page
+from .models import InteractionSnapshot, OriginalPost
+from .services import refresh_one_post_from_source, store_post_interaction_metrics
 
 MAX_METRICS_REFRESH_FAILURE_SAMPLES = 20
 
@@ -76,7 +82,6 @@ def ingest_window_handler(job: BackgroundJob) -> None:
     parameters = job.parameter_summary
     try:
         scope = resolve_execution_scope(job)
-        appid = scope.target_appid
     except ValueError as exc:
         raise SourceContractError(str(exc)) from exc
     start_time = _required_int(parameters, "start_time")
@@ -131,8 +136,9 @@ def sync_pending_status_handler(job: BackgroundJob) -> None:
 
     app_filter = Q(source_appid=appid)
     posts = list(
-        OriginalPost.objects.filter(app_filter, review_task__status=ReviewStatus.PENDING)
-        .order_by("updated_at", "topic_id")[:limit]
+        OriginalPost.objects.filter(app_filter, review_task__status=ReviewStatus.PENDING).order_by(
+            "updated_at", "topic_id"
+        )[:limit]
     )
     attempted = 0
     refreshed = 0
@@ -317,9 +323,7 @@ def refresh_metrics_window_handler(job: BackgroundJob) -> None:
                 _raise_if_session_recovering(exc)
                 failed += 1
                 if len(failure_samples) < MAX_METRICS_REFRESH_FAILURE_SAMPLES:
-                    failure_samples.append(
-                        {"topic_id": post.topic_id, "error": str(exc)[:200]}
-                    )
+                    failure_samples.append({"topic_id": post.topic_id, "error": str(exc)[:200]})
             else:
                 processed += 1
             cursor = post.topic_id
@@ -339,4 +343,5 @@ BACKFILL_INGESTION_WORKER_HANDLERS = {
     METRICS_REFRESH_WINDOW_TASK: refresh_metrics_window_handler,
     AUTHOR_MUTE_STATUS_BACKFILL_V2_TASK: author_mute_status_backfill_handler,
     POST_TOPIC_BACKFILL_V1_TASK: post_topic_backfill_handler,
+    COMMENT_EXPORT_V1_TASK: comment_export_handler,
 }

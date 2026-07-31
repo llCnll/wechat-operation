@@ -113,9 +113,7 @@ class CdpGameCircleClient:
             if result.get("status") == 401:
                 raise SourceAuthenticationRejectedError("来源请求被认证拒绝")
             if not isinstance(result.get("payload"), dict):
-                raise SourceContractError(
-                    "来源详情响应不是 JSON", safe_reason="NON_JSON_RESPONSE"
-                )
+                raise SourceContractError("来源详情响应不是 JSON", safe_reason="NON_JSON_RESPONSE")
             payload = result["payload"]
             if result.get("status") == 200 and payload.get("errcode") == 0:
                 return payload
@@ -232,6 +230,17 @@ class CdpGameCircleClient:
             records = data["reply_list"]
             if not isinstance(data, dict) or not isinstance(records, list):
                 raise TypeError("reply_list is not a list")
+            topic = data["topic"]
+            if not isinstance(topic, dict):
+                raise TypeError("topic is not an object")
+            creator = topic.get("creater", topic.get("creator"))
+            if (
+                topic.get("topic_id") != topic_id
+                or topic.get("appid") != self.appid
+                or not isinstance(creator, dict)
+                or creator.get("openid") != topic_openid
+            ):
+                raise TypeError("reply page topic identity is invalid")
             replies = []
             for record in records:
                 if not isinstance(record, dict):
@@ -249,16 +258,14 @@ class CdpGameCircleClient:
                     }
                 )
             has_next = data.get("has_next")
-            next_offset = data.get("next_offset")
             total_count = data.get("total_count")
-            if not isinstance(has_next, bool) or not isinstance(next_offset, int) or next_offset < 0:
-                raise TypeError("reply page offset is invalid")
+            if not isinstance(has_next, bool):
+                raise TypeError("reply page state is invalid")
             if total_count is not None and (not isinstance(total_count, int) or total_count < 0):
                 raise TypeError("reply total is invalid")
             return {
                 "items": replies,
                 "has_next": has_next,
-                "next_offset": next_offset,
                 "total_count": total_count,
             }
         except (KeyError, TypeError, ValueError) as exc:
@@ -356,7 +363,9 @@ class CdpGameCircleClient:
         self, *, topic_id: int | None, action: str, payload: dict[str, Any]
     ) -> dict[str, Any]:
         """Execute a verified post operation or an OpenID-targeted author operation."""
-        if action in {"SINK", "RESTORE", "BLOCK"} and (not isinstance(topic_id, int) or topic_id <= 0):
+        if action in {"SINK", "RESTORE", "BLOCK"} and (
+            not isinstance(topic_id, int) or topic_id <= 0
+        ):
             raise SourceContractError("帖子 ID 无效")
         if action == "SINK":
             request_body = {"topic_id": topic_id, "status": 8}

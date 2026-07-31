@@ -7,11 +7,36 @@ from .game_catalog import sync_authorized_managed_games
 from .models import (
     AuthorMuteStatus,
     CandidatePost,
+    CommentExportResult,
+    CommentExportRun,
     InteractionSnapshot,
     ManagedGame,
     OriginalPost,
     PostMedia,
 )
+
+
+class CommentExportResultInline(ReadOnlyTabularInline):
+    model = CommentExportResult
+    extra = 0
+
+
+@admin.register(CommentExportRun)
+class CommentExportRunAdmin(ReadOnlyAdmin):
+    list_display = (
+        "topic_id",
+        "author_nick_name",
+        "keyword",
+        "created_by",
+        "source_appid",
+        "processed_count",
+        "matched_count",
+        "created_at",
+    )
+    list_filter = ("source_appid", "rule_version")
+    search_fields = ("topic_id", "author_nick_name", "keyword")
+    inlines = (CommentExportResultInline,)
+
 
 @admin.register(ManagedGame)
 class ManagedGameAdmin(ReadOnlyAdmin):
