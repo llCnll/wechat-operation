@@ -1,0 +1,20 @@
+version: 1.9.0
+previous: 1.8.0
+changes:
+  - 优化运营控制台导航与配置页布局，收敛常用入口的展示层级。
+  - 新增异步评论导出：运营人员可确认已采集帖子后按固定关键词规则创建任务，由人工补采 Worker 读取顶层评论，并在完成后从本地结果导出 CSV。
+upgrade:
+  dependencies: none
+  database: migrate
+  static: collectstatic
+  restart:
+    mode: supervisor
+    services: []
+  once_jobs: []
+  manual: []
+verification:
+  - uv run python manage.py validate_releases
+  - uv run pytest -q tests/test_release_protocol.py tests/test_release_source_archive.py
+  - uv run python manage.py check
+  - 完整重启 Supervisor 后，确认 Web、游戏圈会话服务与既有 desired 状态的 Worker 恢复；人工补采 Worker 可认领 COMMENT_EXPORT_V1，其他 Worker 不认领该类型。
+  - 使用已授权的受控测试帖子完成评论导出：确认步骤不创建任务，创建请求不读取评论；Worker 只保存命中顶层评论，完成后创建者可在当前游戏范围查看结果并导出 CSV；不得记录认证材料或执行上游写操作。
