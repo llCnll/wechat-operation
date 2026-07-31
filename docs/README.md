@@ -12,6 +12,7 @@
 - [视频审核手册](guides/video-review-runbook.md)：FFmpeg、受控样本预检、ASR 降级、视频 Worker 启停与回滚。
 - [系统总览](guides/system-overview.md)：模块、数据流、工作台交互和安全边界。
 - [运行与恢复手册](guides/operations-runbook.md)：打包、备份、会话、Worker 与故障恢复。
+- [测试执行指南](guides/testing.md)：测试运行态隔离、数据库复用、并行执行和 HTTP 护栏。
 
 ### 产品与规划
 

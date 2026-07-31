@@ -13,14 +13,42 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 from config import database  # noqa: F401  Registers SQLite connection initialization.
 
 BASE_DIR = Path(__file__).resolve().parent.parent
-RUNTIME_DIR = BASE_DIR / "runtime"
+PYTEST_MODE_ENV = "WECHAT_OPERATION_PYTEST_MODE"
+PYTEST_RUNTIME_DIR_ENV = "WECHAT_OPERATION_PYTEST_RUNTIME_DIR"
+PYTEST_MODE_VALUE = "isolated"
+PYTEST_RUNTIME_ROOT = (BASE_DIR / ".pytest-runtime").resolve()
 FIXED_INGESTION_PAGE_SIZE = 100
+
+
+def _pytest_runtime_dir() -> Path | None:
+    """Return the plugin-owned runtime directory, never a general override."""
+    if os.getenv(PYTEST_MODE_ENV) != PYTEST_MODE_VALUE:
+        return None
+    configured = os.getenv(PYTEST_RUNTIME_DIR_ENV)
+    if not configured:
+        raise RuntimeError("pytest 运行态目录未配置")
+    try:
+        candidate = Path(configured).resolve(strict=False)
+        candidate.relative_to(PYTEST_RUNTIME_ROOT)
+    except ValueError as exc:
+        raise RuntimeError("pytest 运行态目录必须位于 .pytest-runtime 下") from exc
+    if candidate == PYTEST_RUNTIME_ROOT:
+        raise RuntimeError("pytest 运行态目录必须是 .pytest-runtime 的子目录")
+    return candidate
+
+
+PYTEST_RUNTIME_DIR = _pytest_runtime_dir()
+IS_PYTEST_RUNTIME = PYTEST_RUNTIME_DIR is not None
+RUNTIME_DIR = PYTEST_RUNTIME_DIR or BASE_DIR / "runtime"
 
 
 class RuntimeSettings(BaseSettings):
     """Environment-derived runtime configuration without secret persistence."""
 
-    model_config = SettingsConfigDict(env_file=RUNTIME_DIR / ".env", extra="ignore")
+    model_config = SettingsConfigDict(
+        env_file=None if IS_PYTEST_RUNTIME else RUNTIME_DIR / ".env",
+        extra="ignore",
+    )
 
     django_secret_key: str = Field(min_length=32, default="development-only-secret-key-change-me")
     django_debug: bool = False
@@ -144,6 +172,8 @@ DATABASES = {
         "OPTIONS": {"timeout": runtime.sqlite_busy_timeout_ms / 1000},
     },
 }
+if IS_PYTEST_RUNTIME:
+    DATABASES["default"]["TEST"] = {"NAME": RUNTIME_DIR / "test-operations.sqlite3"}
 
 AUTH_PASSWORD_VALIDATORS: list[dict[str, str]] = []
 LANGUAGE_CODE = "zh-hans"
@@ -153,7 +183,13 @@ USE_TZ = True
 STATIC_URL = "/static/"
 STATIC_ROOT = RUNTIME_DIR / "static"
 STORAGES = {
-    "staticfiles": {"BACKEND": "whitenoise.storage.CompressedManifestStaticFilesStorage"},
+    "staticfiles": {
+        "BACKEND": (
+            "django.contrib.staticfiles.storage.StaticFilesStorage"
+            if IS_PYTEST_RUNTIME
+            else "whitenoise.storage.CompressedManifestStaticFilesStorage"
+        )
+    },
 }
 WHITENOISE_MANIFEST_STRICT = False
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"

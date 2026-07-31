@@ -37,6 +37,7 @@ POST_METHODS = frozenset(
         "POSTS_LIST_CANDIDATES",
         "POSTS_GET_CONTENT_CARD",
         "POSTS_GET_METRICS",
+        "POSTS_LIST_TOPIC_REPLIES",
         "POSTS_GET_AUTHOR_DETAIL",
         "POSTS_LIST_BLOCKED_USERS",
         "POSTS_OPERATION",
@@ -288,6 +289,33 @@ class GameCirclePostClient:
 
     def get_post_metrics_with_timeout(self, topic_id: int, *, timeout_seconds: float) -> dict[str, Any]:
         return self._payload("POSTS_GET_METRICS", {"topic_id": topic_id, "timeout_seconds": timeout_seconds})
+
+    def list_topic_replies(
+        self,
+        *,
+        topic_id: int,
+        topic_openid: str,
+        page: int,
+        limit: int,
+    ) -> dict[str, Any]:
+        """Read one bounded page of top-level replies for an operator-selected topic."""
+        if not isinstance(topic_id, int) or topic_id <= 0:
+            raise SourceContractError("帖子 ID 无效")
+        if not isinstance(topic_openid, str) or not topic_openid or len(topic_openid) > MAX_AUTHOR_OPENID_LENGTH:
+            raise SourceContractError("帖子作者用户 ID 无效")
+        if not isinstance(page, int) or page < 0:
+            raise SourceContractError("评论页码无效")
+        if limit != 100:
+            raise SourceContractError("评论分页大小必须为 100")
+        return self._payload(
+            "POSTS_LIST_TOPIC_REPLIES",
+            {
+                "topic_id": topic_id,
+                "topic_openid": topic_openid,
+                "page": page,
+                "limit": limit,
+            },
+        )
 
     def get_author_detail(self, openid: str) -> dict[str, Any]:
         if not isinstance(openid, str) or not openid or len(openid) > MAX_AUTHOR_OPENID_LENGTH:

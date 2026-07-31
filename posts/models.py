@@ -314,3 +314,44 @@ class InteractionSnapshot(models.Model):
     class Meta:
         verbose_name = "互动快照"
         verbose_name_plural = "互动快照"
+
+
+class CommentExportRun(models.Model):
+    job = models.OneToOneField("jobs.BackgroundJob", on_delete=models.PROTECT, related_name="comment_export_run")
+    created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name="comment_export_runs")
+    source_appid = models.CharField(max_length=128)
+    scope_version = models.PositiveBigIntegerField()
+    topic_id = models.PositiveBigIntegerField()
+    title_snapshot = models.CharField(max_length=500)
+    author_openid = models.CharField(max_length=255)
+    author_nick_name = models.CharField(max_length=255, blank=True)
+    rule_version = models.CharField(max_length=64)
+    keyword = models.CharField(max_length=100)
+    page_size = models.PositiveSmallIntegerField(default=100)
+    processed_count = models.PositiveIntegerField(default=0)
+    matched_count = models.PositiveIntegerField(default=0)
+    page_count = models.PositiveIntegerField(default=0)
+    total_count = models.PositiveIntegerField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        indexes = [models.Index(fields=("created_by", "source_appid", "-created_at"))]
+        verbose_name = "评论导出任务"
+        verbose_name_plural = "评论导出任务"
+
+
+class CommentExportResult(models.Model):
+    run = models.ForeignKey(CommentExportRun, on_delete=models.CASCADE, related_name="results")
+    reply_id = models.CharField(max_length=255)
+    openid = models.CharField(max_length=255)
+    nick_name = models.CharField(max_length=255, blank=True)
+    create_time = models.CharField(max_length=19)
+    content = models.TextField()
+    game_id = models.CharField(max_length=255)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=("run", "reply_id"), name="comment_export_run_reply")]
+        ordering = ("create_time", "reply_id")
+        verbose_name = "评论导出命中结果"
+        verbose_name_plural = "评论导出命中结果"

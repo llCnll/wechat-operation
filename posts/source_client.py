@@ -113,9 +113,7 @@ class CdpGameCircleClient:
             if result.get("status") == 401:
                 raise SourceAuthenticationRejectedError("来源请求被认证拒绝")
             if not isinstance(result.get("payload"), dict):
-                raise SourceContractError(
-                    "来源详情响应不是 JSON", safe_reason="NON_JSON_RESPONSE"
-                )
+                raise SourceContractError("来源详情响应不是 JSON", safe_reason="NON_JSON_RESPONSE")
             payload = result["payload"]
             if result.get("status") == 200 and payload.get("errcode") == 0:
                 return payload
@@ -206,6 +204,72 @@ class CdpGameCircleClient:
             "topicsearchgetdetail",
             {"data": json.dumps({"topic_id": topic_id, "need_topic": True, "limit": 0})},
         )
+
+    def list_topic_replies(
+        self, *, topic_id: int, topic_openid: str, page: int, limit: int
+    ) -> dict[str, Any]:
+        """Read a bounded top-level-reply page without retaining the topic body."""
+        payload = self._get(
+            "topicsearchgetdetail",
+            {
+                "data": json.dumps(
+                    {
+                        "topic_id": topic_id,
+                        "page_type": 1,
+                        "cur_page": page,
+                        "limit": limit,
+                        "need_topic": True,
+                        "openid": topic_openid,
+                    },
+                    separators=(",", ":"),
+                )
+            },
+        )
+        try:
+            data = payload["data"]
+            records = data["reply_list"]
+            if not isinstance(data, dict) or not isinstance(records, list):
+                raise TypeError("reply_list is not a list")
+            topic = data["topic"]
+            if not isinstance(topic, dict):
+                raise TypeError("topic is not an object")
+            creator = topic.get("creater", topic.get("creator"))
+            if (
+                topic.get("topic_id") != topic_id
+                or topic.get("appid") != self.appid
+                or not isinstance(creator, dict)
+                or creator.get("openid") != topic_openid
+            ):
+                raise TypeError("reply page topic identity is invalid")
+            replies = []
+            for record in records:
+                if not isinstance(record, dict):
+                    continue
+                creator = record.get("creator")
+                if not isinstance(creator, dict):
+                    creator = {}
+                replies.append(
+                    {
+                        "reply_id": str(record.get("reply_id", "")),
+                        "openid": str(creator.get("openid", "")),
+                        "nick_name": str(creator.get("nick_name", "")),
+                        "create_time": record.get("create_time"),
+                        "content": str(record.get("content", "")),
+                    }
+                )
+            has_next = data.get("has_next")
+            total_count = data.get("total_count")
+            if not isinstance(has_next, bool):
+                raise TypeError("reply page state is invalid")
+            if total_count is not None and (not isinstance(total_count, int) or total_count < 0):
+                raise TypeError("reply total is invalid")
+            return {
+                "items": replies,
+                "has_next": has_next,
+                "total_count": total_count,
+            }
+        except (KeyError, TypeError, ValueError) as exc:
+            raise SourceContractError("帖子评论响应结构无效") from exc
 
     def get_author_detail(self, openid: str) -> dict[str, Any]:
         """Read one author's current mute state without depending on a topic ID."""
@@ -299,7 +363,9 @@ class CdpGameCircleClient:
         self, *, topic_id: int | None, action: str, payload: dict[str, Any]
     ) -> dict[str, Any]:
         """Execute a verified post operation or an OpenID-targeted author operation."""
-        if action in {"SINK", "RESTORE", "BLOCK"} and (not isinstance(topic_id, int) or topic_id <= 0):
+        if action in {"SINK", "RESTORE", "BLOCK"} and (
+            not isinstance(topic_id, int) or topic_id <= 0
+        ):
             raise SourceContractError("帖子 ID 无效")
         if action == "SINK":
             request_body = {"topic_id": topic_id, "status": 8}

@@ -123,4 +123,34 @@
     });
   })();
 </script>
+<script data-console-disclosure-coordinator>
+  (() => {
+    const disclosureByHash = () => {
+      if (!window.location.hash) return null;
+      try {
+        return document.getElementById(decodeURIComponent(window.location.hash.slice(1)));
+      } catch (_) {
+        return null;
+      }
+    };
+    const revealHashTarget = (shouldLocate = false) => {
+      const target = disclosureByHash();
+      if (!target?.matches("[data-console-disclosure]")) return;
+      target.open = true;
+      if (shouldLocate) window.requestAnimationFrame(() => target.scrollIntoView({block: "start"}));
+    };
+    document.querySelectorAll("[data-console-toc-link]").forEach((link) => {
+      link.addEventListener("click", () => {
+        const target = document.getElementById(link.hash.slice(1));
+        if (target?.matches("[data-console-disclosure]")) target.open = true;
+      });
+    });
+    window.addEventListener("hashchange", () => revealHashTarget(true));
+    if (document.readyState === "complete") {
+      revealHashTarget(true);
+    } else {
+      window.addEventListener("load", () => revealHashTarget(true), {once: true});
+    }
+  })();
+</script>
 {% endblock %}

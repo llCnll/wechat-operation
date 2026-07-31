@@ -902,6 +902,7 @@ def test_unverified_operation_has_no_enabled_capability(monkeypatch):
 def test_confirmed_mute_reads_back_only_block_deadlines(monkeypatch):
     monkeypatch.setattr(runtime, "enable_upstream_writes", True)
     monkeypatch.setattr(runtime, "enable_mute_writes", True)
+    monkeypatch.setattr("reviews.services.sleep", lambda _seconds: None)
     post = OriginalPost.objects.create(
         topic_id=207, content_id="review-207", source_appid="wx-test", author_openid="mute-author"
     )
@@ -1064,6 +1065,7 @@ def test_author_mute_does_not_accept_an_unrelated_longer_existing_deadline(monke
 def test_confirmed_unmute_requires_active_local_mute_and_reads_back_release(monkeypatch):
     monkeypatch.setattr(runtime, "enable_upstream_writes", True)
     monkeypatch.setattr(runtime, "enable_unmute_writes", True)
+    monkeypatch.setattr("reviews.services.sleep", lambda _seconds: None)
     post = OriginalPost.objects.create(
         topic_id=210, content_id="review-unmute", source_appid="wx-test", author_openid="unmute-author"
     )
