@@ -133,6 +133,114 @@ def test_admin_home_is_configuration_and_traceability_console(admin_client, monk
     assert 'class="console-section-surface console-trace-grid"' in page
 
 
+@pytest.mark.django_db
+def test_admin_home_local_toc_only_links_to_existing_sections(admin_client, monkeypatch):
+    monkeypatch.setattr(
+        "config.context_processors.SupervisorClient.status",
+        lambda _self: {name: {"running": True, "desired": True} for name in MANAGED_SERVICE_NAMES},
+    )
+
+    page = admin_client.get("/admin/").content.decode()
+    desktop_toc = page.split('<nav class="console-page-toc" aria-label="本页目录">', 1)[1].split(
+        "</nav>", 1
+    )[0]
+    mobile_toc = page.split('<details class="console-page-toc-mobile">', 1)[1].split(
+        "</details>", 1
+    )[0]
+    anchors = (
+        "runtime-overview",
+        "automated-producers",
+        "core-configuration",
+        "runtime-health",
+        "data-traceability",
+    )
+
+    assert [f'href="#{anchor}"' for anchor in anchors] == [
+        f'href="#{anchor}"' for anchor in anchors if f'href="#{anchor}"' in desktop_toc
+    ]
+    assert [f'href="#{anchor}"' for anchor in anchors] == [
+        f'href="#{anchor}"' for anchor in anchors if f'href="#{anchor}"' in mobile_toc
+    ]
+    assert all(f'id="{anchor}"' in page for anchor in anchors)
+    assert desktop_toc.count('href="#') == len(anchors)
+    assert mobile_toc.count('href="#') == len(anchors)
+    assert "<form" not in desktop_toc
+    assert "csrfmiddlewaretoken" not in desktop_toc
+    assert "action=" not in desktop_toc
+    assert "<button" not in desktop_toc
+    assert "<form" not in mobile_toc
+    assert "csrfmiddlewaretoken" not in mobile_toc
+    assert "action=" not in mobile_toc
+    assert "<button" not in mobile_toc
+    assert 'action="/admin/runtime/active-game/"' in page
+    assert 'action="/admin/runtime/game-catalog/sync/"' in page
+
+
+@pytest.mark.django_db
+def test_admin_home_uses_native_disclosures_without_moving_operations(admin_client, monkeypatch):
+    monkeypatch.setattr(
+        "config.context_processors.SupervisorClient.status",
+        lambda _self: {name: {"running": True, "desired": True} for name in MANAGED_SERVICE_NAMES},
+    )
+
+    page = admin_client.get("/admin/").content.decode()
+    desktop_toc = page.split('<nav class="console-page-toc" aria-label="本页目录">', 1)[1].split(
+        "</nav>", 1
+    )[0]
+    mobile_toc = page.split('<details class="console-page-toc-mobile">', 1)[1].split(
+        "</details>", 1
+    )[0]
+    disclosure_ids = (
+        "runtime-overview",
+        "automated-producers",
+        "core-configuration",
+        "runtime-health",
+        "data-traceability",
+    )
+
+    for disclosure_id in disclosure_ids:
+        opening_tag = page.split(f'<details id="{disclosure_id}"', 1)[1].split(">", 1)[0]
+        assert "data-console-disclosure" in opening_tag
+    assert " open" in page.split('<details id="runtime-overview"', 1)[1].split(">", 1)[0]
+    for disclosure_id in disclosure_ids[1:]:
+        assert " open" not in page.split(f'<details id="{disclosure_id}"', 1)[1].split(">", 1)[0]
+
+    runtime_start = page.index('<details id="runtime-overview"')
+    runtime_end = page.index("</details>", runtime_start)
+    assert runtime_start < page.index('action="/admin/runtime/active-game/"') < runtime_end
+    assert runtime_start < page.index('action="/admin/runtime/game-catalog/sync/"') < runtime_end
+    assert desktop_toc.count("data-console-toc-link") == len(disclosure_ids)
+    assert mobile_toc.count("data-console-toc-link") == len(disclosure_ids)
+
+
+def test_admin_disclosure_coordinator_is_fragment_only():
+    base_template = Path("templates/admin/base_site.html").read_text(encoding="utf-8")
+    coordinator = base_template.split("<script data-console-disclosure-coordinator>", 1)[1].split(
+        "</script>", 1
+    )[0]
+
+    assert "[data-console-disclosure]" in coordinator
+    assert "[data-console-toc-link]" in coordinator
+    assert "target.open = true" in coordinator
+    assert 'addEventListener("hashchange"' in coordinator
+    assert 'addEventListener("load"' in coordinator
+    assert 'addEventListener("scroll"' not in coordinator
+    for forbidden in ("fetch(", "localStorage", "sessionStorage", "Supervisor", "CDP", "Job"):
+        assert forbidden not in coordinator
+
+
+def test_admin_toc_uses_only_the_ultra_wide_gutter_without_shrinking_content():
+    stylesheet = Path("posts/static/posts/admin_console.css").read_text(encoding="utf-8")
+
+    assert 'grid-template-columns:minmax(0,1fr) 188px' not in stylesheet
+    assert ".console-page-layout { display:block; }" in stylesheet
+    assert ".configuration-dashboard #content { width:auto; max-width:1200px; }" in stylesheet
+    assert "@media (max-width:1439px)" in stylesheet
+    assert "@media (min-width:1440px)" in stylesheet
+    assert ".console-page-toc { display:none; width:100px;" in stylesheet
+    assert "right:max(8px,calc((100vw - 1200px)/2 - 112px))" in stylesheet
+
+
 def test_runtime_console_feedback_bounds_its_icon_size():
     stylesheet = Path("posts/static/posts/admin_console.css").read_text(encoding="utf-8")
 
@@ -148,6 +256,7 @@ def test_runtime_console_feedback_bounds_its_icon_size():
     assert 'data-console-theme="dark"] .console-section-surface' in stylesheet
     assert ".configuration-dashboard .console-section { margin-top:28px;" in stylesheet
     assert 'data-console-theme="dark"] .console-section {' in stylesheet
+    assert ".console-section-disclosure-side>.console-section-disclosure-toggle" in stylesheet
 
 
 def test_runtime_flow_service_link_switches_to_the_service_view():

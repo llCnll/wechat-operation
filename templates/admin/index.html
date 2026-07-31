@@ -13,8 +13,30 @@
   </div>
 </section>
 
-<section class="console-runtime-console {% if admin_console.runtime_console.readiness.core_review_ready %}is-ready{% endif %}">
-  <div class="console-pipeline-heading">
+<div class="console-page-layout">
+  <nav class="console-page-toc" aria-label="本页目录">
+    <p>本页目录</p>
+    <ol>
+      <li><a data-console-toc-link href="#runtime-overview">运行概览</a></li>
+      <li><a data-console-toc-link href="#automated-producers">自动任务</a></li>
+      <li><a data-console-toc-link href="#core-configuration">核心配置</a></li>
+      <li><a data-console-toc-link href="#runtime-health">运行健康</a></li>
+      <li><a data-console-toc-link href="#data-traceability">数据追溯</a></li>
+    </ol>
+  </nav>
+  <details class="console-page-toc-mobile">
+    <summary>本页目录<span class="console-lucide" aria-hidden="true">{% include "posts/includes/lucide_icon.html" with name="chevron-right" %}</span></summary>
+    <ol>
+      <li><a data-console-toc-link href="#runtime-overview">运行概览</a></li>
+      <li><a data-console-toc-link href="#automated-producers">自动任务</a></li>
+      <li><a data-console-toc-link href="#core-configuration">核心配置</a></li>
+      <li><a data-console-toc-link href="#runtime-health">运行健康</a></li>
+      <li><a data-console-toc-link href="#data-traceability">数据追溯</a></li>
+    </ol>
+  </details>
+  <div class="console-page-primary">
+<details id="runtime-overview" class="console-runtime-console console-section-disclosure {% if admin_console.runtime_console.readiness.core_review_ready %}is-ready{% endif %}" data-console-disclosure open>
+  <summary class="console-pipeline-heading console-section-disclosure-summary">
     <div>
       <p><span class="console-lucide" aria-hidden="true">{% include "posts/includes/lucide_icon.html" with name="panel-top" %}</span> RUNTIME OVERVIEW</p>
       <h2>运行概览</h2>
@@ -24,8 +46,8 @@
       <span>下一步：{{ admin_console.runtime_console.first_blocked.label }} · {{ admin_console.runtime_console.first_blocked.action_label }}</span>
       {% endif %}
     </div>
-    <time>检查于 {{ admin_console.runtime_console.checked_at|date:"m-d H:i:s" }}</time>
-  </div>
+    <span class="console-section-disclosure-side"><time>检查于 {{ admin_console.runtime_console.checked_at|date:"m-d H:i:s" }}</time><span class="console-section-disclosure-toggle" aria-hidden="true">{% include "posts/includes/lucide_icon.html" with name="chevron-right" %}</span></span>
+  </summary>
   {% if admin_console.supervisor_error %}<div class="console-pipeline-alert">{{ admin_console.supervisor_error }}。请在终端启动 `uv run python -m service_supervisor`。</div>{% endif %}
   <section class="console-work-scope" aria-labelledby="work-scope-title">
     <div class="console-runtime-section-heading"><div><p><span class="console-lucide" aria-hidden="true">{% include "posts/includes/lucide_icon.html" with name="gamepad" %}</span> WORK SCOPE</p><h3 id="work-scope-title">当前操作游戏</h3></div><span>{{ admin_console.runtime_console.work_scope.description }}</span></div>
@@ -46,7 +68,7 @@
       {% for group in admin_console.runtime_console.service_groups %}<section class="console-service-group" id="service-{{ group.key }}"><h3>{{ group.label }}</h3><div class="console-service-group-grid">{% for node in group.nodes %}{% include "admin/includes/runtime_service_card.html" %}{% endfor %}</div></section>{% endfor %}
     </section>
   </div>
-</section>
+</details>
 
 
 <dialog class="console-log-dialog" data-supervisor-log-dialog aria-labelledby="supervisor-log-title">
@@ -150,11 +172,11 @@
   </form>
 </dialog>
 
-<section class="console-section">
-  <div class="console-section-heading">
+<details id="automated-producers" class="console-section console-section-disclosure" data-console-disclosure>
+  <summary class="console-section-heading console-section-disclosure-summary">
     <div><p>自动化任务</p><h2>自动任务生产者</h2></div>
-    <span>只控制未来自动入队；不会停止 Scheduler 或取消已有任务</span>
-  </div>
+    <span class="console-section-disclosure-copy">只控制未来自动入队；不会停止 Scheduler 或取消已有任务</span><span class="console-section-disclosure-toggle" aria-hidden="true">{% include "posts/includes/lucide_icon.html" with name="chevron-right" %}</span>
+  </summary>
   <div class="console-section-surface console-producer-grid">
     {% for item in admin_console.scheduled_producers %}
     <article class="console-producer-card {% if item.producer.enabled %}is-enabled{% else %}is-paused{% endif %}">
@@ -171,6 +193,7 @@
     </article>
     {% endfor %}
   </div>
+</details>
   {% for item in admin_console.scheduled_producers %}
   <dialog class="console-config-dialog console-producer-dialog" data-config-dialog-panel="producer-{{ item.producer.pk }}" aria-labelledby="producer-dialog-{{ item.producer.pk }}-title">
     <header><div><p>自动化任务</p><h2 id="producer-dialog-{{ item.producer.pk }}-title">{{ item.label }} · 规则管理</h2></div><button type="button" class="console-dialog-close" data-config-dialog-close aria-label="关闭">关闭</button></header>
@@ -223,13 +246,11 @@
     </div>
   </dialog>
   {% endfor %}
-</section>
-
-<section class="console-section">
-  <div class="console-section-heading">
+<details id="core-configuration" class="console-section console-section-disclosure" data-console-disclosure>
+  <summary class="console-section-heading console-section-disclosure-summary">
     <div><p>CONFIGURATION</p><h2>核心配置</h2></div>
-    <span>仅此区域允许编辑</span>
-  </div>
+    <span class="console-section-disclosure-copy">仅此区域允许编辑</span><span class="console-section-disclosure-toggle" aria-hidden="true">{% include "posts/includes/lucide_icon.html" with name="chevron-right" %}</span>
+  </summary>
   <div class="console-section-surface console-configuration-surface">
     <div class="console-config-grid">
       <article class="console-card accent console-policy-card {{ admin_console.policy_status.tone }}">
@@ -274,13 +295,13 @@
     </details>
     {% endif %}
   </div>
-</section>
+</details>
 
-<section class="console-section">
-  <div class="console-section-heading">
+<details id="runtime-health" class="console-section console-section-disclosure" data-console-disclosure>
+  <summary class="console-section-heading console-section-disclosure-summary">
     <div><p>RUNTIME HEALTH</p><h2>运行健康</h2></div>
-    <span>只读概览，不在此处执行任务</span>
-  </div>
+    <span class="console-section-disclosure-copy">只读概览，不在此处执行任务</span><span class="console-section-disclosure-toggle" aria-hidden="true">{% include "posts/includes/lucide_icon.html" with name="chevron-right" %}</span>
+  </summary>
   <div class="console-section-surface console-health-grid">
     <a class="console-health-card" href="{% url 'admin:jobs_backgroundjob_changelist' %}?status__exact=PENDING">
       <span>待执行任务</span><strong>{{ admin_console.pending_job_count }}</strong><small>等待对应 Worker 认领</small>
@@ -292,13 +313,13 @@
       <span>失败任务</span><strong>{{ admin_console.failed_job_count }}</strong><small>{% if admin_console.failed_job_count %}请查看脱敏错误摘要{% else %}当前没有失败任务{% endif %}</small>
     </a>
   </div>
-</section>
+</details>
 
-<section class="console-section">
-  <div class="console-section-heading">
+<details id="data-traceability" class="console-section console-section-disclosure" data-console-disclosure>
+  <summary class="console-section-heading console-section-disclosure-summary">
     <div><p>READ ONLY TRACE</p><h2>数据追溯</h2></div>
-    <span>只读，不在此处执行审核或处置</span>
-  </div>
+    <span class="console-section-disclosure-copy">只读，不在此处执行审核或处置</span><span class="console-section-disclosure-toggle" aria-hidden="true">{% include "posts/includes/lucide_icon.html" with name="chevron-right" %}</span>
+  </summary>
   <div class="console-section-surface console-trace-grid">
     <article class="console-trace-card">
       <div><p>CONTENT RECORDS</p><h3>帖子与互动</h3><span>核验原创判定、正文、媒体、投票与互动快照。</span></div>
@@ -311,5 +332,7 @@
       <div class="console-trace-secondary"><a href="{% url 'admin:reviews_aiassessment_changelist' %}">AI 评估</a><a href="{% url 'admin:reviews_ocrextraction_changelist' %}">OCR 提取</a><a href="{% url 'admin:reviews_riskevidence_changelist' %}">风险证据</a><a href="{% url 'admin:reviews_replydraft_changelist' %}">回复草案</a></div>
     </article>
   </div>
-</section>
+</details>
+  </div>
+</div>
 {% endblock %}
