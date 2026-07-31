@@ -1432,6 +1432,31 @@ class GameCircleSessionService:
                             return {"payload": client.get_content_card(str(request.params["content_id"]))}
                         if request.method == "POSTS_GET_METRICS":
                             return {"payload": client.get_post_metrics(int(request.params["topic_id"]))}
+                        if request.method == "POSTS_LIST_TOPIC_REPLIES":
+                            topic_id = request.params.get("topic_id")
+                            topic_openid = request.params.get("topic_openid")
+                            page = request.params.get("page")
+                            limit = request.params.get("limit")
+                            if not isinstance(topic_id, int) or topic_id <= 0:
+                                raise SourceContractError("帖子 ID 无效")
+                            if (
+                                not isinstance(topic_openid, str)
+                                or not topic_openid
+                                or len(topic_openid) > 255
+                            ):
+                                raise SourceContractError("帖子作者用户 ID 无效")
+                            if not isinstance(page, int) or page < 0:
+                                raise SourceContractError("评论页码无效")
+                            if not isinstance(limit, int) or not 1 <= limit <= 500:
+                                raise SourceContractError("评论分页大小无效")
+                            return {
+                                "payload": client.list_topic_replies(
+                                    topic_id=topic_id,
+                                    topic_openid=topic_openid,
+                                    page=page,
+                                    limit=limit,
+                                )
+                            }
                         if request.method == "POSTS_GET_AUTHOR_DETAIL":
                             openid = request.params.get("openid")
                             if not isinstance(openid, str) or not openid or len(openid) > 255:

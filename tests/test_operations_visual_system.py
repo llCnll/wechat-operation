@@ -19,6 +19,17 @@ def test_authenticated_operations_pages_share_one_theme_control_and_initializer(
     assert operations_base.index("{% block extra_head %}") < operations_base.index("operations_theme.css")
 
 
+def test_admin_console_does_not_override_the_shared_topbar_layout():
+    shared_stylesheet = Path("posts/static/posts/operations_theme.css").read_text(encoding="utf-8")
+    console_stylesheet = Path("posts/static/posts/admin_console.css").read_text(encoding="utf-8")
+
+    assert "#header.topbar,#header.topbar.admin-topbar { height:68px; min-height:68px; padding:0 max(24px,calc((100vw - 1320px)/2)); display:flex; flex-direction:row; flex-wrap:nowrap;" in shared_stylesheet
+    assert "@media (max-width:1080px) { #header.topbar nav { display:none; } }" in shared_stylesheet
+    assert "#header.topbar.admin-topbar" in shared_stylesheet
+    assert "#header.topbar nav a:link,#header.topbar nav a:visited" in shared_stylesheet
+    assert "#header.admin-topbar nav { display:flex;" not in console_stylesheet
+
+
 def test_shared_theme_styles_cover_workspace_and_analysis_surfaces():
     stylesheet = Path("posts/static/posts/operations_theme.css").read_text(encoding="utf-8")
 
