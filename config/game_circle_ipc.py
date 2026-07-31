@@ -305,8 +305,8 @@ class GameCirclePostClient:
             raise SourceContractError("帖子作者用户 ID 无效")
         if not isinstance(page, int) or page < 0:
             raise SourceContractError("评论页码无效")
-        if not isinstance(limit, int) or not 1 <= limit <= 500:
-            raise SourceContractError("评论分页大小无效")
+        if limit != 100:
+            raise SourceContractError("评论分页大小必须为 100")
         return self._payload(
             "POSTS_LIST_TOPIC_REPLIES",
             {

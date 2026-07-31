@@ -1,0 +1,7 @@
+{% extends "posts/operations_base.html" %}
+{% block title %}评论导出任务 | 游戏圈运营{% endblock %}
+{% block content %}
+<section class="comment-export-head"><p class="eyebrow">COMMENT EXPORT</p><h1>评论导出</h1><p>仅显示当前用户在当前游戏下创建的任务。</p></section>
+<nav class="workspace-tabs"><a href="{% url 'comment-export-workspace' %}">新建导出</a><a class="is-active" href="{% url 'comment-export-runs' %}">最近任务</a></nav>
+<section class="comment-export-list"><header><h2>最近任务</h2><a href="{% url 'comment-export-workspace' %}">新建导出</a></header>{% for run in runs %}<article><div><a href="{% url 'comment-export-run-detail' run.pk %}">{{ run.title_snapshot|default:"未命名帖子" }} <small>#{{ run.topic_id }}</small></a><p>关键词：{{ run.keyword }} · 创建于 {{ run.created_at|date:"Y-m-d H:i:s" }}</p></div><div class="comment-export-progress"><b class="is-{{ run.job.status|lower }}">{{ run.job.get_status_display }}</b><span>已处理 {{ run.processed_count }} · 命中 {{ run.matched_count }}</span></div><div class="comment-export-actions">{% if run.job.status == 'SUCCEEDED' %}<a href="{% url 'comment-export-run-detail' run.pk %}">查看结果</a><a href="{% url 'comment-export-csv' run.pk %}">导出 CSV</a>{% elif run.job.status == 'FAILED' %}<small>{{ run.job.error_summary|default:"任务失败" }}</small>{% else %}<small>等待人工补采 Worker</small>{% endif %}</div></article>{% empty %}<p class="comment-export-empty">暂无任务。先确认一篇帖子并创建导出任务。</p>{% endfor %}</section>
+{% endblock %}

@@ -9,7 +9,7 @@ from django.contrib import messages
 from django.contrib.auth.decorators import login_required
 from django.db import transaction
 from django.db.models import OuterRef, Prefetch, Q, Subquery
-from django.http import QueryDict
+from django.http import QueryDict, StreamingHttpResponse
 from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse
 from django.utils import timezone
@@ -18,6 +18,7 @@ from django.utils.http import url_has_allowed_host_and_scheme
 from django.views.decorators.http import require_POST
 
 from config.game_circle_ipc import GameCircleIpcClient, GameCircleIpcError, GameCirclePostClient
+from jobs.adapters import SourceContractError, SourceTransportError
 from jobs.models import BackgroundJob, JobStatus
 from jobs.permanent_mute import (
     enqueue_author_mute_status_refresh,
@@ -37,8 +38,8 @@ from reviews.models import (
     AiOperationReview,
     AiOperationReviewStatus,
     ContentCategory,
-    OperationAudit,
     MuteOperationTrigger,
+    OperationAudit,
     RecommendedAction,
     ReplyDraft,
     ReviewStatus,
@@ -50,12 +51,11 @@ from reviews.services import (
     BLOCK_REASON_OPTIONS,
     OperationExecutionConflict,
     complete_review,
-    confirm_ai_operation_review,
     current_video_extractions,
     enqueue_evaluation_pipeline,
     escalate_ai_operation_review,
-    execute_confirmed_operation,
     execute_author_operation_for_identity,
+    execute_confirmed_operation,
     is_operation_enabled,
     mark_ai_review_restored,
     operation_result_reaches_target,
@@ -66,18 +66,27 @@ from reviews.services import (
     video_sampling_notice,
 )
 
-from .game_catalog import ExecutionScope, active_game_appid, current_execution_scope, managed_game_options
+from .comment_exports import (
+    create_or_reuse_run,
+    issue_confirmation_token,
+    normalize_keyword,
+    read_confirmation_snapshot,
+    verify_confirmation_token,
+)
 from .dashboard_filters import filter_original_posts, parse_original_post_filter
+from .game_catalog import (
+    ExecutionScope,
+    active_game_appid,
+    current_execution_scope,
+    managed_game_options,
+)
 from .ingestion_jobs import enqueue_filtered_post_refresh
 from .models import (
-    POST_STATUS_BLOCKED,
-    POST_STATUS_DELETED,
     POST_STATUS_NORMAL,
-    POST_STATUS_SELF_VISIBLE,
-    POST_STATUS_SUNK,
-    AuthorMuteStatus,
     ActiveGameScope,
+    AuthorMuteStatus,
     CandidatePost,
+    CommentExportRun,
     InteractionSnapshot,
     ManagedGame,
     OfficialAuthor,
@@ -89,7 +98,11 @@ from .models import (
     is_post_self_visible,
     is_post_sunk,
 )
-from .official_authors import apply_identity_presentation, disable_official_author, enable_official_author
+from .official_authors import (
+    apply_identity_presentation,
+    disable_official_author,
+    enable_official_author,
+)
 from .services import (
     mute_management_status_queryset,
     refresh_post_status_and_metrics,
@@ -122,6 +135,7 @@ POST_STATUS_FILTER_OPTIONS = (
     ("DELETED", "原平台已删除"),
     ("UNSYNCED", "未同步"),
 )
+
 
 def _safe_dashboard_return_url(request) -> str:
     return_to = request.POST.get("return_to", "")
@@ -178,9 +192,14 @@ def open_controlled_login(request):
     else:
         status = result.get("status") if isinstance(result, dict) else ""
         if status == "CONTROLLED_SESSION_LOGIN_PENDING":
-            messages.info(request, "已打开受控会话页，正在等待扫码登录；完成扫码后系统会继续恢复当前游戏 Frame。")
+            messages.info(
+                request,
+                "已打开受控会话页，正在等待扫码登录；完成扫码后系统会继续恢复当前游戏 Frame。",
+            )
         elif status == "CONTROLLED_SESSION_LOGIN_REQUIRED":
-            messages.info(request, "已打开受控会话页；当前会话需要重新登录，请在该页面完成扫码后刷新状态。")
+            messages.info(
+                request, "已打开受控会话页；当前会话需要重新登录，请在该页面完成扫码后刷新状态。"
+            )
         elif status == "CONTROLLED_SESSION_PAGE_OPENED":
             messages.info(request, "已打开受控会话页；请在该页面查看登录状态或完成扫码。")
         else:
@@ -245,7 +264,8 @@ def _corrected_post_transition(review: AiOperationReview) -> str:
         (
             audit
             for audit in successful_resolution.operation_audits.all()
-            if audit.task_id == review.audit.task_id and operation_result_reaches_target(audit.result_code)
+            if audit.task_id == review.audit.task_id
+            and operation_result_reaches_target(audit.result_code)
         ),
         None,
     )
@@ -447,11 +467,19 @@ def official_author_management(request):
     if game is None:
         messages.error(request, "请选择本地可管理游戏。")
         return redirect(reverse("official-author-management"))
-    return render(request, "posts/official_author_management.html", {
-        "appid": appid, "game": game, "managed_games": games,
-        "authors": OfficialAuthor.objects.filter(source_appid=appid, disabled_at__isnull=True).order_by("nick_name", "openid"),
-        "preview": request.session.get(_official_preview_key(appid)),
-    })
+    return render(
+        request,
+        "posts/official_author_management.html",
+        {
+            "appid": appid,
+            "game": game,
+            "managed_games": games,
+            "authors": OfficialAuthor.objects.filter(
+                source_appid=appid, disabled_at__isnull=True
+            ).order_by("nick_name", "openid"),
+            "preview": request.session.get(_official_preview_key(appid)),
+        },
+    )
 
 
 @login_required
@@ -466,12 +494,21 @@ def preview_official_author(request):
             raise ValueError("作者详情响应身份不一致")
         topics = payload.get("data", {}).get("topic_list", [])
         preview_topics = [
-            {"topic_id": item.get("topic_id"), "title": str(item.get("title") or item.get("brief_content") or "")[:120], "publish_time": item.get("publish_time")}
-            for item in topics[:10] if isinstance(item, dict)
+            {
+                "topic_id": item.get("topic_id"),
+                "title": str(item.get("title") or item.get("brief_content") or "")[:120],
+                "publish_time": item.get("publish_time"),
+            }
+            for item in topics[:10]
+            if isinstance(item, dict)
         ]
         request.session[_official_preview_key(appid)] = {
-            "user_id": request.user.pk, "openid": openid, "nick_name": str(user.get("nick_name") or "")[:255],
-            "verified_at": timezone.now().isoformat(), "total": payload.get("data", {}).get("total"), "topics": preview_topics,
+            "user_id": request.user.pk,
+            "openid": openid,
+            "nick_name": str(user.get("nick_name") or "")[:255],
+            "verified_at": timezone.now().isoformat(),
+            "total": payload.get("data", {}).get("total"),
+            "topics": preview_topics,
         }
         messages.success(request, "作者信息已核验，请确认加入官方作者名单。")
     except (GameCircleIpcError, KeyError, TypeError, ValueError) as exc:
@@ -485,11 +522,24 @@ def confirm_official_author(request):
     appid = request.POST.get("appid", "").strip()
     preview = request.session.get(_official_preview_key(appid))
     try:
-        verified_at = datetime.fromisoformat(str(preview["verified_at"])) if isinstance(preview, dict) else None
-        if (not isinstance(preview, dict) or preview.get("user_id") != request.user.pk or not verified_at
-                or timezone.now() - verified_at > timedelta(minutes=10)):
+        verified_at = (
+            datetime.fromisoformat(str(preview["verified_at"]))
+            if isinstance(preview, dict)
+            else None
+        )
+        if (
+            not isinstance(preview, dict)
+            or preview.get("user_id") != request.user.pk
+            or not verified_at
+            or timezone.now() - verified_at > timedelta(minutes=10)
+        ):
             raise ValueError("作者核验已过期，请重新查询")
-        enable_official_author(appid=appid, openid=str(preview["openid"]), nick_name=str(preview.get("nick_name") or ""), user=request.user)
+        enable_official_author(
+            appid=appid,
+            openid=str(preview["openid"]),
+            nick_name=str(preview.get("nick_name") or ""),
+            user=request.user,
+        )
         del request.session[_official_preview_key(appid)]
         messages.success(request, "已加入官方作者名单；同游戏的历史与后续帖子会即时按身份展示。")
     except (KeyError, TypeError, ValueError) as exc:
@@ -501,10 +551,137 @@ def confirm_official_author(request):
 @require_POST
 def disable_official_author_view(request, author_id: int):
     appid = request.POST.get("appid", "").strip()
-    author = get_object_or_404(OfficialAuthor, pk=author_id, source_appid=appid, disabled_at__isnull=True)
+    author = get_object_or_404(
+        OfficialAuthor, pk=author_id, source_appid=appid, disabled_at__isnull=True
+    )
     disable_official_author(author=author, user=request.user)
     messages.success(request, "已移除官方作者配置；帖子身份标记已即时取消。")
     return redirect(f"{reverse('official-author-management')}?appid={appid}")
+
+
+def _comment_export_scope_or_error():
+    return current_execution_scope(persist_default=False)
+
+
+def _comment_export_runs(request):
+    scope = _comment_export_scope_or_error()
+    return (
+        CommentExportRun.objects.select_related("job")
+        .filter(created_by=request.user, source_appid=scope.target_appid)
+        .order_by("-created_at")
+    )
+
+
+@login_required
+def comment_export_workspace(request):
+    """A short-lived confirmation flow; no reply-page client exists in Web."""
+    context = {"active_tab": "new", "step": 1}
+    if request.method == "POST":
+        action = request.POST.get("action")
+        try:
+            if action == "confirm":
+                topic_id = int(request.POST.get("topic_id", ""))
+                snapshot = read_confirmation_snapshot(topic_id=topic_id)
+                context.update(
+                    step=2,
+                    snapshot=snapshot.public(),
+                    confirmation_token=issue_confirmation_token(
+                        snapshot=snapshot, user_id=request.user.pk
+                    ),
+                )
+            elif action == "configure":
+                token = request.POST.get("confirmation_token", "")
+                token_data = verify_confirmation_token(token=token, user_id=request.user.pk)
+                topic_id = token_data.get("topic_id")
+                if not isinstance(topic_id, int):
+                    raise ValueError("帖子确认无效，请重新确认。")
+                snapshot = read_confirmation_snapshot(topic_id=topic_id)
+                context.update(
+                    step=2,
+                    snapshot=snapshot.public(),
+                    confirmation_token=token,
+                )
+                context.update(
+                    step=3,
+                    confirmation_token=token,
+                    keyword=normalize_keyword(request.POST.get("keyword", "")),
+                )
+            elif action == "create":
+                token = request.POST.get("confirmation_token", "")
+                keyword = normalize_keyword(request.POST.get("keyword", ""))
+                run, created = create_or_reuse_run(
+                    user_id=request.user.pk,
+                    token=token,
+                    keyword_value=keyword,
+                )
+                context.update(step=4, run=run, created=created)
+            else:
+                raise ValueError("评论导出操作无效。")
+        except (ValueError, SourceContractError, SourceTransportError, GameCircleIpcError) as exc:
+            context["form_error"] = str(exc) or "帖子确认失败，请稍后重试。"
+            if action == "create":
+                context.update(
+                    step=3,
+                    confirmation_token=request.POST.get("confirmation_token", ""),
+                    keyword=request.POST.get("keyword", ""),
+                )
+    return render(request, "posts/comment_export_workspace.html", context)
+
+
+@login_required
+def comment_export_runs(request):
+    return render(
+        request,
+        "posts/comment_export_runs.html",
+        {"active_tab": "runs", "runs": _comment_export_runs(request)[:100]},
+    )
+
+
+def _owned_comment_export_run(request, run_id: int) -> CommentExportRun:
+    return get_object_or_404(_comment_export_runs(request), pk=run_id)
+
+
+@login_required
+def comment_export_run_detail(request, run_id: int):
+    run = _owned_comment_export_run(request, run_id)
+    if run.job.status != JobStatus.SUCCEEDED:
+        messages.warning(request, "任务尚未成功完成，暂不能查看命中结果。")
+        return redirect("comment-export-runs")
+    return render(
+        request,
+        "posts/comment_export_run_detail.html",
+        {"run": run, "results": run.results.all()[:500]},
+    )
+
+
+@login_required
+def export_comment_export_csv(request, run_id: int):
+    run = _owned_comment_export_run(request, run_id)
+    if run.job.status != JobStatus.SUCCEEDED:
+        messages.error(request, "仅已成功完成的任务可以导出 CSV。")
+        return redirect("comment-export-runs")
+
+    def rows():
+        yield "\ufeffopenid,nick_name,create_time,content,game_id\r\n"
+        import csv
+        from io import StringIO
+
+        for result in run.results.iterator(chunk_size=500):
+            buffer = StringIO()
+            csv.writer(buffer, lineterminator="\r\n").writerow(
+                [
+                    result.openid,
+                    result.nick_name,
+                    result.create_time,
+                    result.content,
+                    result.game_id,
+                ]
+            )
+            yield buffer.getvalue()
+
+    response = StreamingHttpResponse(rows(), content_type="text/csv; charset=utf-8")
+    response["Content-Disposition"] = f'attachment; filename="comment-export-{run.pk}.csv"'
+    return response
 
 
 @login_required
@@ -532,13 +709,12 @@ def operations_dashboard(request):
         "suggested_action": list(post_filter.suggested_action),
         "review_status": list(post_filter.review_status),
         "post_status": list(post_filter.post_status),
-        "min_confidence": "" if post_filter.min_confidence is None else str(post_filter.min_confidence),
+        "min_confidence": ""
+        if post_filter.min_confidence is None
+        else str(post_filter.min_confidence),
         "min_views": "" if post_filter.min_views is None else str(post_filter.min_views),
         "reviewed": post_filter.reviewed,
-        **{
-            key: request.GET.get(key, "").strip()
-            for key in ("sort", "priority_order")
-        },
+        **{key: request.GET.get(key, "").strip() for key in ("sort", "priority_order")},
     }
     valid_sorts = {value for value, _label in DASHBOARD_SORT_OPTIONS}
     if filters["sort"] not in valid_sorts:
@@ -779,7 +955,9 @@ def mute_management(request):
     if kind == "PERMANENT":
         statuses = statuses.filter(permanent_mute_enabled=True)
     elif kind == "TEMP":
-        statuses = statuses.filter(permanent_mute_enabled=False,).filter(active_mutes)
+        statuses = statuses.filter(
+            permanent_mute_enabled=False,
+        ).filter(active_mutes)
     if scope == "LOCAL":
         statuses = statuses.filter(local_muted_until__gt=now)
     elif scope == "GLOBAL":
@@ -794,11 +972,12 @@ def mute_management(request):
             # When both scopes are active, the presented effective deadline is
             # their later value.  A row is therefore imminent only when both
             # active deadlines are imminent.
-            (local_soon & (global_soon | ~global_active))
-            | (global_soon & ~local_active)
+            (local_soon & (global_soon | ~global_active)) | (global_soon & ~local_active)
         )
     statuses = list(
-        statuses.select_related("last_source_post", "permanent_mute_set_by").order_by("-last_synced_at")
+        statuses.select_related("last_source_post", "permanent_mute_set_by").order_by(
+            "-last_synced_at"
+        )
     )
     for status in statuses:
         status.presentation = _author_mute_presentation(status, now=now)
@@ -1003,9 +1182,13 @@ def apply_permanent_mute_intent(request):
         messages.error(request, str(exc))
         return redirect(_mute_management_return_url(request))
     if enabled:
-        messages.success(request, f"已标记 {len(statuses)} 位作者为永久禁言；续期由禁言维护 Worker 按计划处理。")
+        messages.success(
+            request, f"已标记 {len(statuses)} 位作者为永久禁言；续期由禁言维护 Worker 按计划处理。"
+        )
     else:
-        messages.success(request, f"已解除 {len(statuses)} 位作者的永久禁言标记；当前上游禁言保持不变。")
+        messages.success(
+            request, f"已解除 {len(statuses)} 位作者的永久禁言标记；当前上游禁言保持不变。"
+        )
     return redirect(_mute_management_return_url(request))
 
 
@@ -1146,9 +1329,7 @@ def _persist_human_mute_intent(
         # A successful MUTE always performs a bounded readback.  Refuse to infer a
         # local permanent state when that observation was not persisted.
         raise ValueError("禁言回读未形成作者状态，未保存永久禁言意图")
-    set_permanent_mute_intent(
-        state, enabled=bool(payload.get("permanent_mute")), user=user
-    )
+    set_permanent_mute_intent(state, enabled=bool(payload.get("permanent_mute")), user=user)
 
 
 @login_required
@@ -1475,9 +1656,7 @@ def confirm_dashboard_operation(request, topic_id: int, action: str):
                 upstream_payload=payload,
                 confirmation_key=request.POST.get("confirmation_key"),
                 mute_trigger=(
-                    MuteOperationTrigger.HUMAN_INITIAL
-                    if action == RecommendedAction.MUTE
-                    else ""
+                    MuteOperationTrigger.HUMAN_INITIAL if action == RecommendedAction.MUTE else ""
                 ),
             )
     except OperationExecutionConflict as exc:
@@ -1568,7 +1747,9 @@ def ai_operation_reviews(request):
         )
         author_status = _author_mute_status_for_post(post, appid)
         review.author_status_id = author_status.pk if author_status else None
-        review.author_nick_name = (author_status.nick_name if author_status else post.author_nick_name) or ""
+        review.author_nick_name = (
+            author_status.nick_name if author_status else post.author_nick_name
+        ) or ""
         review.author_mute_presentation = _author_mute_presentation(author_status)
         review.author_actions_available = bool(post.author_openid and post.source_appid)
         review.author_unavailable_reason = (
@@ -1641,8 +1822,12 @@ def update_ai_operation_review(request, review_id: int, decision: str):
             return redirect(redirect_url)
         if author_payload is None and author_decision == RecommendedAction.MUTE:
             return redirect(redirect_url)
-        requires_write = post_decision != "KEEP_CURRENT" or author_decision == RecommendedAction.MUTE
-        source_context = _source_for_post(review.audit.task.post) if requires_write else nullcontext(None)
+        requires_write = (
+            post_decision != "KEEP_CURRENT" or author_decision == RecommendedAction.MUTE
+        )
+        source_context = (
+            _source_for_post(review.audit.task.post) if requires_write else nullcontext(None)
+        )
         with source_context as source:
             resolution, audits = submit_ai_operation_resolution(
                 review,
@@ -1659,7 +1844,9 @@ def update_ai_operation_review(request, review_id: int, decision: str):
             messages.success(request, "AI 复审最终处置已完成。")
         else:
             summary = "，".join(f"{audit.action}={audit.result_code}" for audit in audits)
-            messages.warning(request, f"最终处置未全部成功，复审保持待处理：{summary or '请重新确认'}。")
+            messages.warning(
+                request, f"最终处置未全部成功，复审保持待处理：{summary or '请重新确认'}。"
+            )
     except ValueError as exc:
         messages.error(request, str(exc))
     except PermissionError as exc:

@@ -1,17 +1,17 @@
-from contextlib import contextmanager
 from unittest.mock import patch
 
 import pytest
 
+from config.game_circle_ipc import GameCircleIpcError
 from jobs.adapters import CandidatePostDTO, SourceBusinessDeletedError, SourceTransportError
 from jobs.models import BackgroundJob
 from jobs.services import execute_next_job
-from config.game_circle_ipc import GameCircleIpcError
 from posts.game_catalog import set_active_game
 from posts.models import POST_STATUS_DELETED, CandidatePost, ManagedGame, OriginalPost, OriginType
 from posts.tasks import (
     AUTHOR_MUTE_STATUS_BACKFILL_V2_TASK,
     BACKFILL_INGESTION_WORKER_HANDLERS,
+    COMMENT_EXPORT_V1_TASK,
     FILTERED_POST_REFRESH_TASK,
     LEGACY_INGEST_WINDOW_TASK,
     MANUAL_CURRENT_INGEST_WINDOW_TASK,
@@ -32,7 +32,6 @@ from reviews.models import RecommendedAction, ReviewTask
 def active_scope_and_source_session(monkeypatch, db):
     game = ManagedGame.objects.create(appid="wx-test", name="测试游戏")
     set_active_game(appid=game.appid)
-
 
 
 class OnePageSource:
@@ -289,6 +288,7 @@ def test_ingestion_worker_lanes_are_explicit_and_keep_legacy_jobs_in_backfill():
         POST_TOPIC_BACKFILL_V1_TASK,
         MANUAL_CURRENT_INGEST_WINDOW_TASK,
         FILTERED_POST_REFRESH_TASK,
+        COMMENT_EXPORT_V1_TASK,
     }
     assert BACKFILL_INGESTION_WORKER_HANDLERS[LEGACY_INGEST_WINDOW_TASK] is ingest_window_handler
 
