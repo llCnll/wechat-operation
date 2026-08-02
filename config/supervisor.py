@@ -20,9 +20,18 @@ class SupervisorClient:
     def __init__(self, runtime_dir: Path = RUNTIME_DIR):
         self.runtime_dir = runtime_dir
         self.root = runtime_dir / "supervisor"
+        self._status_payload: dict | None = None
 
     def status(self) -> dict:
-        return self._request("GET", "/v1/status")["services"]
+        return self._read_status_payload()["services"]
+
+    def diagnostics(self) -> dict:
+        return self._read_status_payload().get("diagnostics", {})
+
+    def _read_status_payload(self) -> dict:
+        if self._status_payload is None:
+            self._status_payload = self._request("GET", "/v1/status")
+        return self._status_payload
 
     def logs(self, service: str, lines: int = 80) -> list[str]:
         return self._request("GET", f"/v1/logs/{service}?lines={lines}")["lines"]

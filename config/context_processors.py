@@ -160,6 +160,8 @@ def _service_card(
         optional=optional,
         service=service,
         running=running,
+        instance_launch_count=service_state.get("instance_launch_count", 0),
+        lifetime_launch_count=service_state.get("lifetime_launch_count", 0),
         **extra,
     )
 
@@ -662,10 +664,16 @@ def admin_console_overview(request):
             }
         )
     try:
-        services = SupervisorClient().status()
+        supervisor_client = SupervisorClient()
+        services = supervisor_client.status()
+        try:
+            supervisor_diagnostics = supervisor_client.diagnostics()
+        except SupervisorUnavailableError:
+            supervisor_diagnostics = {}
         supervisor_error = ""
     except SupervisorUnavailableError as exc:
         services = {}
+        supervisor_diagnostics = {}
         supervisor_error = str(exc)
     for name in MANAGED_SERVICE_NAMES:
         services.setdefault(name, {"running": False, "desired": False})
@@ -768,6 +776,7 @@ def admin_console_overview(request):
             "public_opinion_conclusion_config": public_opinion_conclusion_config,
             "scheduled_producers": scheduled_producers,
             "services": services,
+            "supervisor_diagnostics": supervisor_diagnostics,
             "supervisor_error": supervisor_error,
             "runtime_console": runtime_console,
             "write_switches": write_switches,

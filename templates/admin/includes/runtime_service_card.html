@@ -10,6 +10,7 @@
     <div><dt>当前状态</dt><dd>{{ node.reason }}</dd></div>
     <div><dt>条件缺失时</dt><dd>{{ node.missing_behavior }}</dd></div>
   </dl>
+  {% if node.service %}<div class="console-service-launch-counts"><span>本实例启动 {{ node.instance_launch_count }} 次</span><span>累计诊断 {{ node.lifetime_launch_count }} 次</span></div>{% endif %}
   {% if node.key == "game-circle-session" %}
   <div class="console-service-layers" aria-label="游戏圈访问状态">
     {% for layer in node.connection_layers %}<span class="{% if layer.ready %}is-ready{% else %}is-blocked{% endif %}">{{ layer.label }}：{{ layer.reason }}</span>{% endfor %}

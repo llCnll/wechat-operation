@@ -66,6 +66,10 @@
     </section>
     <section class="console-runtime-tab-panel console-runtime-services" id="runtime-services-panel" aria-label="按服务管理">
       {% for group in admin_console.runtime_console.service_groups %}<section class="console-service-group" id="service-{{ group.key }}"><h3>{{ group.label }}</h3><div class="console-service-group-grid">{% for node in group.nodes %}{% include "admin/includes/runtime_service_card.html" %}{% endfor %}</div></section>{% endfor %}
+      <section class="console-runtime-diagnostics" aria-label="运行追溯">
+        <article><header><div><p>PROCESS LIFECYCLE</p><h3>Chrome 与服务生命周期</h3></div><span>只读</span></header><ol>{% for event in admin_console.supervisor_diagnostics.lifecycle_events %}<li><time>{{ event.at|slice:"5:19" }}</time><strong>{{ event.service }}</strong><span>{{ event.event }} · {{ event.reason }}</span></li>{% empty %}<li class="is-empty">尚无可展示的生命周期事件。</li>{% endfor %}</ol></article>
+        <article><header><div><p>SESSION TARGET</p><h3>会话页面动作</h3></div><span>不等于 Chrome 重启</span></header><ol>{% for event in admin_console.supervisor_diagnostics.session_target_events %}<li><time>{{ event.at|slice:"5:19" }}</time><strong>{{ event.target_kind }}</strong><span>{{ event.action }} · {{ event.intent }}</span></li>{% empty %}<li class="is-empty">尚无可展示的会话页面动作。</li>{% endfor %}</ol></article>
+      </section>
     </section>
   </div>
 </details>

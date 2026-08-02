@@ -9,7 +9,12 @@ import pytest
 import service_supervisor.manager as supervisor_manager
 import service_supervisor.runtime as supervisor_runtime
 from service_supervisor.manager import Supervisor, SupervisorError
-from service_supervisor.runtime import RuntimeStore, SupervisorLeaseGuard, SupervisorLockedError
+from service_supervisor.runtime import (
+    RuntimeStore,
+    SupervisorLeaseGuard,
+    SupervisorLeaseOwnershipError,
+    SupervisorLockedError,
+)
 
 
 def windows_replace_error(winerror: int, path: Path) -> PermissionError:
@@ -222,6 +227,137 @@ def test_supervisor_lease_guard_stops_after_instance_replacement(tmp_path):
     store.write_instance_lease("replacement")
 
     assert guard.check_and_heartbeat() is False
+
+
+def test_revoke_instance_lease_immediately_expires_only_the_current_owner(tmp_path):
+    store = RuntimeStore(tmp_path)
+    store.ensure()
+    store.write_instance_lease("current")
+
+    with pytest.raises(SupervisorLeaseOwnershipError):
+        store.revoke_instance_lease("other")
+
+    store.revoke_instance_lease("current")
+    lease = store.read_instance_lease()
+    assert lease["instance_id"] == "current"
+    assert lease["expires_at_epoch"] <= supervisor_runtime.time.time()
+
+
+def test_runtime_store_keeps_only_valid_bounded_process_and_event_records(tmp_path):
+    store = RuntimeStore(tmp_path)
+    store.ensure()
+    record = {
+        "service": "ingestion",
+        "pid": 123,
+        "created_at": 1.0,
+        "instance_id": "instance",
+        "generation": 1,
+    }
+    store.write_process_registry([record])
+    assert store.read_process_registry() == [record]
+
+    with pytest.raises(ValueError):
+        store.write_process_registry([{**record, "command": "sensitive"}])
+    with pytest.raises(ValueError):
+        store.append_lifecycle_event(
+            service="ingestion",
+            event="STARTED",
+            reason="not-a-fixed-code",
+            generation=1,
+            outcome="COMPLETED",
+        )
+
+    for generation in range(supervisor_runtime.SUPERVISOR_EVENT_BUFFER_LIMIT + 1):
+        store.append_lifecycle_event(
+            service="ingestion",
+            event="STARTED",
+            reason="DESIRED_START",
+            generation=generation,
+            outcome="COMPLETED",
+        )
+    events = store.read_lifecycle_events()
+    assert len(events) == supervisor_runtime.SUPERVISOR_EVENT_BUFFER_LIMIT
+    assert events[0]["generation"] == 1
+    assert {key for event in events for key in event}.isdisjoint(
+        {"pid", "instance_id", "token", "cookie", "command", "url"}
+    )
+
+
+def test_process_recovery_requires_exact_argv_and_project_working_directory(tmp_path, monkeypatch):
+    supervisor = Supervisor(Path.cwd(), tmp_path)
+    command = supervisor.definitions()["ingestion"].command
+
+    class Process:
+        def __init__(self, _pid):
+            return None
+
+        def is_running(self):
+            return True
+
+        def create_time(self):
+            return 1.0
+
+        def cmdline(self):
+            return list(command)
+
+        def cwd(self):
+            return str(Path.cwd())
+
+    record = {
+        "service": "ingestion",
+        "pid": 123,
+        "created_at": 1.0,
+        "instance_id": "instance",
+        "generation": 1,
+    }
+    monkeypatch.setattr(supervisor_manager.psutil, "Process", Process)
+    assert supervisor._registered_process_matches(record) is True
+
+    monkeypatch.setattr(
+        Process,
+        "cmdline",
+        lambda _self: [*command[:-1], "--not-the-fixed-loop"],
+    )
+    assert supervisor._registered_process_matches(record) is False
+    monkeypatch.setattr(Process, "cmdline", lambda _self: list(command))
+    monkeypatch.setattr(Process, "cwd", lambda _self: str(tmp_path))
+    assert supervisor._registered_process_matches(record) is False
+
+
+def test_shutdown_reclaims_every_registered_process_for_the_current_instance(tmp_path, monkeypatch):
+    supervisor = Supervisor(Path.cwd(), tmp_path)
+    supervisor._instance_id = "current"
+    supervisor._lock = object()
+    records = [
+        {
+            "service": "ingestion",
+            "pid": 101,
+            "created_at": 1.0,
+            "instance_id": "current",
+            "generation": 1,
+        },
+        {
+            "service": "ingestion",
+            "pid": 102,
+            "created_at": 2.0,
+            "instance_id": "current",
+            "generation": 2,
+        },
+    ]
+    reclaimed = []
+    monkeypatch.setattr(supervisor.store, "read_process_registry", lambda: records)
+    monkeypatch.setattr(
+        supervisor,
+        "_terminate_registered_process",
+        lambda record, *, reason: reclaimed.append((record["generation"], reason)),
+    )
+    monkeypatch.setattr(supervisor, "_revoke_current_lease", lambda: None)
+    monkeypatch.setattr(supervisor, "_read_state", lambda _service: {"desired": False})
+    monkeypatch.setattr(supervisor, "release", lambda: None)
+
+    supervisor.shutdown()
+
+    assert reclaimed == [(1, "GRACEFUL_SHUTDOWN"), (2, "GRACEFUL_SHUTDOWN")]
 
 
 def test_supervisor_lease_guard_stops_after_repeated_heartbeat_write_failures(tmp_path, monkeypatch):
