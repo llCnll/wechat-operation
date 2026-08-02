@@ -181,6 +181,35 @@ def test_worker_does_not_recover_or_execute_when_the_same_worker_is_already_runn
     assert "同类 Worker 已在运行" in Command.stderr.messages[0]
 
 
+def test_worker_does_not_claim_another_job_after_lease_revocation(monkeypatch):
+    class Output:
+        def write(self, _message):
+            return None
+
+    class Command:
+        stdout = Output()
+        stderr = Output()
+
+    class Job:
+        pk = 1
+        task_type = "INGEST_WINDOW"
+        status = "SUCCEEDED"
+
+    claims = []
+    monkeypatch.setattr("jobs.worker.write_worker_heartbeat", lambda: len(claims) == 0)
+    monkeypatch.setattr("jobs.worker.recover_interrupted_jobs", lambda **_kwargs: 0)
+
+    def claim(*_args, **_kwargs):
+        claims.append(True)
+        return Job()
+
+    monkeypatch.setattr("jobs.worker.execute_next_job", claim)
+
+    consume_jobs(Command(), {"INGEST_WINDOW": lambda _job: None}, loop=True, poll_seconds=0)
+
+    assert claims == [True]
+
+
 def test_worker_lock_uses_windows_byte_range_lock_when_fcntl_is_unavailable(monkeypatch):
     calls = []
 

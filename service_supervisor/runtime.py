@@ -32,14 +32,70 @@ SUPERVISOR_LEASE_VERSION = 1
 SUPERVISOR_LEASE_SECONDS = 30.0
 SUPERVISOR_LEASE_POLL_SECONDS = 5.0
 SUPERVISOR_LEASE_READ_FAILURE_LIMIT = 2
+SUPERVISOR_PROCESS_REGISTRY_VERSION = 1
+SUPERVISOR_EVENT_BUFFER_LIMIT = 80
+SESSION_TARGET_EVENT_BUFFER_LIMIT = 80
 ATOMIC_WRITE_RETRY_SECONDS = 1.0
 ATOMIC_WRITE_INITIAL_BACKOFF_SECONDS = 0.02
 ATOMIC_WRITE_MAX_BACKOFF_SECONDS = 0.2
 WINDOWS_RETRYABLE_REPLACE_ERRORS = frozenset({5, 32})
 
+LIFECYCLE_SERVICES = frozenset(
+    {
+        "supervisor",
+        "controlled_chrome",
+        "web",
+        "scheduler",
+        "game_circle_session",
+        "ingestion",
+        "backfill_ingestion",
+        "metric_sync",
+        "public_opinion_reporting",
+        "review",
+        "video_extraction",
+        "ai_moderation",
+        "mute_maintenance",
+    }
+)
+LIFECYCLE_EVENTS = frozenset(
+    {"STARTED", "STOPPED", "LAUNCH_FAILED", "LEASE_REVOKE", "RECOVERY_SKIP", "REPLACED"}
+)
+LIFECYCLE_REASONS = frozenset(
+    {
+        "BOOTSTRAP",
+        "DESIRED_START",
+        "OPERATOR_RESTART",
+        "TAKEOVER_RECLAIM",
+        "GRACEFUL_SHUTDOWN",
+        "LEASE_REVOKED",
+        "LEASE_REVOKE_WRITE_FAILED",
+        "TERMINATION_TIMEOUT",
+        "LAUNCH_STATE_PUBLISH_FAILED",
+        "CHROME_CDP_UNAVAILABLE",
+        "CHROME_GENERATION_CHANGED",
+        "SESSION_OWNER_REPLACEMENT",
+        "IDENTITY_MISMATCH",
+    }
+)
+LIFECYCLE_OUTCOMES = frozenset({"COMPLETED", "FAILED", "GRACEFUL", "FORCED", "SKIPPED"})
+LIFECYCLE_TRIGGERS = frozenset(
+    {"BOOTSTRAP", "RECONCILE", "OPERATOR", "TAKEOVER", "SESSION_OWNER"}
+)
+LIFECYCLE_DETECTIONS = frozenset(
+    {"CDP_UNAVAILABLE", "GENERATION_MISMATCH", "SESSION_OWNER_REPLACEMENT"}
+)
+SESSION_TARGET_KINDS = frozenset({"HOME", "PLUGIN"})
+SESSION_TARGET_ACTIONS = frozenset({"CREATED", "REUSED", "CLOSED", "MISSING", "ACTIVATED"})
+SESSION_TARGET_INTENTS = frozenset({"BOOTSTRAP", "REPAIR", "KEEPALIVE", "OPERATOR", "RECLAIM"})
+SESSION_TARGET_OUTCOMES = frozenset({"COMPLETED", "FAILED", "SKIPPED"})
+
 
 class SupervisorLockedError(RuntimeError):
     """Raised when a second supervisor attempts to own the same runtime."""
+
+
+class SupervisorLeaseOwnershipError(RuntimeError):
+    """Raised when an instance tries to revoke another Supervisor's lease."""
 
 
 class ExclusiveFileLock:
@@ -121,6 +177,18 @@ class RuntimeStore:
     @property
     def instance_lease_path(self) -> Path:
         return self.root / "instance-lease.json"
+
+    @property
+    def process_registry_path(self) -> Path:
+        return self.root / "managed-processes.json"
+
+    @property
+    def lifecycle_events_path(self) -> Path:
+        return self.root / "lifecycle-events.json"
+
+    @property
+    def session_target_events_path(self) -> Path:
+        return self.root / "session-target-events.json"
 
     def service_path(self, service: str) -> Path:
         return self.services_dir / f"{service}.json"
@@ -232,9 +300,201 @@ class RuntimeStore:
             },
         )
 
+    def revoke_instance_lease(self, instance_id: str) -> None:
+        """Atomically expire the lease only when it still belongs to this owner."""
+        lease = self.read_instance_lease()
+        if not instance_id or lease.get("instance_id") != instance_id:
+            raise SupervisorLeaseOwnershipError("Supervisor 租约不属于当前实例")
+        self.write_json(
+            self.instance_lease_path,
+            {
+                "version": SUPERVISOR_LEASE_VERSION,
+                "instance_id": instance_id,
+                "renewed_at": utc_now(),
+                "expires_at_epoch": time.time(),
+            },
+        )
+
     def read_instance_lease(self) -> dict:
         value = self.read_json(self.instance_lease_path, {})
         return value if isinstance(value, dict) else {}
+
+    def read_process_registry(self) -> list[dict]:
+        value = self.read_json(self.process_registry_path, {})
+        if (
+            not isinstance(value, dict)
+            or value.get("version") != SUPERVISOR_PROCESS_REGISTRY_VERSION
+        ):
+            return []
+        records = value.get("records")
+        if not isinstance(records, list):
+            return []
+        return [record for record in records if self._is_process_record(record)]
+
+    def write_process_registry(self, records: list[dict]) -> None:
+        if not all(self._is_process_record(record) for record in records):
+            raise ValueError("受管进程登记格式无效")
+        self.write_json(
+            self.process_registry_path,
+            {"version": SUPERVISOR_PROCESS_REGISTRY_VERSION, "records": records},
+        )
+
+    def append_lifecycle_event(
+        self,
+        *,
+        service: str,
+        event: str,
+        reason: str,
+        generation: int,
+        outcome: str,
+        trigger: str | None = None,
+        detection: str | None = None,
+    ) -> None:
+        if (
+            service not in LIFECYCLE_SERVICES
+            or event not in LIFECYCLE_EVENTS
+            or reason not in LIFECYCLE_REASONS
+            or outcome not in LIFECYCLE_OUTCOMES
+            or not isinstance(generation, int)
+            or generation < 0
+            or (trigger is not None and trigger not in LIFECYCLE_TRIGGERS)
+            or (detection is not None and detection not in LIFECYCLE_DETECTIONS)
+        ):
+            raise ValueError("Supervisor 生命周期事件格式无效")
+        payload = {
+            "at": utc_now(),
+            "service": service,
+            "event": event,
+            "reason": reason,
+            "generation": generation,
+            "outcome": outcome,
+        }
+        if trigger is not None:
+            payload["trigger"] = trigger
+        if detection is not None:
+            payload["detection"] = detection
+        self._append_bounded_event(
+            self.lifecycle_events_path, payload, limit=SUPERVISOR_EVENT_BUFFER_LIMIT
+        )
+
+    def read_lifecycle_events(self) -> list[dict]:
+        return [
+            event
+            for event in self._read_bounded_events(self.lifecycle_events_path)
+            if self._is_lifecycle_event(event)
+        ]
+
+    def append_session_target_event(
+        self, *, target_kind: str, action: str, intent: str, outcome: str
+    ) -> None:
+        if (
+            target_kind not in SESSION_TARGET_KINDS
+            or action not in SESSION_TARGET_ACTIONS
+            or intent not in SESSION_TARGET_INTENTS
+            or outcome not in SESSION_TARGET_OUTCOMES
+        ):
+            raise ValueError("会话 target 动作摘要格式无效")
+        self._append_bounded_event(
+            self.session_target_events_path,
+            {
+                "at": utc_now(),
+                "target_kind": target_kind,
+                "action": action,
+                "intent": intent,
+                "outcome": outcome,
+            },
+            limit=SESSION_TARGET_EVENT_BUFFER_LIMIT,
+        )
+
+    def read_session_target_events(self) -> list[dict]:
+        return [
+            event
+            for event in self._read_bounded_events(self.session_target_events_path)
+            if self._is_session_target_event(event)
+        ]
+
+    def _append_bounded_event(self, path: Path, event: dict, *, limit: int) -> None:
+        value = self.read_json(path, {})
+        existing = value.get("events") if isinstance(value, dict) else None
+        if isinstance(existing, list):
+            events = [item for item in existing if isinstance(item, dict)]
+        else:
+            events = []
+        events.append(event)
+        self.write_json(path, {"events": events[-limit:]})
+
+    def _read_bounded_events(self, path: Path) -> list[dict]:
+        value = self.read_json(path, {})
+        events = value.get("events") if isinstance(value, dict) else None
+        if not isinstance(events, list):
+            return []
+        return [event for event in events if isinstance(event, dict)]
+
+    @staticmethod
+    def _is_process_record(record: object) -> bool:
+        if not isinstance(record, dict):
+            return False
+        return (
+            record.get("service") in LIFECYCLE_SERVICES - {"supervisor", "controlled_chrome"}
+            and isinstance(record.get("pid"), int)
+            and record["pid"] > 0
+            and isinstance(record.get("created_at"), int | float)
+            and isinstance(record.get("instance_id"), str)
+            and bool(record["instance_id"])
+            and isinstance(record.get("generation"), int)
+            and record["generation"] > 0
+            and set(record) == {"service", "pid", "created_at", "instance_id", "generation"}
+        )
+
+    @staticmethod
+    def _is_event_timestamp(value: object) -> bool:
+        if not isinstance(value, str):
+            return False
+        try:
+            datetime.fromisoformat(value)
+        except ValueError:
+            return False
+        return True
+
+    @classmethod
+    def _is_lifecycle_event(cls, event: object) -> bool:
+        if not isinstance(event, dict):
+            return False
+        allowed = {
+            "at",
+            "service",
+            "event",
+            "reason",
+            "generation",
+            "outcome",
+            "trigger",
+            "detection",
+        }
+        if not set(event).issubset(allowed):
+            return False
+        return (
+            cls._is_event_timestamp(event.get("at"))
+            and event.get("service") in LIFECYCLE_SERVICES
+            and event.get("event") in LIFECYCLE_EVENTS
+            and event.get("reason") in LIFECYCLE_REASONS
+            and isinstance(event.get("generation"), int)
+            and event["generation"] >= 0
+            and event.get("outcome") in LIFECYCLE_OUTCOMES
+            and ("trigger" not in event or event["trigger"] in LIFECYCLE_TRIGGERS)
+            and ("detection" not in event or event["detection"] in LIFECYCLE_DETECTIONS)
+        )
+
+    @classmethod
+    def _is_session_target_event(cls, event: object) -> bool:
+        if not isinstance(event, dict):
+            return False
+        return set(event) == {"at", "target_kind", "action", "intent", "outcome"} and (
+            cls._is_event_timestamp(event.get("at"))
+            and event.get("target_kind") in SESSION_TARGET_KINDS
+            and event.get("action") in SESSION_TARGET_ACTIONS
+            and event.get("intent") in SESSION_TARGET_INTENTS
+            and event.get("outcome") in SESSION_TARGET_OUTCOMES
+        )
 
     def write_heartbeat(self, service: str, *, instance_id: str | None = None) -> None:
         payload = {"service": service, "at": utc_now()}

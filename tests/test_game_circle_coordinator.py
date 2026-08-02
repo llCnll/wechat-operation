@@ -87,6 +87,23 @@ def test_runtime_projection_never_contains_credentials_or_target_identifiers(tmp
     assert projection["active_lease_count"] == 1
 
 
+def test_target_diagnostics_are_identity_free_and_do_not_use_cdp(tmp_path):
+    store = RuntimeStore(tmp_path)
+    service = object.__new__(GameCircleSessionService)
+    service._store = store
+    store.ensure()
+
+    service._record_target_action(role="LEASE_PLUGIN", action="CREATED", intent="KEEPALIVE")
+
+    assert store.read_session_target_events()[-1] == {
+        "at": store.read_session_target_events()[-1]["at"],
+        "target_kind": "PLUGIN",
+        "action": "CREATED",
+        "intent": "KEEPALIVE",
+        "outcome": "COMPLETED",
+    }
+
+
 @pytest.mark.django_db
 def test_source_without_lease_has_no_bootstrap_or_browser_side_effect(monkeypatch):
     service = GameCircleSessionService()

@@ -220,6 +220,7 @@ flowchart LR
 
 - 在受控浏览器完成可观察会话页最小实测：分别记录扫码页、稳定有效页、验证后导航回扫码页及 Frame 最小只读查询的脱敏结果；确认外层检查与人工观察的同一页面一致，且不会创建额外 HOME。
 - 在 macOS、Windows 与 Linux 受控环境完成 Supervisor 生命周期和 Chrome 演练：验证实例租约失效后 Web/Worker 停止、重启实例不并发认领同职责 Worker、正常关闭释放 8000/9222；验证遗留 Chrome 先接收 `Browser.close`、端口未释放时才处理 `127.0.0.1:9222` 监听进程、PID 交接但 generation 不变时不重启、连续三次 generation 失败后熔断。确认不会处理其他端口。
+- 待在 Windows 与 Linux 实机受控环境补充验证：正常关闭立即撤销租约、同实例遗留登记 Web/Worker 的完整回收、PID 复用/argv/工作目录不符时跳过、Chrome 进程生命周期与 HOME/Plugin target 动作分别追溯，并确认管理台不泄露运行态身份材料；macOS 演练不得替代这两项验证。
 
 ### 后续需独立评审
 

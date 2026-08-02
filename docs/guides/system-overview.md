@@ -44,7 +44,7 @@ flowchart LR
 
 ## 运行架构与任务流
 
-日常只启动 Supervisor。它托管一个受控 Chrome、一个 Web、一个自动调度器、一个游戏圈会话服务、一个实时采集 Worker、一个人工补采 Worker、一个指标快照 Worker、一个 AI 审核 Worker、一个可选视频提取 Worker 和一个默认停止的 AI 自动处置 Worker；各 Worker 职责严格分离。受控 Chrome 使用独立 profile 和专用 `127.0.0.1:9222` loopback CDP，Supervisor 是其唯一进程所有者。Supervisor 为 Web/Worker 发放短期实例租约：异常退出后它们自行结束；每次新实例启动也会先终止运行态中可确认身份的既有 Web/Worker，再按持久化 `desired` 恢复。Chrome 不参与异常退出自清理；新 Supervisor 启动时先清理专用端口并创建新 generation。Supervisor 为固定本机 IPC 注入独立 capability，SQLite 部署不允许启动同一 Worker 职责的第二个实例。
+日常只启动 Supervisor。它托管一个受控 Chrome、一个 Web、一个自动调度器、一个游戏圈会话服务、一个实时采集 Worker、一个人工补采 Worker、一个指标快照 Worker、一个 AI 审核 Worker、一个可选视频提取 Worker 和一个默认停止的 AI 自动处置 Worker；各 Worker 职责严格分离。受控 Chrome 使用独立 profile 和专用 `127.0.0.1:9222` loopback CDP，Supervisor 是其唯一进程所有者。Supervisor 为 Web/Worker 发放短期实例租约：正常关闭先立即撤销租约，再按实例进程登记回收所有四重身份校验通过的 Web/Worker；异常退出后它们自行结束。新实例只接管已登记、且 PID、创建时间、完整有序固定 argv 和项目工作目录全部吻合的旧进程，再按持久化 `desired` 恢复，绝不扫描或终止未登记系统进程。Chrome 不参与异常退出自清理；新 Supervisor 启动时先清理专用端口并创建新 generation。Supervisor 为固定本机 IPC 注入独立 capability，SQLite 部署不允许启动同一 Worker 职责的第二个实例。
 
 游戏圈会话服务是唯一的 CDP 所有者。它以 `SessionBootstrap` 统一建立 HOME、当前游戏确认/切换、Frame、身份绑定和最小只读验证；建立 Frame、检查外层会话、修复损坏 Frame 和保活候选是互斥的显式意图。外层会话只由 HOME 内以 `cache: 'no-store'` 调用的 `getappinfo` 成功业务响应证明，缓存响应或 URL token 本身不代表登录有效。保活或切换取得新的 outer token 时，已发布 Frame lease 继续按既有退役规则可用；只有 `getappinfo` 确认外层登录态过期时，同一 Chrome generation 的 Frame lease 才同时失效并要求人工重新扫码。Frame 来源身份也可在外层有效时独立失效，仅影响对应 lease。运行态分别记录最近外层观察与最近成功验证；两秒 Repair 循环的 target 存活检查不得刷新它们。服务有 ACTIVE lease 时每五分钟只读验证一次外层会话；只有外层已验证却没有当前 scope lease 时才以至少 15 秒间隔再次验证并补建 Frame。`LOGIN_PENDING` 是互斥人工恢复状态，检查、建 Frame、保活和自动修复均不会打断它。来源请求遇到认证拒绝会由会话服务合并复核，确认无可用会话后固定返回未就绪而不再请求上游。新 lease 发布前旧 lease 持续可用，发布后旧 lease 等待已开始请求结束和最短退役期届满才关闭其自建 target；维护循环会独立执行该回收。每次来源请求由有截止时间、可取消的 SessionAccess 管理。Chrome 健康由固定 CDP 端点和已确认 generation 决定，启动器 PID 交接不会触发替换；若 generation 连续三次无法就绪，Supervisor 熔断自动恢复并要求人工重启。新 owner 不扫描、接管或关闭旧 generation 的 tab；运行态只保存固定状态和数量，不保存 target ID、token 或 URL。
 
@@ -160,7 +160,7 @@ flowchart LR
 
 `/admin/` 是“系统配置与追溯台”，不是第二个内容管理入口。首页的“运行概览”从一次脱敏运行快照派生两种视图：首次恢复使用“按运行流程”，依次确认控制台与 Supervisor、受控游戏圈连接、当前操作游戏、当前游戏 Frame、审核能力配置和核心后台服务；日常诊断与固定控制使用“按服务管理”。流程只突出第一个阻塞步骤及其唯一入口，不重复展示日志、停止、重启、保活或配置表单。
 
-“按服务管理”将 Web 与 Supervisor 归为基础托管；将受控 Chrome、游戏圈会话服务、外层会话和当前 Frame 归为游戏圈访问；将 Scheduler、帖子采集（实时采集与人工补采）、指标快照、AI 审核和禁言维护归为调度与业务 Worker；OCR、视频审核、人工处置授权和 AI 自动处置为可选能力。服务卡分别显示生命周期与业务条件：无启用规则、无当前 Frame 或无 AI 配置不会阻止对应进程启动，只会影响其业务任务按既有语义等待、延后或失败。
+“按服务管理”将 Web 与 Supervisor 归为基础托管；将受控 Chrome、游戏圈会话服务、外层会话和当前 Frame 归为游戏圈访问；将 Scheduler、帖子采集（实时采集与人工补采）、指标快照、AI 审核和禁言维护归为调度与业务 Worker；OCR、视频审核、人工处置授权和 AI 自动处置为可选能力。服务卡分别显示生命周期与业务条件：无启用规则、无当前 Frame 或无 AI 配置不会阻止对应进程启动，只会影响其业务任务按既有语义等待、延后或失败。运行追溯将 Chrome/服务生命周期与 HOME/Plugin target 动作分区展示，并分别展示当前实例启动次数与本机累计诊断次数；页面创建、复用、关闭或激活不代表 Chrome 进程重启。所有摘要都只含固定类别与时间，不含 PID、实例标识、target ID、URL、Cookie、token 或 capability。
 
 - 可编辑配置包括审核策略版本、审核策略规则，以及 Pipeline 中白名单 AI/OCR 配置和人工处置开关。密钥只可写入、不会回显；AI/OCR 变更重启 AI Worker，处置开关变更重启 Web。策略规则用于维护风险标签、最低置信度、优先级和建议动作；首页默认折叠当前启用策略的规则摘要，展开后可查看中文风险类型、阈值、建议动作和优先级。规则编辑列表同时保留风险编码与中文释义。
 - Supervisor 启动预检会幂等初始化“通用内容审核策略”。它包含通用违规、无关内容、负面灌水、交易风险和内容异常的基线规则；预检不覆盖已有规则，且只会在没有启用策略时启用该默认版本。`ensure_default_policy` 仅用于诊断或恢复。
