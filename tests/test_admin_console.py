@@ -671,15 +671,18 @@ def test_admin_home_offers_manual_ingestion_from_the_post_producer(admin_client)
     ingestion_end = page.index("</article>", ingestion_start) + len("</article>")
     ingestion_card = page[ingestion_start:ingestion_end]
 
-    assert producer_dialog.count('class="console-producer-run-form"') == 2
-    assert producer_dialog.count(producer_action) == 2
+    assert producer_dialog.count('class="console-producer-run-form"') == 3
+    assert producer_dialog.count(producer_action) == 3
     assert 'name="mode" value="current"' in producer_dialog
     assert 'name="mode" value="history"' in producer_dialog
+    assert 'name="mode" value="topics"' in producer_dialog
     assert 'name="hours" type="number" min="1" max="744" value="12"' in producer_dialog
+    assert 'name="topic_ids"' in producer_dialog
     assert "采集最近 30 分钟" in producer_dialog
     assert "补齐过去的采集缺口" in producer_dialog
     assert "创建最近 30 分钟采集任务" in producer_dialog
     assert "创建历史补采任务" in producer_dialog
+    assert "创建指定帖子采集任务" in producer_dialog
     assert '<select name="mode">' not in producer_dialog
     assert 'id="manual-ingestion-tasks"' not in page
     assert "创建历史补采" not in ingestion_card
@@ -763,6 +766,30 @@ def test_manual_ingestion_only_creates_a_pending_job_without_starting_workers(ad
     assert job.status == JobStatus.PENDING
     assert job.parameter_summary["appid"] == game.appid
     assert job.parameter_summary["end_time"] - job.parameter_summary["start_time"] == 12 * 60 * 60
+
+
+@pytest.mark.django_db
+def test_manual_topic_submission_only_enqueues_jobs_without_accessing_source(admin_client, monkeypatch):
+    game = ManagedGame.objects.create(appid="wx-topic-pending", name="指定帖子补采游戏")
+    set_active_game(appid=game.appid)
+    monkeypatch.setattr(
+        "config.game_circle_ipc.GameCirclePostClient",
+        lambda *_args, **_kwargs: pytest.fail("Web request must not access source"),
+    )
+
+    response = admin_client.post(
+        "/admin/scheduled-producers/post_ingestion/run/",
+        {
+            "return_to": "/admin/",
+            "mode": "topics",
+            "topic_ids": "1464098814，1464098815 1464098814",
+        },
+    )
+
+    assert response.status_code == 302
+    jobs = list(BackgroundJob.objects.filter(task_type="MANUAL_TOPIC_INGEST").order_by("created_at"))
+    assert [job.parameter_summary["topic_id"] for job in jobs] == [1464098814, 1464098815]
+    assert all(job.status == JobStatus.PENDING for job in jobs)
 
 
 @pytest.mark.django_db

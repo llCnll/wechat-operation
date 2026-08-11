@@ -233,6 +233,10 @@
         <section class="console-producer-run-body"><p class="console-producer-run-kicker">历史补采</p><h3>补齐过去的采集缺口</h3><p>从提交时上海当前分钟向前回溯指定时长；当前操作游戏和范围版本会在入队时冻结。</p><div class="console-dialog-fields console-producer-run-fields"><label class="console-dialog-field-wide">回溯时长（小时）<input name="hours" type="number" min="1" max="744" value="12" required inputmode="numeric"><em>可选范围：1 至 744 小时</em></label></div></section>
         <footer><span>固定每页 20 条；对应 Worker 未运行时，任务会保持待执行。</span><button class="console-config-submit" type="submit">创建历史补采任务</button></footer>
       </form>
+      <form class="console-producer-run-form" method="post" action="{% url 'run-scheduled-producer-now' producer_key=item.producer.producer_key %}">{% csrf_token %}<input type="hidden" name="return_to" value="/admin/"><input type="hidden" name="mode" value="topics">
+        <section class="console-producer-run-body"><p class="console-producer-run-kicker">指定帖子</p><h3>按帖子 ID 精确采集</h3><p>每个帖子 ID 会创建或复用独立的人工补采任务；当前操作游戏和范围版本会在入队时冻结。</p><div class="console-dialog-fields console-producer-run-fields"><label class="console-dialog-field-wide">帖子 ID<textarea name="topic_ids" rows="3" required inputmode="numeric" placeholder="例如：1464098814，1464098815 1464098816"></textarea><em>支持空格、英文逗号或中文逗号分隔；一次最多 50 个去重后的 ID。</em></label></div></section>
+        <footer><span>仅创建任务，不会在页面访问来源；对应人工补采 Worker 未运行时，任务会保持待执行。</span><button class="console-config-submit" type="submit">创建指定帖子采集任务</button></footer>
+      </form>
       {% else %}
       <form class="console-producer-run-form" method="post" action="{% url 'run-scheduled-producer-now' producer_key=item.producer.producer_key %}">{% csrf_token %}<input type="hidden" name="return_to" value="/admin/">
         <section class="console-producer-run-body">

@@ -1,7 +1,7 @@
 {% extends "posts/operations_base.html" %}
 {% block title %}评论导出结果 | 游戏圈运营{% endblock %}
 {% block content %}
-<section class="comment-export-head"><p class="eyebrow">COMMENT EXPORT / RESULT</p><h1>{{ run.title_snapshot }}</h1><p>任务 #{{ run.pk }} · 命中 {{ run.matched_count }} 条评论</p></section>
+<section class="comment-export-head"><p class="eyebrow">COMMENT EXPORT / RESULT</p><h1>{{ run.title_snapshot }}</h1><p>任务 #{{ run.pk }} · {% if run.keyword %}命中{% else %}已导出{% endif %} {{ run.matched_count }} 条评论</p></section>
 <nav class="workspace-tabs"><a href="{% url 'comment-export-workspace' %}">新建导出</a><a class="is-active" href="{% url 'comment-export-runs' %}">最近任务</a></nav>
-<section class="comment-export-list"><header><h2>命中评论</h2><a href="{% url 'comment-export-csv' run.pk %}">导出 CSV</a></header>{% for item in results %}<article class="comment-export-result"><div><b>{{ item.nick_name|default:"匿名用户" }}</b><small>{{ item.create_time }} · 提取数字 {{ item.game_id }}</small></div><p>{{ item.content }}</p></article>{% empty %}<p class="comment-export-empty">任务已完成，但没有命中评论。</p>{% endfor %}</section>
+<section class="comment-export-list"><header><h2>{% if run.keyword %}命中评论{% else %}全部评论{% endif %}</h2><a href="{% url 'comment-export-csv' run.pk %}">导出 CSV</a></header>{% for item in results %}<article class="comment-export-result"><div><b>{{ item.nick_name|default:"匿名用户" }}</b><small>{{ item.create_time }}{% if run.keyword %} · 提取数字 {{ item.game_id }}{% endif %}</small></div><p>{{ item.content }}</p></article>{% empty %}<p class="comment-export-empty">任务已完成，但没有{% if run.keyword %}命中{% else %}可导出{% endif %}评论。</p>{% endfor %}</section>
 {% endblock %}

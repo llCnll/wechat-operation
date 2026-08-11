@@ -170,6 +170,38 @@ class CdpGameCircleClient:
                 )
             },
         )
+        return self._parse_candidate_list(payload)
+
+    def get_candidate_by_topic_id(self, topic_id: int) -> CandidatePostDTO | None:
+        """Resolve one known topic through the fixed candidate-list contract."""
+        if isinstance(topic_id, bool) or not isinstance(topic_id, int) or topic_id <= 0:
+            raise SourceContractError("帖子 ID 无效")
+        payload = self._get(
+            "gettopiclist",
+            {
+                "data": json.dumps(
+                    {
+                        "req": {
+                            "topic_id": topic_id,
+                            "page": 0,
+                            "page_size": 10,
+                            "skip_check_author": True,
+                            "order_by": 1,
+                            "is_desc": True,
+                        }
+                    },
+                    separators=(",", ":"),
+                )
+            },
+        )
+        matches = [item for item in self._parse_candidate_list(payload) if item.topic_id == topic_id]
+        if not matches:
+            return None
+        if len(matches) != 1:
+            raise SourceContractError("指定帖子候选响应不唯一")
+        return matches[0]
+
+    def _parse_candidate_list(self, payload: dict[str, Any]) -> list[CandidatePostDTO]:
         try:
             records = payload["rsp"]["topic_list"]
             if not isinstance(records, list):

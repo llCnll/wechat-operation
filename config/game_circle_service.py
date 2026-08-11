@@ -1481,6 +1481,23 @@ class GameCircleSessionService:
                         if request.method == "POSTS_LIST_CANDIDATES":
                             items = client.list_candidates(**{key: int(request.params[key]) for key in ("page", "page_size", "start_time", "end_time")})
                             return {"items": [{"topic_id": item.topic_id, "content_id": item.content_id, "source_appid": item.source_appid, "publish_time": int(item.publish_time.timestamp()) if item.publish_time else None} for item in items]}
+                        if request.method == "POSTS_GET_CANDIDATE":
+                            topic_id = request.params.get("topic_id")
+                            if isinstance(topic_id, bool) or not isinstance(topic_id, int) or topic_id <= 0:
+                                raise SourceContractError("帖子 ID 无效")
+                            item = client.get_candidate_by_topic_id(topic_id)
+                            if item is None:
+                                return {"item": None}
+                            return {
+                                "item": {
+                                    "topic_id": item.topic_id,
+                                    "content_id": item.content_id,
+                                    "source_appid": item.source_appid,
+                                    "publish_time": (
+                                        int(item.publish_time.timestamp()) if item.publish_time else None
+                                    ),
+                                }
+                            }
                         if request.method == "POSTS_GET_CONTENT_CARD":
                             return {"payload": client.get_content_card(str(request.params["content_id"]))}
                         if request.method == "POSTS_GET_METRICS":
