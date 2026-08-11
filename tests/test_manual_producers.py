@@ -9,11 +9,12 @@ from jobs.task_types import (
     GAME_CIRCLE_SESSION_KEEPALIVE_TASK,
     MANUAL_CURRENT_INGEST_WINDOW_TASK,
     MANUAL_INGEST_WINDOW_TASK,
+    MANUAL_TOPIC_INGEST_TASK,
     PERMANENT_MUTE_RENEWAL_TASK,
     STATUS_SYNC_TASK,
 )
 from posts.game_catalog import set_active_game
-from posts.ingestion_jobs import enqueue_manual_historical_ingestion_window
+from posts.ingestion_jobs import enqueue_manual_historical_ingestion_window, parse_manual_topic_ids
 from posts.models import ActiveGameScope, ManagedGame
 
 
@@ -134,6 +135,60 @@ def test_manual_historical_ingestion_rejects_invalid_hours_and_client_appid():
         run_manual_producer(
             producer_key="post_ingestion",
             values={"mode": "history", "hours": "12", "appid": "other-game"},
+        )
+
+    assert not BackgroundJob.objects.exists()
+
+
+def test_manual_topic_ids_accept_mixed_separators_and_preserve_first_seen_order():
+    assert parse_manual_topic_ids("1464098814，1464098815 1464098814,1464098816") == [
+        1464098814,
+        1464098815,
+        1464098816,
+    ]
+
+
+@pytest.mark.django_db
+def test_manual_topic_ingestion_creates_independent_fixed_scope_jobs_and_reuses_active_ones():
+    game = _activate()
+    first = run_manual_producer(
+        producer_key="post_ingestion",
+        values={"mode": "topics", "topic_ids": "1464098814，1464098815 1464098814"},
+    )
+    repeated = run_manual_producer(
+        producer_key="post_ingestion",
+        values={"mode": "topics", "topic_ids": "1464098815,1464098814"},
+    )
+
+    assert [job.task_type for job in first.jobs] == [
+        MANUAL_TOPIC_INGEST_TASK,
+        MANUAL_TOPIC_INGEST_TASK,
+    ]
+    assert [job.parameter_summary["topic_id"] for job in first.jobs] == [1464098814, 1464098815]
+    assert first.created == (True, True)
+    assert repeated.jobs == (first.jobs[1], first.jobs[0])
+    assert repeated.created == (False, False)
+    assert all(job.parameter_summary["appid"] == game.appid for job in first.jobs)
+    assert all(
+        job.checkpoint["execution_scope"] == {"target_appid": game.appid, "scope_version": 1}
+        for job in first.jobs
+    )
+    assert not ScheduledProducerSlot.objects.exists()
+
+
+@pytest.mark.django_db
+def test_manual_topic_ingestion_rejects_invalid_values_before_creating_any_jobs():
+    _activate()
+
+    for value in ("", "0", "-1", "topic-1", str(2**63)):
+        with pytest.raises(ValueError):
+            run_manual_producer(
+                producer_key="post_ingestion", values={"mode": "topics", "topic_ids": value}
+            )
+    with pytest.raises(ValueError, match="最多提交 50"):
+        run_manual_producer(
+            producer_key="post_ingestion",
+            values={"mode": "topics", "topic_ids": ",".join(str(i) for i in range(1, 52))},
         )
 
     assert not BackgroundJob.objects.exists()

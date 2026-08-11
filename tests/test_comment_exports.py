@@ -9,6 +9,7 @@ from jobs.task_types import COMMENT_EXPORT_V1_TASK
 from posts.comment_exports import (
     CommentExportSnapshot,
     comment_export_handler,
+    create_or_reuse_run,
     format_source_time,
     issue_confirmation_token,
     match_comment,
@@ -22,15 +23,14 @@ from posts.source_client import CdpGameCircleClient
 
 def test_comment_export_rule_is_literal_nfc_and_ascii_digits_only():
     assert normalize_keyword("  甄嬛传  ") == "甄嬛传"
+    assert normalize_keyword(" ") == ""
     assert match_comment("甄嬛传 123 与 456", "甄嬛传") == "123"
     assert match_comment("甄嬛传１２３", "甄嬛传") is None
     assert match_comment("甄嬛传 123", "甄嬛") == "123"
     assert match_comment("甄嬛传 123", "甄嬛傳") is None
 
 
-def test_comment_export_rule_rejects_invalid_keyword_and_timestamp():
-    with pytest.raises(ValueError):
-        normalize_keyword(" ")
+def test_comment_export_rule_rejects_oversized_keyword_and_invalid_timestamp():
     with pytest.raises(ValueError):
         normalize_keyword("x" * 101)
     with pytest.raises(SourceContractError):
@@ -176,8 +176,138 @@ def test_comment_export_worker_saves_only_matching_results(monkeypatch):
 
 
 @pytest.mark.django_db
+def test_comment_export_worker_saves_every_top_level_comment_when_rule_is_empty(monkeypatch):
+    user = get_user_model().objects.create_user("full-comment-exporter")
+    game = ManagedGame.objects.create(appid="game-a", name="测试游戏")
+    ActiveGameScope.objects.create(active_game=game)
+    job = BackgroundJob.objects.create(
+        task_type=COMMENT_EXPORT_V1_TASK,
+        idempotency_key="comment-export:full",
+        checkpoint={"execution_scope": {"target_appid": "game-a", "scope_version": 1}},
+    )
+    run = CommentExportRun.objects.create(
+        job=job,
+        created_by=user,
+        source_appid="game-a",
+        scope_version=1,
+        topic_id=1,
+        title_snapshot="测试帖",
+        author_openid="author",
+        rule_version="keyword-first-digit-v1",
+        keyword="",
+        page_size=100,
+    )
+
+    class Source:
+        def __init__(self, **_kwargs):
+            pass
+
+        def list_topic_replies(self, **_kwargs):
+            return {
+                "items": [
+                    {
+                        "reply_id": "first",
+                        "openid": "u1",
+                        "nick_name": "甲",
+                        "create_time": 1,
+                        "content": "没有数字的评论",
+                    },
+                    {
+                        "reply_id": "second",
+                        "openid": "u2",
+                        "nick_name": "乙",
+                        "create_time": 2,
+                        "content": "任意评论 456",
+                    },
+                ],
+                "has_next": False,
+                "total_count": 2,
+            }
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr("posts.comment_exports.GameCirclePostClient", Source)
+    execute_next_job({COMMENT_EXPORT_V1_TASK: comment_export_handler})
+
+    run.refresh_from_db()
+    assert run.processed_count == 2 and run.matched_count == 2
+    assert list(run.results.order_by("reply_id").values_list("reply_id", "game_id")) == [
+        ("first", ""),
+        ("second", ""),
+    ]
+
+
+@pytest.mark.django_db
+def test_full_export_and_keyword_export_use_separate_active_jobs(monkeypatch):
+    user = get_user_model().objects.create_user("export-key-user")
+    snapshot = CommentExportSnapshot(
+        topic_id=1,
+        source_appid="game-a",
+        scope_version=1,
+        author_openid="author",
+        author_nick_name="作者",
+        title="测试帖",
+        content_text="正文",
+        view_count=0,
+        love_count=0,
+        reply_count=0,
+        fingerprint="fingerprint",
+    )
+    token = issue_confirmation_token(snapshot=snapshot, user_id=user.pk)
+    monkeypatch.setattr("posts.comment_exports.read_confirmation_snapshot", lambda **_kwargs: snapshot)
+
+    full, full_created = create_or_reuse_run(user_id=user.pk, token=token, keyword_value="")
+    repeated_full, repeated_created = create_or_reuse_run(
+        user_id=user.pk, token=token, keyword_value=" "
+    )
+    filtered, filtered_created = create_or_reuse_run(
+        user_id=user.pk, token=token, keyword_value="组队"
+    )
+
+    assert full_created is True
+    assert repeated_created is False
+    assert repeated_full.pk == full.pk
+    assert filtered_created is True
+    assert filtered.pk != full.pk
+
+
+@pytest.mark.django_db
 def test_invalid_configured_keyword_stays_on_the_rule_step(client, monkeypatch):
     user = get_user_model().objects.create_user("rule-step-user")
+    client.force_login(user)
+    snapshot = CommentExportSnapshot(
+        topic_id=1,
+        source_appid="game-a",
+        scope_version=1,
+        author_openid="author",
+        author_nick_name="作者",
+        title="测试帖",
+        content_text="正文",
+        view_count=0,
+        love_count=0,
+        reply_count=0,
+        fingerprint="fingerprint",
+    )
+    monkeypatch.setattr("posts.views.read_confirmation_snapshot", lambda **_kwargs: snapshot)
+
+    response = client.post(
+        "/comment-export/",
+        {
+            "action": "configure",
+            "confirmation_token": issue_confirmation_token(snapshot=snapshot, user_id=user.pk),
+            "keyword": "x" * 101,
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.context["step"] == 2
+    assert "关键词长度" in response.context["form_error"]
+
+
+@pytest.mark.django_db
+def test_empty_rule_moves_to_creation_step_for_a_full_export(client, monkeypatch):
+    user = get_user_model().objects.create_user("full-export-step-user")
     client.force_login(user)
     snapshot = CommentExportSnapshot(
         topic_id=1,
@@ -204,5 +334,6 @@ def test_invalid_configured_keyword_stays_on_the_rule_step(client, monkeypatch):
     )
 
     assert response.status_code == 200
-    assert response.context["step"] == 2
-    assert "关键词长度" in response.context["form_error"]
+    assert response.context["step"] == 3
+    assert response.context["keyword"] == ""
+    assert "全部顶层评论" in response.content.decode()

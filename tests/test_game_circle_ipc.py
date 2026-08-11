@@ -79,3 +79,42 @@ def test_post_client_rehydrates_deleted_source_category_for_shared_refresh_bound
 
     with pytest.raises(SourceBusinessDeletedError, match="原平台帖子已从管理队列删除"):
         client.get_post_metrics(1)
+
+
+def test_post_client_exposes_only_a_fixed_candidate_lookup():
+    calls = []
+
+    class Ipc:
+        def call(self, *args, **kwargs):
+            calls.append((args, kwargs))
+            return {
+                "item": {
+                    "topic_id": 1464098814,
+                    "content_id": "content-a",
+                    "source_appid": "game-a",
+                    "publish_time": None,
+                }
+            }
+
+    client = GameCirclePostClient(scope=ExecutionScope("game-a", 1), ipc=Ipc())
+
+    item = client.get_candidate_by_topic_id(1464098814)
+
+    assert item is not None
+    assert item.topic_id == 1464098814
+    assert calls == [
+        (
+            ("POSTS_GET_CANDIDATE",),
+            {"scope": ExecutionScope("game-a", 1), "params": {"topic_id": 1464098814}},
+        )
+    ]
+
+
+def test_post_client_rejects_invalid_candidate_id_without_ipc_access():
+    client = GameCirclePostClient(
+        scope=ExecutionScope("game-a", 1),
+        ipc=type("UnexpectedIpc", (), {"call": lambda *_args, **_kwargs: pytest.fail("unexpected IPC")})(),
+    )
+
+    with pytest.raises(Exception, match="帖子 ID 无效"):
+        client.get_candidate_by_topic_id(0)

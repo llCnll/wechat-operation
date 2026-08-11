@@ -137,6 +137,50 @@ def test_author_detail_uses_the_fixed_user_query_contract(monkeypatch):
     ]
 
 
+def test_candidate_lookup_uses_only_the_fixed_topic_id_contract(monkeypatch):
+    client = object.__new__(CdpGameCircleClient)
+    client.appid = "game-a"
+    calls = []
+    monkeypatch.setattr(
+        client,
+        "_get",
+        lambda method, params: calls.append((method, params))
+        or {
+            "rsp": {
+                "topic_list": [
+                    {"topic_id": 1464098814, "content_id": "content-a", "appid": "game-a"},
+                    {"topic_id": 99, "content_id": "other", "appid": "game-a"},
+                ]
+            }
+        },
+    )
+
+    item = client.get_candidate_by_topic_id(1464098814)
+
+    assert item is not None
+    assert item.topic_id == 1464098814
+    assert item.content_id == "content-a"
+    assert calls == [
+        (
+            "gettopiclist",
+            {
+                "data": (
+                    '{"req":{"topic_id":1464098814,"page":0,"page_size":10,'
+                    '"skip_check_author":true,"order_by":1,"is_desc":true}}'
+                )
+            },
+        )
+    ]
+
+
+def test_candidate_lookup_rejects_invalid_id_without_source_access(monkeypatch):
+    client = object.__new__(CdpGameCircleClient)
+    monkeypatch.setattr(client, "_get", lambda *_args: pytest.fail("unexpected source read"))
+
+    with pytest.raises(SourceContractError, match="帖子 ID 无效"):
+        client.get_candidate_by_topic_id(0)
+
+
 def test_author_detail_rejects_an_unbounded_identity_before_source_access(monkeypatch):
     client = object.__new__(CdpGameCircleClient)
     monkeypatch.setattr(client, "_get", lambda *_args: pytest.fail("unexpected source read"))

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from hashlib import sha256
@@ -22,6 +23,7 @@ from .tasks import (
     FILTERED_POST_REFRESH_TASK,
     MANUAL_CURRENT_INGEST_WINDOW_TASK,
     MANUAL_INGEST_WINDOW_TASK,
+    MANUAL_TOPIC_INGEST_TASK,
     METRICS_REFRESH_WINDOW_TASK,
     SCHEDULED_INGEST_WINDOW_TASK,
     STATUS_SYNC_TASK,
@@ -29,6 +31,8 @@ from .tasks import (
 
 
 MAX_MANUAL_INGESTION_HOURS = 31 * 24
+MAX_MANUAL_TOPIC_IDS = 50
+MAX_TOPIC_ID = 2**63 - 1
 
 SHANGHAI = ZoneInfo("Asia/Shanghai")
 
@@ -71,6 +75,26 @@ class MetricsRefreshEnqueueResult:
 
     job: BackgroundJob
     created: bool
+
+
+def parse_manual_topic_ids(value: object) -> list[int]:
+    """Validate the fixed, operator-entered topic ID list without retaining raw text."""
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError("请填写至少一个帖子 ID。")
+    identifiers: list[int] = []
+    seen: set[int] = set()
+    for token in re.split(r"[,，\s]+", value.strip()):
+        if not re.fullmatch(r"[0-9]+", token):
+            raise ValueError("帖子 ID 必须是十进制正整数，可用空格、英文逗号或中文逗号分隔。")
+        topic_id = int(token)
+        if not 1 <= topic_id <= MAX_TOPIC_ID:
+            raise ValueError("帖子 ID 超出允许范围。")
+        if topic_id not in seen:
+            identifiers.append(topic_id)
+            seen.add(topic_id)
+    if len(identifiers) > MAX_MANUAL_TOPIC_IDS:
+        raise ValueError(f"一次最多提交 {MAX_MANUAL_TOPIC_IDS} 个去重后的帖子 ID。")
+    return identifiers
 
 
 def _positive_int(value: object, *, name: str) -> int:
@@ -206,6 +230,41 @@ def enqueue_manual_historical_ingestion_window(
             idempotency_scope_version=scope.scope_version,
             checkpoint={"execution_scope": scope.as_checkpoint()},
         )
+
+
+def enqueue_manual_topic_ingestion(*, topic_ids: list[int]) -> tuple[IngestionEnqueueResult, ...]:
+    """Create or reuse one fixed-scope manual ingestion job for each topic ID."""
+    unique_topic_ids = list(dict.fromkeys(topic_ids))
+    if not unique_topic_ids:
+        raise ValueError("请填写至少一个帖子 ID。")
+    if len(unique_topic_ids) > MAX_MANUAL_TOPIC_IDS:
+        raise ValueError(f"一次最多提交 {MAX_MANUAL_TOPIC_IDS} 个去重后的帖子 ID。")
+    if any(
+        isinstance(topic_id, bool)
+        or not isinstance(topic_id, int)
+        or not 1 <= topic_id <= MAX_TOPIC_ID
+        for topic_id in unique_topic_ids
+    ):
+        raise ValueError("帖子 ID 超出允许范围。")
+
+    results: list[IngestionEnqueueResult] = []
+    with transaction.atomic():
+        scope = current_execution_scope(persist_default=False)
+        for topic_id in unique_topic_ids:
+            result = enqueue_active_coalesced_job(
+                task_type=MANUAL_TOPIC_INGEST_TASK,
+                idempotency_key=(
+                    f"manual-topic-ingest:{scope.target_appid}:{scope.scope_version}:"
+                    f"{topic_id}:{uuid4().hex}"
+                ),
+                active_coalescing_key=(
+                    f"manual-topic-ingest:{scope.target_appid}:v{scope.scope_version}:{topic_id}"
+                ),
+                parameter_summary={"appid": scope.target_appid, "topic_id": topic_id},
+                checkpoint={"execution_scope": scope.as_checkpoint()},
+            )
+            results.append(IngestionEnqueueResult(job=result.job, created=result.created))
+    return tuple(results)
 
 
 def enqueue_filtered_post_refresh(*, filters: OriginalPostFilter) -> IngestionEnqueueResult:

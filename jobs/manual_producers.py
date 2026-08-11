@@ -14,6 +14,8 @@ from jobs.permanent_mute import enqueue_permanent_mute_renewal
 from posts.ingestion_jobs import (
     enqueue_manual_current_ingestion_window,
     enqueue_manual_historical_ingestion_window,
+    enqueue_manual_topic_ingestion,
+    parse_manual_topic_ids,
 )
 from reporting.metric_jobs import (
     enqueue_manual_daily_metric_range,
@@ -84,6 +86,15 @@ def run_manual_producer(*, producer_key: str, values: dict[str, object]) -> Manu
             result = enqueue_manual_historical_ingestion_window(hours=values.get("hours"))
         elif mode == "current":
             result = enqueue_manual_current_ingestion_window()
+        elif mode == "topics":
+            results = enqueue_manual_topic_ingestion(
+                topic_ids=parse_manual_topic_ids(values.get("topic_ids"))
+            )
+            return ManualProducerRun(
+                producer_key=producer_key,
+                jobs=tuple(item.job for item in results),
+                created=tuple(item.created for item in results),
+            )
         else:
             raise ValueError("帖子采集执行模式无效")
     elif producer_key == "session_keepalive":

@@ -35,6 +35,7 @@ IPC_CAPABILITY_ENV = "OPERATION_GAME_CIRCLE_IPC_CAPABILITY"
 POST_METHODS = frozenset(
     {
         "POSTS_LIST_CANDIDATES",
+        "POSTS_GET_CANDIDATE",
         "POSTS_GET_CONTENT_CARD",
         "POSTS_GET_METRICS",
         "POSTS_LIST_TOPIC_REPLIES",
@@ -280,6 +281,28 @@ class GameCirclePostClient:
             published = item.get("publish_time")
             parsed.append(CandidatePostDTO(int(item["topic_id"]), str(item.get("content_id", "")), str(item.get("source_appid", self.appid)), datetime.fromtimestamp(int(published), tz=UTC) if published else None))
         return parsed
+
+    def get_candidate_by_topic_id(self, topic_id: int) -> CandidatePostDTO | None:
+        if isinstance(topic_id, bool) or not isinstance(topic_id, int) or topic_id <= 0:
+            raise SourceContractError("帖子 ID 无效")
+        result = self._ipc.call("POSTS_GET_CANDIDATE", scope=self.scope, params={"topic_id": topic_id})
+        item = result.get("item")
+        if item is None:
+            return None
+        if not isinstance(item, dict):
+            raise SourceContractError("游戏圈会话响应结构无效")
+        try:
+            published = item.get("publish_time")
+            return CandidatePostDTO(
+                topic_id=int(item["topic_id"]),
+                content_id=str(item.get("content_id", "")),
+                source_appid=str(item.get("source_appid", self.appid)),
+                publish_time=(
+                    datetime.fromtimestamp(int(published), tz=UTC) if published else None
+                ),
+            )
+        except (KeyError, TypeError, ValueError, OverflowError) as exc:
+            raise SourceContractError("游戏圈会话响应结构无效") from exc
 
     def get_content_card(self, content_id: str) -> dict[str, Any]:
         return self._payload("POSTS_GET_CONTENT_CARD", {"content_id": content_id})
