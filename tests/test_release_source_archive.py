@@ -135,7 +135,27 @@ def test_build_source_archive_uses_tagged_files_and_writes_sha256(tmp_path):
             "wechat-content-operations-1.2.3/pyproject.toml",
             "wechat-content-operations-1.2.3/releases/",
             "wechat-content-operations-1.2.3/releases/1.2.3.yaml",
+            "wechat-content-operations-1.2.3/release-provenance.json",
         ]
+        provenance = json.loads(
+            archive.read("wechat-content-operations-1.2.3/release-provenance.json")
+        )
+    assert provenance == {
+        "schema_version": 1,
+        "artifact_version": "1.2.3",
+        "artifact_tag": "v1.2.3",
+        "artifact_commit": artifact.commit,
+        "release_commits": {"1.2.3": artifact.commit},
+    }
+
+
+def test_build_source_archive_is_stable_when_provenance_is_appended(tmp_path):
+    root = _release_repository(tmp_path)
+
+    first = builder.build_source_archive(root, "v1.2.3", tmp_path / "first")
+    second = builder.build_source_archive(root, "v1.2.3", tmp_path / "second")
+
+    assert first.archive_path.read_bytes() == second.archive_path.read_bytes()
 
 
 def test_build_source_archive_rejects_tag_and_project_version_mismatch(tmp_path):

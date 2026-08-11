@@ -1,0 +1,19 @@
+version: 1.10.1
+previous: 1.10.0
+changes:
+  - 修复纯源码 ZIP 端点升级：发布包携带经 SHA-256 保护的完整发布 provenance，无 Git 元数据时仍可校验发布状态、生成升级计划并确认升级。
+upgrade:
+  dependencies: none
+  database: none
+  static: none
+  restart:
+    mode: supervisor
+    services: []
+  once_jobs: []
+  manual: []
+verification:
+  - uv run python manage.py validate_releases
+  - uv run pytest -q tests/test_release_protocol.py tests/test_release_source_archive.py tests/test_service_supervisor.py tests/test_runtime_configuration.py
+  - uv run python manage.py check
+  - 在已校验 SHA-256 的无 Git 源码 ZIP 中执行 validate_release_package、upgrade_plan 和 upgrade_ack，确认 release-state 的提交与 provenance 一致。
+  - '完整重启 Supervisor 后，确认 /healthz 返回 {"status": "ok"}。'
