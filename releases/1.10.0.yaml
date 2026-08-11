@@ -1,0 +1,22 @@
+version: 1.10.0
+previous: 1.9.0
+changes:
+  - 加固 Supervisor 生命周期追溯与进程回收，避免失效实例接管运行态并提升受控会话服务的恢复可观测性。
+  - 新增指定帖子批量补采：运营人员可用空格、英文逗号或中文逗号提交多个帖子 ID，每个帖子按冻结的当前游戏范围异步读取并进入既有审核流程。
+  - 优化评论导出：关键词规则改为可选，留空时导出已确认帖子下的全部顶层评论。
+upgrade:
+  dependencies: none
+  database: none
+  static: none
+  restart:
+    mode: supervisor
+    services: []
+  once_jobs: []
+  manual:
+    - 重启前确认不存在待回读确认的人工上游写审计；升级期间不得重放上游写操作。
+verification:
+  - uv run python manage.py validate_releases
+  - uv run pytest -q tests/test_release_protocol.py tests/test_release_source_archive.py tests/test_comment_exports.py tests/test_game_circle_ipc.py tests/test_ingest_worker.py tests/test_manual_producers.py tests/test_source_operations.py tests/test_admin_console.py
+  - uv run python manage.py check
+  - '完整重启 Supervisor 后，确认 Web、游戏圈会话服务与既有 desired 状态的 Worker 恢复，/healthz 返回 {"status": "ok"}。'
+  - 使用已授权的受控测试帖子验证指定帖子采集仅通过固定 IPC 读取并异步入队；验证关键词导出与留空全量导出均只读取顶层评论，不记录认证材料且不执行上游写操作。
