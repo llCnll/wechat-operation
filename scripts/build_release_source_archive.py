@@ -12,6 +12,7 @@ import tempfile
 import tomllib
 import zipfile
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 
 import yaml
@@ -22,6 +23,8 @@ class SourceArchiveError(RuntimeError):
 
 
 FORBIDDEN_TOP_LEVEL_PATHS = frozenset({"runtime", ".git", ".venv"})
+RELEASE_PROVENANCE_FILENAME = "release-provenance.json"
+RELEASE_PROVENANCE_SCHEMA_VERSION = 1
 NON_PLATFORM_CHANGE_TYPES = frozenset(
     {"docs", "ci", "build", "chore", "refactor", "style", "test"}
 )
@@ -85,6 +88,32 @@ def _release_document_at_tag(root: Path, tag: str, version: str) -> dict[str, ob
     if previous is not None and not isinstance(previous, str):
         raise SourceArchiveError(f"{tag} 中的 releases/{version}.yaml previous 无效")
     return document
+
+
+def _release_versions_at_tag(root: Path, tag: str) -> list[str]:
+    paths = _git(root, "ls-tree", "-r", "--name-only", tag, "releases").splitlines()
+    versions = [
+        path.removeprefix("releases/").removesuffix(".yaml")
+        for path in paths
+        if path.startswith("releases/") and path.endswith(".yaml")
+    ]
+    if not versions or len(set(versions)) != len(versions):
+        raise SourceArchiveError(f"{tag} 中缺少有效发布清单")
+    return sorted(versions, key=lambda item: tuple(int(part) for part in item.split(".")))
+
+
+def _release_commit_catalog(root: Path, tag: str) -> dict[str, str]:
+    catalog: dict[str, str] = {}
+    for version in _release_versions_at_tag(root, tag):
+        _release_document_at_tag(root, tag, version)
+        try:
+            commit = _git(root, "rev-list", "-n", "1", f"v{version}")
+        except SourceArchiveError as exc:
+            raise SourceArchiveError(f"缺少发布 tag：v{version}") from exc
+        if not re.fullmatch(r"[0-9a-f]{40}", commit):
+            raise SourceArchiveError(f"发布 tag 无法解析提交：v{version}")
+        catalog[version] = commit
+    return catalog
 
 
 def _non_platform_change_subjects(root: Path, previous_tag: str | None, tag: str) -> list[str]:
@@ -160,6 +189,49 @@ def _validate_archive(archive_path: Path, prefix: str) -> None:
             continue
         if relative_name.split("/", 1)[0] in FORBIDDEN_TOP_LEVEL_PATHS:
             raise SourceArchiveError(f"源码归档包含禁止路径：{name}")
+    if names.count(f"{prefix}{RELEASE_PROVENANCE_FILENAME}") != 1:
+        raise SourceArchiveError("源码归档缺少唯一发布 provenance")
+
+
+def _append_release_provenance(
+    archive_path: Path,
+    *,
+    prefix: str,
+    version: str,
+    tag: str,
+    commit: str,
+    release_commits: dict[str, str],
+    timestamp: int,
+) -> None:
+    value = {
+        "schema_version": RELEASE_PROVENANCE_SCHEMA_VERSION,
+        "artifact_version": version,
+        "artifact_tag": tag,
+        "artifact_commit": commit,
+        "release_commits": release_commits,
+    }
+    written_at = datetime.fromtimestamp(timestamp, tz=UTC)
+    year = min(2107, max(1980, written_at.year))
+    info = zipfile.ZipInfo(
+        filename=f"{prefix}{RELEASE_PROVENANCE_FILENAME}",
+        date_time=(
+            year,
+            written_at.month,
+            written_at.day,
+            written_at.hour,
+            written_at.minute,
+            written_at.second,
+        ),
+    )
+    info.compress_type = zipfile.ZIP_DEFLATED
+    info.create_system = 3
+    info.external_attr = 0o100644 << 16
+    with zipfile.ZipFile(
+        archive_path, "a", compression=zipfile.ZIP_DEFLATED, compresslevel=9
+    ) as archive:
+        archive.writestr(
+            info, json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+        )
 
 
 def _write_sha256(archive_path: Path) -> Path:
@@ -190,6 +262,19 @@ def build_source_archive(root: Path, tag: str, output_dir: Path) -> SourceArchiv
             f"--prefix={prefix}",
             f"--output={archive_path}",
             tag,
+        )
+        release_commits = _release_commit_catalog(root, tag)
+        if release_commits.get(version) != commit:
+            raise SourceArchiveError(f"{tag} 与发布版本映射不一致")
+        timestamp = int(_git(root, "show", "-s", "--format=%ct", f"{tag}^{{commit}}"))
+        _append_release_provenance(
+            archive_path,
+            prefix=prefix,
+            version=version,
+            tag=tag,
+            commit=commit,
+            release_commits=release_commits,
+            timestamp=timestamp,
         )
         _validate_archive(archive_path, prefix)
     except Exception:

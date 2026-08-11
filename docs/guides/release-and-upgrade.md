@@ -29,7 +29,7 @@
 }
 ```
 
-该文件只能由 `upgrade_init` 或 `upgrade_ack` 原子写入，不应手工编辑或从其他端点复制。`applied_version` 表示本机已完成且确认的发布版本，`applied_commit` 必须与该版本 Git tag 指向的提交一致；`applied_at` 是 UTC 确认时间，不用于决定升级顺序。迁移、一次性 Job 和服务状态分别以 Django 迁移记录、`BackgroundJob` 状态/检查点及 Supervisor 状态为准，不写入本文件。
+该文件只能由 `upgrade_init` 或 `upgrade_ack` 原子写入，不应手工编辑或从其他端点复制。`applied_version` 表示本机已完成且确认的发布版本，`applied_commit` 必须与 Git 工作区中的该版本 tag，或已校验 ZIP 中的完整 provenance 映射一致；`applied_at` 是 UTC 确认时间，不用于决定升级顺序。迁移、一次性 Job 和服务状态分别以 Django 迁移记录、`BackgroundJob` 状态/检查点及 Supervisor 状态为准，不写入本文件。
 
 历史基线也由发布清单维护：`1.0.0` 对应历史提交 `2d522bd932e760094bbe81fb2477f2da1462e359`；`1.0.1` 的原提交 `2905bcb04509e2ffae3877ee1a2aabcc026fa190` 因作者信息重写，当前历史提交为 `12a5a17168a27ee3088b18e708389c4a6c117510`。后续发布使用不可移动的 `v<version>` tag。
 
@@ -199,7 +199,7 @@ cd wechat-content-operations-<version>
 mkdir runtime
 cp .env.example runtime/.env
 uv sync --locked --all-groups
-uv run python manage.py validate_releases --require-current-tag
+uv run python manage.py validate_release_package
 ```
 
 Windows PowerShell 校验：
@@ -211,9 +211,13 @@ if ($actual -ne $expected) { throw '源码包 SHA-256 校验失败' }
 Expand-Archive wechat-content-operations-<version>-src.zip -DestinationPath .
 ```
 
-解压后在版本目录创建 `runtime/`，复制 `.env.example` 为 `runtime/.env`，再运行锁定依赖安装和上述发布协议校验。随后按本手册的端点升级步骤执行；源码包不能替代迁移、一次性 Job、重启或 `upgrade_ack`。
+归档由 tag 的跟踪源码和构建时生成的 `release-provenance.json` 组成，不包含 `.git`、`runtime/` 或 `.venv`。provenance 保存该归档的 tag/commit 与完整发布版本到 commit 的映射，且受 ZIP SHA-256 保护；它只在先校验 SHA-256 的纯 ZIP 端点中作为 Git tag 的替代发布证据。
+
+首次解压后在版本目录创建 `runtime/`，复制 `.env.example` 为 `runtime/.env`，执行 `uv sync --locked --all-groups` 和 `uv run python manage.py validate_release_package`。Git 工作区仍使用 `validate_releases --require-current-tag`，不得将 `.git` 复制到 ZIP 端点。
 
 ## 端点升级
+
+### Git 工作区端点
 
 拉取后始终先生成计划，不要凭提交信息猜测动作：
 
@@ -253,6 +257,30 @@ uv run python manage.py upgrade_ack 1.2.0 \
 
 `upgrade_ack` 会拒绝未应用迁移、未完成精确一次性 Job 或缺少确认的升级，并原子更新本机状态文件。
 
+### 源码 ZIP 端点升级
+
+纯 ZIP 端点没有 `.git`、remote 或 tag；不得要求、创建、复制或伪造它们。必须先停完整 Supervisor 并等待全部受管服务退出，随后校验从 Release 同时取得的 ZIP 与 `.sha256`。旧版本的 `runtime/` 只能在**同一端点**原地保留；解压到新版本目录时，在确认新目录没有 `runtime/` 后，才可将其创建为指向旧 `runtime/` 的目录链接。不得复制其他端点的数据库、配置、认证资料或 `runtime/supervisor/` 文件。
+
+Windows PowerShell 示例：
+
+```powershell
+$expected = (Get-Content wechat-content-operations-<version>-src.zip.sha256).Split()[0]
+$actual = (Get-FileHash wechat-content-operations-<version>-src.zip -Algorithm SHA256).Hash.ToLower()
+if ($actual -ne $expected) { throw '源码包 SHA-256 校验失败' }
+Expand-Archive wechat-content-operations-<version>-src.zip -DestinationPath <staging-directory>
+$newRoot = Resolve-Path <staging-directory>\wechat-content-operations-<version>
+$oldRuntime = Resolve-Path <old-version-directory>\runtime
+$newRuntime = Join-Path $newRoot 'runtime'
+if (Test-Path -LiteralPath $newRuntime) { throw '新版本目录已存在 runtime，拒绝覆盖' }
+New-Item -ItemType Junction -Path $newRuntime -Target $oldRuntime
+Set-Location $newRoot
+uv sync --locked --all-groups
+uv run python manage.py validate_release_package
+uv run python manage.py upgrade_plan --json
+```
+
+确认 `upgrade_plan` 的 `from_version`、`to_version` 和每项操作后，按本节前述顺序处理迁移、静态资源、重启、一次性 Job 与 verification，再执行 `upgrade_ack`。缺少 provenance、SHA-256 不一致、版本映射不完整或发布状态 commit 不匹配时，保持服务停止并报告脱敏错误；不得绕过校验或手改发布状态。
+
 旧端点没有 `runtime/release-state.json` 时，先人工核验其历史版本、迁移和运行态，再一次性建立基线；该命令不能覆盖已有状态文件：
 
 ```bash
@@ -261,4 +289,4 @@ uv run python manage.py upgrade_init 1.1.1 --confirmed
 
 ## 最小验证
 
-发布前最小验证是 `validate_releases`、`tests/test_release_protocol.py` 与 `tests/test_release_source_archive.py` 均通过。首次启用源码 Release 的版本还必须下载两个附件，完成 SHA-256 校验、解压后的 `uv sync --locked --all-groups` 与 `validate_releases --require-current-tag`。端点升级后最小验证是：`upgrade_plan --json` 显示无待处理操作、`upgrade_ack` 成功、`/healthz` 返回 `{"status": "ok"}`；涉及一次性 Job 时还须确认其 `complete=true`。
+发布前最小验证是 `validate_releases`、`tests/test_release_protocol.py` 与 `tests/test_release_source_archive.py` 均通过。首次启用源码 Release 的版本还必须下载两个附件，完成 SHA-256 校验、解压后的 `uv sync --locked --all-groups` 与 `validate_release_package`；Git 工作区额外执行 `validate_releases --require-current-tag`。端点升级后最小验证是：`upgrade_plan --json` 显示无待处理操作、`upgrade_ack` 成功、`/healthz` 返回 `{"status": "ok"}`；涉及一次性 Job 时还须确认其 `complete=true`。

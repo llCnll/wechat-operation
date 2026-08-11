@@ -12,8 +12,8 @@ from jobs.release_protocol import (
     ReleaseProtocolError,
     current_project_version,
     read_release_state,
+    release_commit,
     release_for_version,
-    tagged_commit,
     validate_releases,
     write_release_state,
 )
@@ -43,7 +43,7 @@ class Command(BaseCommand):
                 {
                     "schema_version": 1,
                     "applied_version": release.version,
-                    "applied_commit": tagged_commit(project_root, release.version),
+                    "applied_commit": release_commit(project_root, releases, release.version),
                     "applied_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
                 },
             )
