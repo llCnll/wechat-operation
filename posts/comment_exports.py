@@ -39,6 +39,8 @@ from .game_catalog import ExecutionScope, current_execution_scope, resolve_fixed
 from .models import CommentExportResult, CommentExportRun, OriginalPost
 from .services import html_to_text
 
+# Keep the persisted version stable so queued legacy keyword runs remain executable.
+# An empty normalized keyword is the explicit full-export mode.
 RULE_VERSION = "keyword-first-digit-v1"
 PAGE_SIZE = 100
 MAX_PAGES = 10_000
@@ -152,12 +154,14 @@ def normalize_keyword(value: object) -> str:
     if not isinstance(value, str):
         raise ValueError("关键词无效。")
     keyword = unicodedata.normalize("NFC", value.strip())
-    if not 1 <= len(keyword) <= 100:
-        raise ValueError("关键词长度须为 1 至 100 个字符。")
+    if len(keyword) > 100:
+        raise ValueError("关键词长度最多为 100 个字符。")
     return keyword
 
 
 def match_comment(content: object, keyword: str) -> str | None:
+    if keyword == "":
+        return ""
     if not isinstance(content, str):
         return None
     match = ASCII_NUMBER.search(unicodedata.normalize("NFC", content))

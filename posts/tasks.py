@@ -20,7 +20,7 @@ from jobs.once.author_mute_status_backfill import (
     author_mute_status_backfill_handler,
 )
 from jobs.once.backfill_post_topics import post_topic_backfill_handler
-from jobs.services import JobDeferred
+from jobs.services import JobDeferred, JobTerminalError
 from jobs.task_types import (
     AUTHOR_MUTE_STATUS_BACKFILL_V2_TASK,
     COMMENT_EXPORT_V1_TASK,
@@ -28,6 +28,7 @@ from jobs.task_types import (
     LEGACY_INGEST_WINDOW_TASK,
     MANUAL_CURRENT_INGEST_WINDOW_TASK,
     MANUAL_INGEST_WINDOW_TASK,
+    MANUAL_TOPIC_INGEST_TASK,
     METRICS_REFRESH_WINDOW_TASK,
     POST_TOPIC_BACKFILL_V1_TASK,
     SCHEDULED_INGEST_WINDOW_TASK,
@@ -43,10 +44,16 @@ from .game_catalog import (
     resolve_fixed_execution_scope,
 )
 from .ingestion import ingest_page
-from .models import InteractionSnapshot, OriginalPost
-from .services import refresh_one_post_from_source, store_post_interaction_metrics
+from .models import CandidatePost, InteractionSnapshot, OriginType, OriginalPost
+from .services import (
+    classify_content_card,
+    refresh_one_post_from_source,
+    store_post_interaction_metrics,
+    store_post_metrics,
+)
 
 MAX_METRICS_REFRESH_FAILURE_SAMPLES = 20
+MAX_MANUAL_TOPIC_ID = 2**63 - 1
 
 
 def _raise_if_session_recovering(error: Exception) -> None:
@@ -119,6 +126,86 @@ def ingest_window_handler(job: BackgroundJob) -> None:
             if is_complete:
                 return
             page += 1
+
+
+def _save_manual_topic_checkpoint(job: BackgroundJob, *, topic_id: int, result: str) -> None:
+    job.checkpoint = checkpoint_with_execution_scope(
+        job, {"topic_id": topic_id, "result": result, "complete": True}
+    )
+    job.save(update_fields=["checkpoint", "updated_at"])
+
+
+def manual_topic_ingest_handler(job: BackgroundJob) -> None:
+    """Ingest one submitted topic through the fixed candidate lookup contract."""
+    if (job.checkpoint or {}).get("complete"):
+        return
+    try:
+        scope = resolve_fixed_execution_scope(job)
+    except ValueError as exc:
+        raise JobTerminalError(str(exc)) from exc
+    topic_id = _required_int(job.parameter_summary, "topic_id")
+    if job.parameter_summary.get("appid") != scope.target_appid:
+        raise JobTerminalError("指定帖子任务 AppID 与冻结执行范围不一致")
+    if topic_id > MAX_MANUAL_TOPIC_ID:
+        raise JobTerminalError("指定帖子 ID 超出允许范围")
+
+    try:
+        with _source_client(scope) as client:
+            item = client.get_candidate_by_topic_id(topic_id)
+            if item is None:
+                _save_manual_topic_checkpoint(job, topic_id=topic_id, result="NOT_FOUND")
+                return
+            if item.topic_id != topic_id:
+                raise JobTerminalError("指定帖子候选响应与请求 ID 不一致")
+            if item.source_appid != scope.target_appid:
+                raise JobTerminalError("指定帖子不属于提交时的当前操作游戏")
+            if not item.content_id:
+                raise JobTerminalError("指定帖子候选响应缺少 content ID")
+
+            candidate, _ = CandidatePost.objects.update_or_create(
+                topic_id=item.topic_id,
+                defaults={"content_id": item.content_id, "source_appid": item.source_appid},
+            )
+            payload = client.get_content_card(candidate.content_id)
+            try:
+                card = payload["data"]["content_card"]
+            except (KeyError, TypeError) as exc:
+                raise JobTerminalError("内容卡片响应结构无效") from exc
+            if not isinstance(card, dict):
+                raise JobTerminalError("内容卡片响应结构无效")
+            post = classify_content_card(candidate, card)
+            if post is None and candidate.origin_type != OriginType.FORWARD:
+                raise JobTerminalError("内容卡片无法完成帖子分类")
+            if post is not None:
+                try:
+                    requested_at = timezone.now()
+                    store_post_metrics(
+                        post,
+                        client.get_post_metrics(topic_id),
+                        source_requested_at=requested_at,
+                    )
+                except (SourceContractError, SourceTransportError) as exc:
+                    _raise_if_session_recovering(exc)
+                    # Metrics remain optional after a valid original content-card projection.
+                    pass
+                from reviews.services import enqueue_evaluation_pipeline
+
+                enqueue_evaluation_pipeline(post)
+            _save_manual_topic_checkpoint(
+                job,
+                topic_id=topic_id,
+                result="ORIGINAL" if post is not None else "FORWARD",
+            )
+    except SourceBusinessDeletedError:
+        _save_manual_topic_checkpoint(job, topic_id=topic_id, result="DELETED")
+    except GameCircleIpcError as exc:
+        if exc.category == "SOURCE_DELETED":
+            _save_manual_topic_checkpoint(job, topic_id=topic_id, result="DELETED")
+            return
+        _raise_if_session_recovering(exc)
+        raise
+    except SourceContractError as exc:
+        raise JobTerminalError(str(exc)) from exc
 
 
 def sync_pending_status_handler(job: BackgroundJob) -> None:
@@ -339,6 +426,7 @@ BACKFILL_INGESTION_WORKER_HANDLERS = {
     LEGACY_INGEST_WINDOW_TASK: ingest_window_handler,
     MANUAL_INGEST_WINDOW_TASK: ingest_window_handler,
     MANUAL_CURRENT_INGEST_WINDOW_TASK: ingest_window_handler,
+    MANUAL_TOPIC_INGEST_TASK: manual_topic_ingest_handler,
     FILTERED_POST_REFRESH_TASK: filtered_post_refresh_handler,
     METRICS_REFRESH_WINDOW_TASK: refresh_metrics_window_handler,
     AUTHOR_MUTE_STATUS_BACKFILL_V2_TASK: author_mute_status_backfill_handler,

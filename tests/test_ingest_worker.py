@@ -3,7 +3,12 @@ from unittest.mock import patch
 import pytest
 
 from config.game_circle_ipc import GameCircleIpcError
-from jobs.adapters import CandidatePostDTO, SourceBusinessDeletedError, SourceTransportError
+from jobs.adapters import (
+    CandidatePostDTO,
+    SourceBusinessDeletedError,
+    SourceContractError,
+    SourceTransportError,
+)
 from jobs.models import BackgroundJob
 from jobs.services import execute_next_job
 from posts.game_catalog import set_active_game
@@ -16,12 +21,14 @@ from posts.tasks import (
     LEGACY_INGEST_WINDOW_TASK,
     MANUAL_CURRENT_INGEST_WINDOW_TASK,
     MANUAL_INGEST_WINDOW_TASK,
+    MANUAL_TOPIC_INGEST_TASK,
     METRICS_REFRESH_WINDOW_TASK,
     POST_TOPIC_BACKFILL_V1_TASK,
     REALTIME_INGESTION_WORKER_HANDLERS,
     SCHEDULED_INGEST_WINDOW_TASK,
     STATUS_SYNC_TASK,
     ingest_window_handler,
+    manual_topic_ingest_handler,
     refresh_metrics_window_handler,
     sync_pending_status_handler,
 )
@@ -289,8 +296,205 @@ def test_ingestion_worker_lanes_are_explicit_and_keep_legacy_jobs_in_backfill():
         MANUAL_CURRENT_INGEST_WINDOW_TASK,
         FILTERED_POST_REFRESH_TASK,
         COMMENT_EXPORT_V1_TASK,
+        MANUAL_TOPIC_INGEST_TASK,
     }
     assert BACKFILL_INGESTION_WORKER_HANDLERS[LEGACY_INGEST_WINDOW_TASK] is ingest_window_handler
+
+
+def _manual_topic_job(topic_id=1464098814):
+    return BackgroundJob.objects.create(
+        task_type=MANUAL_TOPIC_INGEST_TASK,
+        idempotency_key=f"manual-topic:{topic_id}",
+        active_coalescing_key=f"manual-topic:wx-test:{topic_id}",
+        parameter_summary={"appid": "wx-test", "topic_id": topic_id},
+        checkpoint={"execution_scope": {"target_appid": "wx-test", "scope_version": 1}},
+    )
+
+
+@pytest.mark.django_db
+def test_manual_topic_worker_projects_an_original_post_and_enqueues_existing_review_pipeline():
+    job = _manual_topic_job()
+
+    class Source:
+        def get_candidate_by_topic_id(self, topic_id):
+            return CandidatePostDTO(topic_id=topic_id, content_id="manual-content", source_appid="wx-test")
+
+        def get_content_card(self, content_id):
+            assert content_id == "manual-content"
+            return {"data": {"content_card": {"base_content": {"content": "manual original"}}}}
+
+        def get_post_metrics(self, topic_id):
+            return {"data": {"topic": {"view_count": 7, "status": 2}}}
+
+        def close(self):
+            pass
+
+    with patch("posts.tasks.GameCirclePostClient", return_value=Source()):
+        processed = execute_next_job(BACKFILL_INGESTION_WORKER_HANDLERS)
+
+    assert processed is not None
+    job.refresh_from_db()
+    assert job.status == "SUCCEEDED"
+    assert job.checkpoint == {
+        "topic_id": 1464098814,
+        "result": "ORIGINAL",
+        "complete": True,
+        "execution_scope": {"target_appid": "wx-test", "scope_version": 1},
+    }
+    assert CandidatePost.objects.get(topic_id=1464098814).origin_type == OriginType.ORIGINAL
+    assert (
+        OriginalPost.objects.get(topic_id=1464098814)
+        .interaction_snapshots.get(source="topicsearchgetdetail")
+        .view_count
+        == 7
+    )
+
+
+@pytest.mark.django_db
+def test_manual_topic_worker_keeps_forwards_out_of_original_pipeline():
+    job = _manual_topic_job()
+
+    class Source:
+        def get_candidate_by_topic_id(self, topic_id):
+            return CandidatePostDTO(topic_id=topic_id, content_id="forward-content", source_appid="wx-test")
+
+        def get_content_card(self, content_id):
+            return {"data": {"content_card": {"forward_topic_info": {"topic_id": 1}}}}
+
+        def close(self):
+            pass
+
+    with patch("posts.tasks.GameCirclePostClient", return_value=Source()):
+        manual_topic_ingest_handler(job)
+
+    job.refresh_from_db()
+    assert job.checkpoint["result"] == "FORWARD"
+    assert CandidatePost.objects.get(topic_id=1464098814).origin_type == OriginType.FORWARD
+    assert not OriginalPost.objects.filter(topic_id=1464098814).exists()
+
+
+@pytest.mark.django_db
+def test_manual_topic_worker_records_not_found_and_deleted_results_without_post_projection():
+    missing = _manual_topic_job(1464098814)
+    deleted = _manual_topic_job(1464098815)
+
+    class MissingSource:
+        def get_candidate_by_topic_id(self, topic_id):
+            return None
+
+        def close(self):
+            pass
+
+    class DeletedSource:
+        def get_candidate_by_topic_id(self, topic_id):
+            raise SourceBusinessDeletedError("deleted")
+
+        def close(self):
+            pass
+
+    with patch("posts.tasks.GameCirclePostClient", return_value=MissingSource()):
+        manual_topic_ingest_handler(missing)
+    with patch("posts.tasks.GameCirclePostClient", return_value=DeletedSource()):
+        manual_topic_ingest_handler(deleted)
+
+    missing.refresh_from_db()
+    deleted.refresh_from_db()
+    assert missing.checkpoint["result"] == "NOT_FOUND"
+    assert deleted.checkpoint["result"] == "DELETED"
+    assert not CandidatePost.objects.filter(topic_id__in=[1464098814, 1464098815]).exists()
+
+
+@pytest.mark.django_db
+def test_manual_topic_worker_terminalizes_scope_and_candidate_contract_mismatches_without_writes():
+    job = _manual_topic_job()
+
+    class Source:
+        def get_candidate_by_topic_id(self, _topic_id):
+            return CandidatePostDTO(topic_id=1464098814, content_id="content", source_appid="other-game")
+
+        def close(self):
+            pass
+
+    with patch("posts.tasks.GameCirclePostClient", return_value=Source()):
+        execute_next_job(BACKFILL_INGESTION_WORKER_HANDLERS)
+
+    job.refresh_from_db()
+    assert job.status == "FAILED"
+    assert job.retry_count == 0
+    assert "当前操作游戏" in job.error_summary
+    assert not CandidatePost.objects.filter(topic_id=1464098814).exists()
+
+
+@pytest.mark.django_db
+def test_manual_topic_worker_rejects_a_job_whose_summary_appid_differs_from_its_frozen_scope():
+    job = _manual_topic_job()
+    job.parameter_summary["appid"] = "other-game"
+    job.save(update_fields=["parameter_summary", "updated_at"])
+
+    with patch(
+        "posts.tasks.GameCirclePostClient",
+        side_effect=AssertionError("invalid scope must not access source"),
+    ):
+        execute_next_job(BACKFILL_INGESTION_WORKER_HANDLERS)
+
+    job.refresh_from_db()
+    assert job.status == "FAILED"
+    assert job.retry_count == 0
+    assert "AppID" in job.error_summary
+
+
+@pytest.mark.django_db
+def test_manual_topic_worker_defers_session_recovery_and_retries_transport_errors():
+    recovering = _manual_topic_job(1464098814)
+    retrying = _manual_topic_job(1464098815)
+
+    class RecoveringSource:
+        def get_candidate_by_topic_id(self, _topic_id):
+            raise GameCircleIpcError("SESSION_RECOVERING", "游戏圈会话正在恢复")
+
+        def close(self):
+            pass
+
+    class RetrySource:
+        def get_candidate_by_topic_id(self, _topic_id):
+            raise SourceTransportError("来源暂不可用")
+
+        def close(self):
+            pass
+
+    with patch("posts.tasks.GameCirclePostClient", return_value=RecoveringSource()):
+        execute_next_job(BACKFILL_INGESTION_WORKER_HANDLERS)
+    recovering.refresh_from_db()
+    assert recovering.status == "PENDING"
+    assert recovering.retry_count == 0
+
+    with patch("posts.tasks.GameCirclePostClient", return_value=RetrySource()):
+        execute_next_job(BACKFILL_INGESTION_WORKER_HANDLERS)
+    retrying.refresh_from_db()
+    assert retrying.status == "PENDING"
+    assert retrying.retry_count == 1
+
+
+@pytest.mark.django_db
+def test_manual_topic_worker_treats_content_contract_errors_as_terminal_failures():
+    job = _manual_topic_job()
+
+    class Source:
+        def get_candidate_by_topic_id(self, topic_id):
+            return CandidatePostDTO(topic_id=topic_id, content_id="content", source_appid="wx-test")
+
+        def get_content_card(self, _content_id):
+            raise SourceContractError("内容卡片响应结构无效")
+
+        def close(self):
+            pass
+
+    with patch("posts.tasks.GameCirclePostClient", return_value=Source()):
+        execute_next_job(BACKFILL_INGESTION_WORKER_HANDLERS)
+
+    job.refresh_from_db()
+    assert job.status == "FAILED"
+    assert job.retry_count == 0
 
 
 @pytest.mark.django_db

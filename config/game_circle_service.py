@@ -383,6 +383,29 @@ class GameCircleSessionService:
             self._save_projection()
         return generation
 
+    @staticmethod
+    def _target_kind(role: str) -> str:
+        return "PLUGIN" if "PLUGIN" in role else "HOME"
+
+    @staticmethod
+    def _target_intent(intent: BootstrapIntent) -> str:
+        if intent is BootstrapIntent.REPAIR_BROKEN_FRAME:
+            return "REPAIR"
+        if intent is BootstrapIntent.KEEPALIVE:
+            return "KEEPALIVE"
+        return "BOOTSTRAP"
+
+    def _record_target_action(
+        self, *, role: str, action: str, intent: str = "BOOTSTRAP", outcome: str = "COMPLETED"
+    ) -> None:
+        """Write a best-effort, identity-free summary after an existing action."""
+        try:
+            self._store.append_session_target_event(
+                target_kind=self._target_kind(role), action=action, intent=intent, outcome=outcome
+            )
+        except (OSError, ValueError):
+            return
+
     def _register_owned(self, target_id: str, role: str, *, appid: str = "") -> None:
         if not target_id:
             raise CdpTargetUnavailableError("受控 Chrome 未返回新 target")
@@ -397,9 +420,10 @@ class GameCircleSessionService:
                     return target.target_id
         return None
 
-    def _safe_close(self, browser: CdpBrowser, target_id: str) -> bool:
+    def _safe_close(self, browser: CdpBrowser, target_id: str, *, intent: str = "RECLAIM") -> bool:
         with self._lock:
-            if target_id not in self._owned_targets:
+            owned = self._owned_targets.get(target_id)
+            if owned is None:
                 return False
         try:
             browser.close_target(target_id)
@@ -416,6 +440,7 @@ class GameCircleSessionService:
             if self._login_pending and self._login_pending.target_id == target_id:
                 self._login_pending = None
             self._save_projection()
+        self._record_target_action(role=owned.role, action="CLOSED", intent=intent)
         return True
 
     def _close_owned_targets_for_shutdown(self) -> None:
@@ -435,7 +460,15 @@ class GameCircleSessionService:
                     return lease
         return None
 
-    def _publish_lease(self, *, scope: ExecutionScope, generation: str, home: str, plugin: str, source_token: str) -> None:
+    def _publish_lease(
+        self,
+        *,
+        scope: ExecutionScope,
+        generation: str,
+        home: str,
+        plugin: str,
+        source_token: str,
+    ) -> None:
         with self._lock:
             now = timezone.now()
             leases = self._leases.setdefault(scope.target_appid, [])
@@ -625,7 +658,7 @@ class GameCircleSessionService:
                     flight.done.set()
         return result
 
-    def _ensure_home(self, browser: CdpBrowser) -> str:
+    def _ensure_home(self, browser: CdpBrowser, *, intent: str = "BOOTSTRAP") -> str:
         with self._lock:
             candidates = [
                 (target.target_id, target.role)
@@ -642,6 +675,7 @@ class GameCircleSessionService:
                 if self._login_pending and self._login_pending.target_id == target_id:
                     self._login_pending = None
                 self._save_projection()
+            self._record_target_action(role=role, action="MISSING", intent=intent)
         if live["LOGIN_PENDING"] or live["HOME_IDLE"]:
             # An explicit scan page is the user's active recovery context and
             # wins over an older idle page.  Only current-owner extras are safe
@@ -650,10 +684,12 @@ class GameCircleSessionService:
             for target_id in [*live["LOGIN_PENDING"], *live["HOME_IDLE"]]:
                 if target_id == keeper:
                     continue
-                self._safe_close(browser, target_id)
+                self._safe_close(browser, target_id, intent=intent)
+            self._record_target_action(role="HOME_IDLE", action="REUSED", intent=intent)
             return keeper
         target = browser.create_target("https://mp.weixin.qq.com/", background=True)
         self._register_owned(target, "HOME_IDLE")
+        self._record_target_action(role="HOME_IDLE", action="CREATED", intent=intent)
         return target
 
     def _observable_home(self, browser: CdpBrowser) -> str:
@@ -665,7 +701,7 @@ class GameCircleSessionService:
         lease = self._active_lease(scope) if scope is not None else None
         if lease is not None and browser.target_exists(lease.home_target_id):
             return lease.home_target_id
-        return self._ensure_home(browser)
+        return self._ensure_home(browser, intent="OPERATOR")
 
     def _outer_session(self, home: str) -> _OuterSession:
         page = ExplicitOuterPage(target_id=home)
@@ -971,7 +1007,8 @@ class GameCircleSessionService:
                 home = active_lease.home_target_id
                 close_candidate_home = False
             else:
-                home = self._ensure_home(browser)
+                target_intent = self._target_intent(intent)
+                home = self._ensure_home(browser, intent=target_intent)
             try:
                 outer_session = self._outer_session(home)
             except OuterLoginExpiredError:
@@ -1050,7 +1087,16 @@ class GameCircleSessionService:
             page.close()
             page = None
             plugin = browser.create_target(plugin_redirect_url(token), background=True)
-            self._register_owned(plugin, "PLUGIN_CANDIDATE", appid=scope.target_appid)
+            self._register_owned(
+                plugin,
+                "PLUGIN_CANDIDATE",
+                appid=scope.target_appid,
+            )
+            self._record_target_action(
+                role="PLUGIN_CANDIDATE",
+                action="CREATED",
+                intent=self._target_intent(intent),
+            )
             frame = CdpGameFrame(target_id=plugin)
             try:
                 if not frame.wait_for_gamemp_iframe():
@@ -1060,7 +1106,13 @@ class GameCircleSessionService:
                 verifier.list_candidates(page=0, page_size=1, start_time=0, end_time=int(timezone.now().timestamp()))
             finally:
                 frame.close()
-            self._publish_lease(scope=scope, generation=generation, home=home, plugin=plugin, source_token=source_token)
+            self._publish_lease(
+                scope=scope,
+                generation=generation,
+                home=home,
+                plugin=plugin,
+                source_token=source_token,
+            )
             home = plugin = ""
             if self._is_current_scope(scope):
                 self._set_runtime(
@@ -1125,9 +1177,9 @@ class GameCircleSessionService:
                 page.close()
             if "browser" in locals():
                 if plugin:
-                    self._safe_close(browser, plugin)
+                    self._safe_close(browser, plugin, intent=self._target_intent(intent))
                 if home and close_candidate_home:
-                    self._safe_close(browser, home)
+                    self._safe_close(browser, home, intent=self._target_intent(intent))
 
     def _repair_if_enabled(self) -> None:
         """Keep the current scope recoverable without taking over manual login.
@@ -1307,6 +1359,7 @@ class GameCircleSessionService:
             active_lease = self._active_lease(scope) if scope is not None else None
             target = self._observable_home(browser)
             browser.activate_target(target)
+            self._record_target_action(role="HOME_IDLE", action="ACTIVATED", intent="OPERATOR")
             if active_lease is not None and target == active_lease.home_target_id:
                 return {"status": "CONTROLLED_SESSION_PAGE_OPENED"}
             with self._lock:
@@ -1428,6 +1481,23 @@ class GameCircleSessionService:
                         if request.method == "POSTS_LIST_CANDIDATES":
                             items = client.list_candidates(**{key: int(request.params[key]) for key in ("page", "page_size", "start_time", "end_time")})
                             return {"items": [{"topic_id": item.topic_id, "content_id": item.content_id, "source_appid": item.source_appid, "publish_time": int(item.publish_time.timestamp()) if item.publish_time else None} for item in items]}
+                        if request.method == "POSTS_GET_CANDIDATE":
+                            topic_id = request.params.get("topic_id")
+                            if isinstance(topic_id, bool) or not isinstance(topic_id, int) or topic_id <= 0:
+                                raise SourceContractError("帖子 ID 无效")
+                            item = client.get_candidate_by_topic_id(topic_id)
+                            if item is None:
+                                return {"item": None}
+                            return {
+                                "item": {
+                                    "topic_id": item.topic_id,
+                                    "content_id": item.content_id,
+                                    "source_appid": item.source_appid,
+                                    "publish_time": (
+                                        int(item.publish_time.timestamp()) if item.publish_time else None
+                                    ),
+                                }
+                            }
                         if request.method == "POSTS_GET_CONTENT_CARD":
                             return {"payload": client.get_content_card(str(request.params["content_id"]))}
                         if request.method == "POSTS_GET_METRICS":

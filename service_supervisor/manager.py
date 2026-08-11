@@ -33,6 +33,7 @@ from config.settings import (
 
 from .runtime import (
     RuntimeStore,
+    SupervisorLeaseOwnershipError,
     SupervisorLockedError,
     utc_now,
 )
@@ -127,6 +128,176 @@ class Supervisor:
         self._lease_renewal_failed = False
         self._lease_renewal_failure_count = 0
         self._last_lease_renewal_failure_log_at: float | None = None
+
+    def _record_lifecycle_event(
+        self,
+        *,
+        service: str,
+        event: str,
+        reason: str,
+        generation: int = 0,
+        outcome: str = "COMPLETED",
+        trigger: str | None = None,
+        detection: str | None = None,
+    ) -> None:
+        """Best-effort, fixed-field diagnostics that never alter lifecycle decisions."""
+        try:
+            self.store.append_lifecycle_event(
+                service=service,
+                event=event,
+                reason=reason,
+                generation=generation,
+                outcome=outcome,
+                trigger=trigger,
+                detection=detection,
+            )
+        except (OSError, ValueError):
+            logger.warning("Supervisor 生命周期诊断写入失败: service=%s event=%s", service, event)
+
+    def _service_generation(self, state: dict) -> int:
+        if state.get("instance_id") == self._instance_id:
+            return int(state.get("instance_launch_count", 0)) + 1
+        return 1
+
+    def _register_process(self, service: str, process: psutil.Process, generation: int) -> dict:
+        record = {
+            "service": service,
+            "pid": process.pid,
+            "created_at": process.create_time(),
+            "instance_id": self._instance_id,
+            "generation": generation,
+        }
+        records = [
+            item
+            for item in self.store.read_process_registry()
+            if not (
+                item.get("service") == service
+                and item.get("pid") == process.pid
+                and item.get("created_at") == record["created_at"]
+            )
+        ]
+        records.append(record)
+        self.store.write_process_registry(records)
+        return record
+
+    def _unregister_process(self, record: dict) -> None:
+        required = ("service", "pid", "created_at", "instance_id")
+        records = self.store.read_process_registry()
+        self.store.write_process_registry(
+            [
+                item
+                for item in records
+                if any(item.get(key) != record.get(key) for key in required)
+            ]
+        )
+
+    def _state_process_record(self, service: str, state: dict) -> dict | None:
+        """Build the same minimal identity record used by the registry.
+
+        Service state remains useful for daily status and legacy recovery, but it
+        is never a weaker authorisation to terminate a process.
+        """
+        record = {
+            "service": service,
+            "pid": state.get("pid"),
+            "created_at": state.get("created_at"),
+            "instance_id": state.get("instance_id"),
+            "generation": state.get("instance_launch_count", state.get("restart_count", 1)),
+        }
+        if service == "controlled_chrome" or not self.store._is_process_record(record):
+            return None
+        return record
+
+    def _process_record_matches(self, record: dict) -> bool:
+        service = record.get("service")
+        if service not in SERVICE_NAMES or service == "controlled_chrome":
+            return False
+        pid = record.get("pid")
+        created_at = record.get("created_at")
+        if not isinstance(pid, int) or not isinstance(created_at, int | float):
+            return False
+        try:
+            process = psutil.Process(pid)
+            if not process.is_running() or abs(process.create_time() - float(created_at)) > 1:
+                return False
+            expected = list(self.definitions()[service].command)
+            actual = process.cmdline()
+            if len(actual) != len(expected):
+                return False
+            normalized_actual = [
+                str(Path(value).resolve()) if index < 2 else value
+                for index, value in enumerate(actual)
+            ]
+            normalized_expected = [
+                str(Path(value).resolve()) if index < 2 else value
+                for index, value in enumerate(expected)
+            ]
+            return (
+                normalized_actual == normalized_expected
+                and Path(process.cwd()).resolve() == self.project_root.resolve()
+            )
+        except (psutil.Error, OSError, ValueError, TypeError):
+            return False
+
+    def _registered_process_matches(self, record: dict) -> bool:
+        """Backward-compatible alias for registry-focused callers and tests."""
+        return self._process_record_matches(record)
+
+    def _terminate_registered_process(self, record: dict, *, reason: str) -> bool:
+        if not self._process_record_matches(record):
+            self._record_lifecycle_event(
+                service=str(record.get("service", "unknown")),
+                event="RECOVERY_SKIP",
+                reason="IDENTITY_MISMATCH",
+                outcome="SKIPPED",
+            )
+            return False
+        process = psutil.Process(record["pid"])
+        outcome = "GRACEFUL"
+        try:
+            process.terminate()
+            process.wait(timeout=8)
+        except psutil.TimeoutExpired:
+            outcome = "FORCED"
+            process.kill()
+            process.wait(timeout=4)
+        except psutil.Error:
+            outcome = "SKIPPED"
+        self._unregister_process(record)
+        self._record_lifecycle_event(
+            service=record["service"],
+            event="STOPPED",
+            reason=reason if outcome == "GRACEFUL" else "TERMINATION_TIMEOUT",
+            generation=int(record.get("generation", 0)),
+            outcome=outcome,
+        )
+        return outcome != "SKIPPED"
+
+    def _terminate_registered_instance(self, instance_id: str, *, reason: str) -> None:
+        records = [
+            record
+            for record in self.store.read_process_registry()
+            if record.get("instance_id") == instance_id
+        ]
+        for service in SERVICE_SHUTDOWN_ORDER:
+            for record in records:
+                if record["service"] == service:
+                    self._terminate_registered_process(record, reason=reason)
+
+    def _revoke_current_lease(self) -> None:
+        try:
+            self.store.revoke_instance_lease(self._instance_id)
+        except (OSError, SupervisorLeaseOwnershipError):
+            self._record_lifecycle_event(
+                service="supervisor",
+                event="LEASE_REVOKE",
+                reason="LEASE_REVOKE_WRITE_FAILED",
+                outcome="FAILED",
+            )
+            return
+        self._record_lifecycle_event(
+            service="supervisor", event="LEASE_REVOKE", reason="LEASE_REVOKED"
+        )
 
     def definitions(self) -> dict[str, ServiceDefinition]:
         python = sys.executable
@@ -309,7 +480,13 @@ class Supervisor:
                     return
                 parsed = urlparse(self.path)
                 if parsed.path == f"/{CONTROL_VERSION}/status":
-                    self._json(HTTPStatus.OK, {"services": supervisor.status()})
+                    self._json(
+                        HTTPStatus.OK,
+                        {
+                            "services": supervisor.status(),
+                            "diagnostics": supervisor.diagnostic_status(),
+                        },
+                    )
                     return
                 if parsed.path.startswith(f"/{CONTROL_VERSION}/logs/"):
                     service = parsed.path.rsplit("/", 1)[-1]
@@ -396,6 +573,8 @@ class Supervisor:
         self._stopping.set()
         if self._lock is not None:
             with self._state_lock:
+                self._revoke_current_lease()
+                self._terminate_registered_instance(self._instance_id, reason="GRACEFUL_SHUTDOWN")
                 for service in SERVICE_SHUTDOWN_ORDER:
                     state = self._read_state(service)
                     if state.get("instance_id") != self._instance_id:
@@ -414,6 +593,16 @@ class Supervisor:
                     if service == "controlled_chrome" and self._read_state(
                         "game_circle_session"
                     ).get("desired"):
+                        if state.get("pid") is not None:
+                            reason, detection = self._chrome_replacement_diagnostic(state)
+                            self._record_lifecycle_event(
+                                service="controlled_chrome",
+                                event="REPLACED",
+                                reason=reason,
+                                generation=int(state.get("instance_launch_count", 0)),
+                                trigger="RECONCILE",
+                                detection=detection,
+                            )
                         # A new browser generation invalidates every in-memory lease
                         # owned by the still-running session Worker.  Replacing only
                         # Chrome would leave that owner unable to publish a new Frame.
@@ -437,12 +626,21 @@ class Supervisor:
                     "desired": bool(state.get("desired")),
                     "started_at": state.get("started_at"),
                     "exit_code": state.get("exit_code"),
-                    "restart_count": state.get("restart_count", 0),
+                    "instance_launch_count": state.get("instance_launch_count", 0),
+                    "lifetime_launch_count": state.get(
+                        "lifetime_launch_count", state.get("restart_count", 0)
+                    ),
                     "failure_reason": state.get("failure_reason"),
                     "heartbeat_at": heartbeat.get("at"),
-                    "log_path": str(self.store.log_path(service)),
                 }
             return status
+
+    def diagnostic_status(self) -> dict[str, list[dict]]:
+        """Return only bounded, already-sanitised diagnostics for the Web projection."""
+        return {
+            "lifecycle_events": self.store.read_lifecycle_events()[-12:],
+            "session_target_events": self.store.read_session_target_events()[-12:],
+        }
 
     def control(self, service: str, action: str) -> dict:
         definitions = self.definitions()
@@ -551,6 +749,14 @@ class Supervisor:
             self._terminate("controlled_chrome", chrome_state)
             self._write_state("controlled_chrome", chrome_state)
             self._launch("controlled_chrome", chrome_state)
+            self._record_lifecycle_event(
+                service="controlled_chrome",
+                event="REPLACED",
+                reason="SESSION_OWNER_REPLACEMENT",
+                generation=int(chrome_state.get("instance_launch_count", 0)),
+                trigger="SESSION_OWNER",
+                detection="SESSION_OWNER_REPLACEMENT",
+            )
             session_state["replacement_phase"] = SESSION_REPLACEMENT_WAITING_FOR_CHROME
             self._write_state("game_circle_session", session_state)
         elif not self._is_process_current("controlled_chrome", chrome_state):
@@ -634,64 +840,128 @@ class Supervisor:
             text=True,
         )
         process_info = psutil.Process(process.pid)
-        state.update(
-            {
-                "desired": True,
-                "pid": process.pid,
-                "created_at": process_info.create_time(),
-                "started_at": utc_now(),
-                "command": list(definition.command),
-                "exit_code": None,
-                "restart_count": int(state.get("restart_count", 0)) + 1,
-                "instance_id": self._instance_id,
-            }
-        )
-        state.pop("failure_reason", None)
-        if service == "controlled_chrome":
-            state.pop("browser_generation", None)
+        generation = self._service_generation(state)
+        record = None
+        try:
+            if service != "controlled_chrome":
+                record = self._register_process(service, process_info, generation)
+            state.update(
+                {
+                    "desired": True,
+                    "pid": process.pid,
+                    "created_at": process_info.create_time(),
+                    "started_at": utc_now(),
+                    "command": list(definition.command),
+                    "exit_code": None,
+                    "instance_launch_count": generation,
+                    "lifetime_launch_count": int(
+                        state.get("lifetime_launch_count", state.get("restart_count", 0))
+                    )
+                    + 1,
+                    "restart_count": int(state.get("restart_count", 0)) + 1,
+                    "instance_id": self._instance_id,
+                }
+            )
+            state.pop("failure_reason", None)
+            if service == "controlled_chrome":
+                state.pop("browser_generation", None)
+                try:
+                    state["browser_generation"] = self._wait_for_chrome_generation()
+                except SupervisorError:
+                    state["failure_reason"] = "CHROME_START_TIMEOUT"
+            self._write_state(service, state)
+        except Exception:
             try:
-                state["browser_generation"] = self._wait_for_chrome_generation()
-            except SupervisorError:
-                state["failure_reason"] = "CHROME_START_TIMEOUT"
-        self._write_state(service, state)
+                process_info.terminate()
+                process_info.wait(timeout=4)
+            except psutil.Error:
+                pass
+            if record is not None:
+                try:
+                    self._unregister_process(record)
+                except OSError:
+                    pass
+            self._record_lifecycle_event(
+                service=service,
+                event="LAUNCH_FAILED",
+                reason="LAUNCH_STATE_PUBLISH_FAILED",
+                generation=generation,
+                outcome="FAILED",
+            )
+            raise
+        self._record_lifecycle_event(
+            service=service,
+            event="STARTED",
+            reason="BOOTSTRAP",
+            generation=generation,
+        )
 
     def _terminate(self, service: str, state: dict) -> None:
         if service == "controlled_chrome":
             self._cleanup_chrome_port()
             state.pop("browser_generation", None)
-        if not self._is_recorded_process(state):
+            if not self._is_recorded_process(state):
+                return
+            state["pid"] = None
+            state["created_at"] = None
             return
-        process = psutil.Process(state["pid"])
-        process.terminate()
+
+        record = self._state_process_record(service, state)
+        if record is None or not self._process_record_matches(record):
+            return
+        process = psutil.Process(record["pid"])
+        outcome = "GRACEFUL"
         try:
+            process.terminate()
             exit_code = process.wait(timeout=8)
         except psutil.TimeoutExpired:
+            outcome = "FORCED"
             process.kill()
             exit_code = process.wait(timeout=4)
+        except psutil.Error:
+            return
         state["exit_code"] = exit_code
         state["pid"] = None
         state["created_at"] = None
+        try:
+            self._unregister_process(record)
+        except OSError:
+            pass
+        self._record_lifecycle_event(
+            service=service,
+            event="STOPPED",
+            reason="GRACEFUL_SHUTDOWN" if outcome == "GRACEFUL" else "TERMINATION_TIMEOUT",
+            generation=record["generation"],
+            outcome=outcome,
+        )
 
     def _is_process_current(self, service: str, state: dict) -> bool:
         if service == "controlled_chrome":
             return self._is_chrome_current(state)
-        if not self._is_recorded_process(state):
-            return False
-        expected = self.definitions()[service].command
-        try:
-            commandline = " ".join(psutil.Process(state["pid"]).cmdline())
-        except (psutil.Error, KeyError, TypeError, ValueError):
-            return False
-        return all(part in commandline for part in expected[1:3])
+        record = self._state_process_record(service, state)
+        return record is not None and self._process_record_matches(record)
 
     def _is_chrome_current(self, state: dict) -> bool:
+        return self._chrome_health(state) == "CURRENT"
+
+    def _chrome_health(self, state: dict) -> str:
         generation = state.get("browser_generation")
         if not isinstance(generation, str) or not generation:
-            return self._is_recorded_process(state)
+            return "CURRENT" if self._is_recorded_process(state) else "CDP_UNAVAILABLE"
         try:
-            return CdpBrowser(timeout=1).browser_generation() == generation
+            return (
+                "CURRENT"
+                if CdpBrowser(timeout=1).browser_generation() == generation
+                else "GENERATION_MISMATCH"
+            )
         except CdpUnavailableError:
-            return False
+            return "CDP_UNAVAILABLE"
+
+    def _chrome_replacement_diagnostic(self, state: dict) -> tuple[str, str]:
+        health = self._chrome_health(state)
+        if health == "GENERATION_MISMATCH":
+            return "CHROME_GENERATION_CHANGED", health
+        return "CHROME_CDP_UNAVAILABLE", "CDP_UNAVAILABLE"
 
     def _renew_lease(self) -> None:
         if self._instance_id:
@@ -726,6 +996,12 @@ class Supervisor:
         deadline = time.monotonic() + PREVIOUS_SERVICE_WAIT_SECONDS
         while True:
             pending = []
+            for record in self.store.read_process_registry():
+                if (
+                    record.get("instance_id") != self._instance_id
+                    and self._process_record_matches(record)
+                ):
+                    pending.append(record["service"])
             for service in SERVICE_NAMES:
                 if service == "controlled_chrome":
                     continue
@@ -743,9 +1019,17 @@ class Supervisor:
 
     def _terminate_previous_services(self) -> None:
         """Stop every identifiable prior Web/Worker before bootstrap preflight."""
+        prior_records = [
+            record
+            for record in self.store.read_process_registry()
+            if record.get("instance_id") != self._instance_id
+        ]
         for service in SERVICE_SHUTDOWN_ORDER:
             if service == "controlled_chrome":
                 continue
+            for record in prior_records:
+                if record["service"] == service:
+                    self._terminate_registered_process(record, reason="TAKEOVER_RECLAIM")
             state = self._read_state(service)
             if (
                 state.get("instance_id") == self._instance_id
