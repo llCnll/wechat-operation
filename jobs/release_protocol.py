@@ -20,6 +20,8 @@ from jobs.models import BackgroundJob, JobStatus
 
 SEMVER_PATTERN = re.compile(r"^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$")
 STATE_SCHEMA_VERSION = 1
+RELEASE_PROVENANCE_SCHEMA_VERSION = 1
+RELEASE_PROVENANCE_FILENAME = "release-provenance.json"
 RESTART_MODES = frozenset(("none", "services", "supervisor"))
 
 
@@ -33,6 +35,14 @@ class Release:
     previous: str | None
     document: dict[str, Any]
     path: Path
+
+
+@dataclass(frozen=True)
+class ReleaseProvenance:
+    artifact_version: str
+    artifact_tag: str
+    artifact_commit: str
+    release_commits: dict[str, str]
 
 
 def _version_key(value: str) -> tuple[int, int, int]:
@@ -245,6 +255,10 @@ def release_state_path(project_root: Path) -> Path:
     return project_root / "runtime" / "release-state.json"
 
 
+def release_provenance_path(project_root: Path) -> Path:
+    return project_root / RELEASE_PROVENANCE_FILENAME
+
+
 def read_release_state(project_root: Path) -> dict[str, str] | None:
     path = release_state_path(project_root)
     if not path.exists():
@@ -306,13 +320,77 @@ def tagged_commit(project_root: Path, version: str) -> str:
     return commit
 
 
+def read_release_provenance(
+    project_root: Path, releases: list[Release]
+) -> ReleaseProvenance:
+    path = release_provenance_path(project_root)
+    if not path.is_file():
+        raise ReleaseProtocolError(
+            "缺少发布 provenance；纯 ZIP 部署必须先校验 Release SHA-256 后使用完整源码包"
+        )
+    try:
+        document = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ReleaseProtocolError("发布 provenance 无效") from exc
+    if not isinstance(document, dict) or set(document) != {
+        "schema_version",
+        "artifact_version",
+        "artifact_tag",
+        "artifact_commit",
+        "release_commits",
+    }:
+        raise ReleaseProtocolError("发布 provenance 字段无效")
+    if document["schema_version"] != RELEASE_PROVENANCE_SCHEMA_VERSION:
+        raise ReleaseProtocolError("发布 provenance 版本不受支持")
+    artifact_version = document["artifact_version"]
+    artifact_tag = document["artifact_tag"]
+    artifact_commit = document["artifact_commit"]
+    release_commits = document["release_commits"]
+    current_version = current_project_version(project_root)
+    expected_versions = {release.version for release in releases}
+    if artifact_version != current_version or artifact_tag != f"v{current_version}":
+        raise ReleaseProtocolError("发布 provenance 与当前代码版本不匹配")
+    if not isinstance(artifact_commit, str) or not re.fullmatch(r"[0-9a-f]{40}", artifact_commit):
+        raise ReleaseProtocolError("发布 provenance 当前提交无效")
+    if not isinstance(release_commits, dict) or set(release_commits) != expected_versions:
+        raise ReleaseProtocolError("发布 provenance 缺少完整发布版本映射")
+    if not all(
+        isinstance(version, str)
+        and isinstance(commit, str)
+        and re.fullmatch(r"[0-9a-f]{40}", commit)
+        for version, commit in release_commits.items()
+    ):
+        raise ReleaseProtocolError("发布 provenance 版本提交映射无效")
+    if release_commits[current_version] != artifact_commit:
+        raise ReleaseProtocolError("发布 provenance 当前提交与版本映射不一致")
+    return ReleaseProvenance(
+        artifact_version=artifact_version,
+        artifact_tag=artifact_tag,
+        artifact_commit=artifact_commit,
+        release_commits=release_commits,
+    )
+
+
+def release_commit(project_root: Path, releases: list[Release], version: str) -> str:
+    release_for_version(releases, version)
+    try:
+        return tagged_commit(project_root, version)
+    except ReleaseProtocolError as git_error:
+        try:
+            return read_release_provenance(project_root, releases).release_commits[version]
+        except ReleaseProtocolError as provenance_error:
+            raise ReleaseProtocolError(
+                f"无法验证发布版本 {version}：{git_error}；{provenance_error}"
+            ) from provenance_error
+
+
 def validate_local_release_state(
     project_root: Path, releases: list[Release], state: dict[str, str]
 ) -> None:
     release_for_version(releases, state["applied_version"])
-    expected_commit = tagged_commit(project_root, state["applied_version"])
+    expected_commit = release_commit(project_root, releases, state["applied_version"])
     if state["applied_commit"] != expected_commit:
-        raise ReleaseProtocolError("本机发布状态提交与其版本 tag 不一致")
+        raise ReleaseProtocolError("本机发布状态提交与其版本发布证据不一致")
 
 
 def pending_migrations() -> list[str]:

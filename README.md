@@ -36,7 +36,7 @@ uv run python -m service_supervisor
 
 ## 已有端点升级
 
-拉取代码后，必须以发布清单和本机 `runtime/release-state.json` 为准执行增量升级；不要按提交信息猜测迁移、一次性 Job 或重启动作。
+Git 工作区端点拉取代码后，必须以发布清单和本机 `runtime/release-state.json` 为准执行增量升级；不要按提交信息猜测迁移、一次性 Job 或重启动作。纯 ZIP 端点不得执行 Git 命令，必须先按[发布与多端升级](docs/guides/release-and-upgrade.md#源码-zip-端点升级)校验 ZIP SHA-256 与发布包 provenance，再生成升级计划。
 
 ```bash
 git pull --ff-only origin main

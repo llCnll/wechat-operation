@@ -15,7 +15,7 @@ from jobs.release_protocol import (
     once_job_status,
     pending_migrations,
     read_release_state,
-    tagged_commit,
+    release_commit,
     validate_local_release_state,
     validate_releases,
     write_release_state,
@@ -79,7 +79,7 @@ class Command(BaseCommand):
                 {
                     "schema_version": 1,
                     "applied_version": options["version"],
-                    "applied_commit": tagged_commit(project_root, options["version"]),
+                    "applied_commit": release_commit(project_root, releases, options["version"]),
                     "applied_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
                 },
             )
