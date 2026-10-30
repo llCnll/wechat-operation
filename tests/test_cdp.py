@@ -19,7 +19,7 @@ from config.cdp import (
 @patch.object(CdpGameFrame, "evaluate", return_value={"errcode": -1, "loginExpired": True})
 def test_binding_reports_expired_plugin_login(mock_evaluate):
     try:
-        bind_game_identity("wx6d2454a8afcd9706", frame=CdpGameFrame(target_id="owned"))
+        bind_game_identity("sample-game", frame=CdpGameFrame(target_id="owned"))
     except CdpUnavailableError as exc:
         assert str(exc) == "游戏圈登录态已失效，请重新登录"
     else:

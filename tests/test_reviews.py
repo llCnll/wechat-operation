@@ -36,7 +36,7 @@ from reviews.models import (
     RecommendedAction,
     ReviewStatus,
 )
-from reviews.reply_faq import CITY_LORD_APPID, select_reply_faq_rules
+from reviews.reply_faq import select_reply_faq_rules
 from reviews.services import (
     _read_mute_state_with_verification,
     create_confirmed_operation,
@@ -47,6 +47,8 @@ from reviews.services import (
 )
 from reviews.tasks import AI_EVALUATE_TASK, evaluate_post_handler
 
+SAMPLE_APPID = "sample-game"
+
 
 @pytest.mark.django_db
 def test_assessment_always_creates_pending_human_review_and_safe_reply_draft():
@@ -54,7 +56,7 @@ def test_assessment_always_creates_pending_human_review_and_safe_reply_draft():
         topic_id=201,
         content_id="review-201",
         content_text="活动建议",
-        source_appid=CITY_LORD_APPID,
+        source_appid=SAMPLE_APPID,
     )
     output = AssessmentOutput(
         content_category="SUGGESTION",
@@ -62,9 +64,9 @@ def test_assessment_always_creates_pending_human_review_and_safe_reply_draft():
         overall_confidence=0.9,
         reply_suggestion=ReplyOutput(
             user_intent_summary="活动建议",
-            faq_rule_id="activity-suggestion",
+            faq_rule_id="event-suggestion",
             style_variants=[
-                ReplyStyleOutput(style="WARM", draft="感谢城主的活动创意。"),
+                ReplyStyleOutput(style="WARM", draft="感谢你的活动建议。"),
                 ReplyStyleOutput(style="CONCISE", draft="已记录活动建议。"),
                 ReplyStyleOutput(style="FORMAL", draft="您的活动建议已登记参考。"),
             ],
@@ -73,17 +75,15 @@ def test_assessment_always_creates_pending_human_review_and_safe_reply_draft():
     assessment, task = persist_assessment(post, output)
     assert assessment.needs_human_review is True
     assert task.status == ReviewStatus.PENDING
-    assert post.reply_draft.draft == "感谢城主的活动创意。"
+    assert post.reply_draft.draft == "感谢你的活动建议。"
     assert post.reply_draft.selected_style == "WARM"
     assert len(post.reply_draft.style_variants) == 3
 
 
-def test_reply_faq_candidates_require_the_matching_game_appid():
-    assert select_reply_faq_rules(appid="", content="活动建议") == ()
-    assert select_reply_faq_rules(appid="other-game", content="活动建议") == ()
-    assert [
-        rule.rule_id for rule in select_reply_faq_rules(appid=CITY_LORD_APPID, content="活动建议")
-    ] == ["activity-suggestion"]
+def test_reply_faq_candidates_use_generic_rules():
+    rule_ids = {rule.rule_id for rule in select_reply_faq_rules(content="活动建议")}
+    assert "event-suggestion" in rule_ids
+    assert len(rule_ids) <= 4
 
 
 def test_reply_faq_catalog_rejects_empty_rule_keywords(monkeypatch, tmp_path):
@@ -91,13 +91,13 @@ def test_reply_faq_catalog_rejects_empty_rule_keywords(monkeypatch, tmp_path):
     payload["rules"][0]["keywords"] = []
     catalog_path = tmp_path / "invalid-faq.json"
     catalog_path.write_text(json.dumps(payload), encoding="utf-8")
-    reply_faq.load_city_lord_reply_faq.cache_clear()
+    reply_faq.load_community_reply_faq.cache_clear()
     monkeypatch.setattr(reply_faq, "_catalog_path", lambda: catalog_path)
 
     with pytest.raises(ValueError, match="规则字段无效"):
-        reply_faq.load_city_lord_reply_faq()
+        reply_faq.load_community_reply_faq()
 
-    reply_faq.load_city_lord_reply_faq.cache_clear()
+    reply_faq.load_community_reply_faq.cache_clear()
 
 
 @pytest.mark.django_db
@@ -106,7 +106,7 @@ def test_safe_reassessment_without_a_valid_faq_suppresses_an_older_reply_draft()
         topic_id=220,
         content_id="reply-draft-stale",
         content_text="活动建议",
-        source_appid=CITY_LORD_APPID,
+        source_appid=SAMPLE_APPID,
     )
     persist_assessment(
         post,
@@ -116,9 +116,9 @@ def test_safe_reassessment_without_a_valid_faq_suppresses_an_older_reply_draft()
             overall_confidence=0.9,
             reply_suggestion=ReplyOutput(
                 user_intent_summary="活动建议",
-                faq_rule_id="activity-suggestion",
+                faq_rule_id="event-suggestion",
                 style_variants=[
-                    ReplyStyleOutput(style="WARM", draft="感谢城主的活动创意。"),
+                    ReplyStyleOutput(style="WARM", draft="感谢你的活动建议。"),
                     ReplyStyleOutput(style="CONCISE", draft="已记录活动建议。"),
                     ReplyStyleOutput(style="FORMAL", draft="您的活动建议已登记参考。"),
                 ],
@@ -136,7 +136,7 @@ def test_safe_reassessment_without_a_valid_faq_suppresses_an_older_reply_draft()
                 user_intent_summary="活动建议",
                 faq_rule_id="unknown-rule",
                 style_variants=[
-                    ReplyStyleOutput(style="WARM", draft="感谢城主的活动创意。"),
+                    ReplyStyleOutput(style="WARM", draft="感谢你的活动建议。"),
                     ReplyStyleOutput(style="CONCISE", draft="已记录活动建议。"),
                     ReplyStyleOutput(style="FORMAL", draft="您的活动建议已登记参考。"),
                 ],
@@ -222,7 +222,7 @@ def test_normalize_assessment_output_accepts_named_reply_style_mapping():
         {
             "reply_suggestion": {
                 "user_intent_summary": "活动建议",
-                "faq_rule_id": "activity-suggestion",
+                "faq_rule_id": "event-suggestion",
                 "style_variants": {
                     "亲和互动": "感谢你的建议。",
                     "CONCISE": "已记录建议。",
@@ -277,15 +277,15 @@ def test_review_prompt_adds_video_rules_only_when_video_evidence_is_present():
 
 
 def test_faq_prompt_requires_three_styles_to_preserve_controlled_facts():
-    rules = select_reply_faq_rules(appid=CITY_LORD_APPID, content="充值未到账")
+    rules = select_reply_faq_rules(content="充值未到账")
 
     prompt = review_system_prompt(has_video_evidence=False, faq_rules=rules)
 
     assert "三项必须以同一 faq_rule_id 的受控要点、待补充信息、来源和禁止承诺为准" in prompt
     assert "仅可改变语气、篇幅和互动方式" in prompt
     assert (
-        review_prompt_version(has_video_evidence=False, faq_version="city-lord-reply-faq-v1")
-        == "review-v6-city-lord-reply-faq-v1"
+        review_prompt_version(has_video_evidence=False, faq_version="community-reply-faq-v1")
+        == "review-v6-community-reply-faq-v1"
     )
 
 
@@ -473,7 +473,7 @@ def test_ai_review_selects_faq_candidates_from_image_ocr_and_video_evidence(monk
         title="活动咨询",
         content_text="请帮忙看看",
         ballot_text="投票选项",
-        source_appid=CITY_LORD_APPID,
+        source_appid=SAMPLE_APPID,
     )
     job = BackgroundJob.objects.create(
         task_type=AI_EVALUATE_TASK,
@@ -486,7 +486,7 @@ def test_ai_review_selects_faq_candidates_from_image_ocr_and_video_evidence(monk
             assert content == "活动咨询\n\n请帮忙看看\n\n投票选项"
             assert "图片 OCR：充值未到账" in ocr_text
             assert "视频语音：活动规则怎么参加" in ocr_text
-            assert {rule.rule_id for rule in faq_rules} >= {"payment-issue", "activity-question"}
+            assert {rule.rule_id for rule in faq_rules} >= {"payment-order", "event-question"}
             return AssessmentOutput(
                 content_category="QUESTION",
                 recommended_action="KEEP",
@@ -514,7 +514,7 @@ def test_ai_review_continues_when_optional_faq_guidance_is_unavailable(monkeypat
         topic_id=212,
         content_id="review-faq-unavailable",
         content_text="活动建议",
-        source_appid=CITY_LORD_APPID,
+        source_appid=SAMPLE_APPID,
     )
     job = BackgroundJob.objects.create(
         task_type=AI_EVALUATE_TASK,

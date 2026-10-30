@@ -6,7 +6,6 @@ from config.cdp import ManagedGameDTO
 from config.game_circle_ipc import GameCircleIpcError
 from posts.admin import ManagedGameAdmin
 from posts.game_catalog import (
-    DEFAULT_GAME_APPID,
     managed_game_options,
     sync_managed_games,
 )
@@ -14,21 +13,21 @@ from posts.models import ManagedGame, OriginalPost
 
 
 @pytest.mark.django_db
-def test_catalog_does_not_fabricate_default_game_and_keeps_unknown_historical_appid():
+def test_catalog_does_not_fabricate_default_or_unknown_historical_games():
     existing_appids = set(ManagedGame.objects.values_list("appid", flat=True))
     OriginalPost.objects.create(topic_id=9001, content_id="unknown-game", source_appid="wx-history")
 
     options = managed_game_options()
 
-    assert any(option.appid == "wx-history" and "未知游戏" in option.name for option in options)
-    assert {option.appid for option in options if "未知游戏" not in option.name} == existing_appids
+    assert not any(option.appid == "wx-history" for option in options)
+    assert {option.appid for option in options} == existing_appids
 
 
 @pytest.mark.django_db
 def test_read_only_catalog_options_do_not_manufacture_default_records():
     games_before = list(ManagedGame.objects.values_list("appid", "name"))
 
-    options = managed_game_options(persist_default=False)
+    options = managed_game_options()
 
     assert [(option.appid, option.name) for option in options] == games_before
     assert list(ManagedGame.objects.values_list("appid", "name")) == games_before

@@ -26,7 +26,7 @@ def test_live_operations_analysis_requires_login():
 
 @pytest.mark.django_db
 def test_live_operations_analysis_defaults_to_seven_days_and_does_not_create_jobs():
-    _set_active_game("wx6d2454a8afcd9706")
+    _set_active_game("sample-game")
     user = get_user_model().objects.create_user(username="report-user", password="test-password")
     post = OriginalPost.objects.create(
         topic_id=701,
@@ -66,7 +66,7 @@ def test_live_operations_analysis_defaults_to_seven_days_and_does_not_create_job
 @pytest.mark.django_db
 def test_live_operations_analysis_scopes_the_selected_range_and_game():
     user = get_user_model().objects.create_user(username="report-filter", password="test-password")
-    appid = "wx-report-game"
+    appid = "sample-game"
     _set_active_game(appid)
     candidate = CandidatePost.objects.create(
         topic_id=702,
@@ -95,19 +95,19 @@ def test_live_operations_analysis_scopes_the_selected_range_and_game():
     assert response.status_code == 200
     assert "转发排除" in page
     assert "<dd>1</dd>" in page
-    assert 'value="wx-report-game" selected' in page
+    assert f'name="appid" value="{appid}"' in page
 
 
 @pytest.mark.django_db
 def test_analysis_refresh_post_enqueues_one_job_and_preserves_the_range():
-    _set_active_game("wx6d2454a8afcd9706")
+    _set_active_game("sample-game")
     user = get_user_model().objects.create_user(username="refresh-user", password="test-password")
     client = Client()
     client.force_login(user)
     payload = {
         "start_date": "2026-07-18",
         "end_date": "2026-07-18",
-        "appid": "wx6d2454a8afcd9706",
+        "appid": "sample-game",
     }
 
     first = client.post("/reports/refresh-metrics/", payload)
@@ -118,7 +118,7 @@ def test_analysis_refresh_post_enqueues_one_job_and_preserves_the_range():
     assert second.status_code == 302
     jobs = BackgroundJob.objects.filter(task_type="METRICS_REFRESH_WINDOW")
     assert jobs.count() == 1
-    assert jobs.get().parameter_summary["appid"] == "wx6d2454a8afcd9706"
+    assert jobs.get().parameter_summary["appid"] == "sample-game"
 
 
 @pytest.mark.django_db
@@ -132,7 +132,7 @@ def test_analysis_refresh_requires_csrf_confirmation():
         {
             "start_date": "2026-07-18",
             "end_date": "2026-07-18",
-            "appid": "wx6d2454a8afcd9706",
+            "appid": "sample-game",
         },
     )
 

@@ -592,7 +592,7 @@ class GameCircleSessionService:
 
     def bootstrap_current_scope(self, *, intent: BootstrapIntent) -> BootstrapResult:
         try:
-            scope = current_execution_scope(persist_default=False)
+            scope = current_execution_scope()
         except ValueError:
             scope = None
         return self.bootstrap(
@@ -603,7 +603,7 @@ class GameCircleSessionService:
     @staticmethod
     def _is_current_scope(scope: ExecutionScope) -> bool:
         try:
-            return current_execution_scope(persist_default=False) == scope
+            return current_execution_scope() == scope
         except ValueError:
             return False
 
@@ -695,7 +695,7 @@ class GameCircleSessionService:
     def _observable_home(self, browser: CdpBrowser) -> str:
         """Prefer the current lease HOME so UI and source calls share one page."""
         try:
-            scope = current_execution_scope(persist_default=False)
+            scope = current_execution_scope()
         except ValueError:
             scope = None
         lease = self._active_lease(scope) if scope is not None else None
@@ -902,7 +902,7 @@ class GameCircleSessionService:
         if monotonic() < self._next_outer_probe_at:
             return
         try:
-            scope = current_execution_scope(persist_default=False)
+            scope = current_execution_scope()
         except ValueError:
             scope = None
         lease = self._active_lease(scope) if scope is not None else None
@@ -940,7 +940,7 @@ class GameCircleSessionService:
         """Project failure without hiding a still-usable lease for the current scope."""
         if scope is not None:
             try:
-                if current_execution_scope(persist_default=False) != scope:
+                if current_execution_scope() != scope:
                     return
             except ValueError:
                 pass
@@ -1193,7 +1193,7 @@ class GameCircleSessionService:
         if public_runtime_config().get("session_repair_enabled") != "true":
             return
         try:
-            scope = current_execution_scope(persist_default=False)
+            scope = current_execution_scope()
         except ValueError:
             return
         active_lease = self._active_lease(scope)
@@ -1353,7 +1353,7 @@ class GameCircleSessionService:
             browser = CdpBrowser()
             generation = self._sync_generation(browser)
             try:
-                scope = current_execution_scope(persist_default=False)
+                scope = current_execution_scope()
             except ValueError:
                 scope = None
             active_lease = self._active_lease(scope) if scope is not None else None
@@ -1408,7 +1408,7 @@ class GameCircleSessionService:
                     self._hold_candidate_for_login_recovery(home, generation)
                 elif observed.kind == _OuterSessionKind.VERIFIED_WITH_TOKEN:
                     try:
-                        scope = current_execution_scope(persist_default=False)
+                        scope = current_execution_scope()
                     except ValueError:
                         scope = None
                     self._record_outer_verification(scope)

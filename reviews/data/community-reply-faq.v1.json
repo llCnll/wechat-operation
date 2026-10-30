@@ -1,0 +1,204 @@
+{
+  "version": "community-reply-faq-v1",
+  "scope": "all_authorized_games",
+  "rules": [
+    {
+      "id": "issue-report",
+      "scene": "问题反馈",
+      "keywords": ["异常", "无法使用", "报错", "功能故障", "中断"],
+      "guidance": "感谢反馈。为便于核对，请补充发生时间、操作步骤和提示信息；提交截图前遮挡账号等个人信息。",
+      "missing_information": ["发生时间", "操作步骤", "提示信息或脱敏截图"],
+      "source": "项目内通用 FAQ 示例：问题反馈",
+      "prohibited_claims": ["未核实的修复结果", "处理时限", "补偿"]
+    },
+    {
+      "id": "payment-order",
+      "scene": "支付或订单问题",
+      "keywords": ["支付", "扣款", "订单", "未到账", "退款"],
+      "guidance": "建议通过部署方确认的正式支持渠道核查；请勿公开完整订单号、支付凭据或账户信息。",
+      "missing_information": ["问题发生时间", "订单状态"],
+      "source": "项目内通用 FAQ 示例：支付或订单问题",
+      "prohibited_claims": ["到账或退款承诺", "处理时限", "补偿"]
+    },
+    {
+      "id": "copy-correction",
+      "scene": "文字或信息更正",
+      "keywords": ["错字", "文案错误", "信息有误", "公告更正"],
+      "guidance": "感谢指出。我们会先核对相关内容；确认后再按实际情况更新说明。",
+      "missing_information": [],
+      "source": "项目内通用 FAQ 示例：文字或信息更正",
+      "prohibited_claims": ["未核实的更正", "未经确认的责任归因"]
+    },
+    {
+      "id": "access-authorization",
+      "scene": "访问或授权问题",
+      "keywords": ["登录失败", "无法访问", "权限", "授权异常", "验证码"],
+      "guidance": "请勿公开密码、验证码或完整账户信息；可补充操作步骤和发生时间，并通过确认过的支持渠道反馈。",
+      "missing_information": ["发生时间", "操作步骤", "提示信息"],
+      "source": "项目内通用 FAQ 示例：访问或授权问题",
+      "prohibited_claims": ["索取密码或验证码", "未经核实的账号状态", "处理时限"]
+    },
+    {
+      "id": "content-suggestion",
+      "scene": "内容或体验建议",
+      "keywords": ["建议", "体验", "改进", "优化", "希望调整"],
+      "guidance": "感谢你分享建议。我们会记录这条反馈，供后续评估时参考。",
+      "missing_information": [],
+      "source": "项目内通用 FAQ 示例：内容或体验建议",
+      "prohibited_claims": ["必定采纳", "调整计划", "完成时间"]
+    },
+    {
+      "id": "feature-request",
+      "scene": "功能或内容期望",
+      "keywords": ["希望增加", "新功能", "新内容", "期待功能", "功能需求"],
+      "guidance": "感谢你提出想法。我们会记录并评估这项需求，也欢迎继续补充使用场景。",
+      "missing_information": ["使用场景"],
+      "source": "项目内通用 FAQ 示例：功能或内容期望",
+      "prohibited_claims": ["上线承诺", "排期", "必定实现"]
+    },
+    {
+      "id": "guide-share",
+      "scene": "经验或指南分享",
+      "keywords": ["指南", "教程", "经验分享", "操作步骤", "技巧"],
+      "guidance": "感谢你整理并分享这些经验。欢迎其他成员交流补充，也请读者结合自身情况判断适用性。",
+      "missing_information": [],
+      "source": "项目内通用 FAQ 示例：经验或指南分享",
+      "prohibited_claims": ["官方认可", "未经核实的效果保证"]
+    },
+    {
+      "id": "media-share",
+      "scene": "图片或视频分享",
+      "keywords": ["视频", "录屏", "图片分享", "演示", "作品展示"],
+      "guidance": "感谢分享这段内容。欢迎大家在评论中交流，也请确保发布内容符合平台规则并尊重相关权利。",
+      "missing_information": [],
+      "source": "项目内通用 FAQ 示例：图片或视频分享",
+      "prohibited_claims": ["官方背书", "未经核实的权利声明"]
+    },
+    {
+      "id": "analysis-share",
+      "scene": "分析或经验讨论",
+      "keywords": ["分析", "机制解析", "经验总结", "观点", "数据分析"],
+      "guidance": "感谢你分享分析和依据。欢迎其他成员补充不同观察，结论可结合来源和适用条件继续讨论。",
+      "missing_information": [],
+      "source": "项目内通用 FAQ 示例：分析或经验讨论",
+      "prohibited_claims": ["官方结论", "未经核实的事实判断"]
+    },
+    {
+      "id": "achievement-share",
+      "scene": "成果或进展分享",
+      "keywords": ["完成目标", "达成", "成果", "进展", "记录分享"],
+      "guidance": "恭喜取得进展，也感谢你愿意分享过程。欢迎继续交流其中的经验。",
+      "missing_information": [],
+      "source": "项目内通用 FAQ 示例：成果或进展分享",
+      "prohibited_claims": ["效果保证", "未经核实的排名或认证"]
+    },
+    {
+      "id": "work-showcase",
+      "scene": "作品或方案展示",
+      "keywords": ["作品展示", "方案展示", "设计分享", "案例分享", "成果展示"],
+      "guidance": "感谢你展示这项作品。欢迎介绍设计思路或遇到的问题，供社区成员交流。",
+      "missing_information": [],
+      "source": "项目内通用 FAQ 示例：作品或方案展示",
+      "prohibited_claims": ["官方背书", "未经核实的评价或认证"]
+    },
+    {
+      "id": "humorous-experience",
+      "scene": "轻松经历分享",
+      "keywords": ["搞笑", "意外", "翻车", "趣事", "尴尬"],
+      "guidance": "谢谢分享这段经历。欢迎大家友善交流，也希望之后的尝试更顺利。",
+      "missing_information": [],
+      "source": "项目内通用 FAQ 示例：轻松经历分享",
+      "prohibited_claims": ["嘲讽或贬低个人"]
+    },
+    {
+      "id": "positive-feedback",
+      "scene": "正向反馈",
+      "keywords": ["喜欢", "满意", "感谢", "推荐", "体验不错"],
+      "guidance": "感谢你的认可和反馈。欢迎继续分享使用感受或建议。",
+      "missing_information": [],
+      "source": "项目内通用 FAQ 示例：正向反馈",
+      "prohibited_claims": ["夸大产品能力", "诱导营销"]
+    },
+    {
+      "id": "roadmap-expectation",
+      "scene": "后续计划咨询",
+      "keywords": ["什么时候更新", "后续计划", "上线时间", "未来版本", "何时推出"],
+      "guidance": "感谢关注。请以部署方确认并公开发布的信息为准；当前没有可核实的时间时，不推测日期。",
+      "missing_information": [],
+      "source": "项目内通用 FAQ 示例：后续计划咨询",
+      "prohibited_claims": ["未公开计划", "具体上线日期", "确定性承诺"]
+    },
+    {
+      "id": "complaint",
+      "scene": "不满或负面体验",
+      "keywords": ["不满意", "体验差", "失望", "抱怨", "问题很多"],
+      "guidance": "感谢你说明遇到的问题，也抱歉这次体验没有达到预期。若方便，请补充具体情形，便于核对。",
+      "missing_information": ["具体情形", "发生时间"],
+      "source": "项目内通用 FAQ 示例：不满或负面体验",
+      "prohibited_claims": ["处理结果承诺", "未经核实的原因", "补偿承诺"]
+    },
+    {
+      "id": "help-question",
+      "scene": "问题求助",
+      "keywords": ["怎么处理", "如何使用", "求助", "请教", "为什么不能"],
+      "guidance": "感谢提问。请补充相关场景和已尝试的步骤；只有在依据充分时再提供明确答案。",
+      "missing_information": ["相关场景", "已尝试的步骤"],
+      "source": "项目内通用 FAQ 示例：问题求助",
+      "prohibited_claims": ["未经核实的操作指引", "结果保证"]
+    },
+    {
+      "id": "community-connection",
+      "scene": "社区交流或寻找伙伴",
+      "keywords": ["交流", "寻找伙伴", "一起讨论", "互相帮助", "结识"],
+      "guidance": "欢迎在评论区友善交流并说明希望讨论的主题；请勿公开个人联系方式或引导至未经审核的站外群组。",
+      "missing_information": [],
+      "source": "项目内通用 FAQ 示例：社区交流",
+      "prohibited_claims": ["站外群组背书", "公开个人联系方式"]
+    },
+    {
+      "id": "topic-discussion",
+      "scene": "观点或议题讨论",
+      "keywords": ["讨论", "观点", "看法", "争议", "话题"],
+      "guidance": "感谢发起讨论。欢迎成员基于事实补充观点，并遵守社区交流规则。",
+      "missing_information": [],
+      "source": "项目内通用 FAQ 示例：观点或议题讨论",
+      "prohibited_claims": ["代表组织立场", "未经核实的结论"]
+    },
+    {
+      "id": "event-participation",
+      "scene": "活动参与分享",
+      "keywords": ["活动参与", "完成活动", "活动成果", "参与记录", "活动体验"],
+      "guidance": "感谢参与和分享。涉及资格或结果时，请以活动发布的正式规则和核实结果为准。",
+      "missing_information": ["活动名称"],
+      "source": "项目内通用 FAQ 示例：活动参与分享",
+      "prohibited_claims": ["额外奖励", "资格或结果保证"]
+    },
+    {
+      "id": "event-question",
+      "scene": "活动规则咨询",
+      "keywords": ["活动规则", "截止时间", "如何参加", "活动资格", "奖励条件"],
+      "guidance": "请先核对活动发布的完整规则；如仍有疑问，请补充活动名称和需要确认的条款。",
+      "missing_information": ["活动名称", "具体疑问"],
+      "source": "项目内通用 FAQ 示例：活动规则咨询",
+      "prohibited_claims": ["未经核实的奖励", "截止时间", "资格条件"]
+    },
+    {
+      "id": "event-suggestion",
+      "scene": "活动建议",
+      "keywords": ["活动建议", "奖励设置", "活动形式", "主题建议", "改进活动"],
+      "guidance": "感谢你提出活动建议。我们会记录这条想法，供后续讨论参考。",
+      "missing_information": [],
+      "source": "项目内通用 FAQ 示例：活动建议",
+      "prohibited_claims": ["必定采纳", "活动安排", "奖励承诺"]
+    },
+    {
+      "id": "suspected-misconduct",
+      "scene": "疑似违规行为反馈",
+      "keywords": ["疑似作弊", "违规行为", "异常行为", "利用漏洞", "举报"],
+      "guidance": "感谢反馈。请勿公开指认或传播个人信息；如有依据，请通过平台正式反馈渠道提交可核实材料。",
+      "missing_information": ["可核实的材料"],
+      "source": "项目内通用 FAQ 示例：疑似违规行为反馈",
+      "prohibited_claims": ["对被反馈对象作事实定性", "处罚结果", "处理时限"]
+    }
+  ]
+}

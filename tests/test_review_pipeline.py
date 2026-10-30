@@ -6,7 +6,6 @@ from jobs.models import BackgroundJob
 from posts.models import POST_STATUS_DELETED, CandidatePost, OriginalPost, OriginType, PostMedia
 from reviews.adapters import AssessmentOutput, ReplyOutput, ReplyStyleOutput
 from reviews.models import OcrExtraction, RecommendedAction
-from reviews.reply_faq import CITY_LORD_APPID
 from reviews.services import (
     AI_EVALUATE_TASK,
     OCR_EXTRACT_TASK,
@@ -14,6 +13,8 @@ from reviews.services import (
     enqueue_evaluation_pipeline,
     persist_assessment,
 )
+
+SAMPLE_APPID = "sample-game"
 
 
 @pytest.mark.django_db
@@ -66,7 +67,7 @@ def test_workspace_saves_reply_without_publishing():
         topic_id=803,
         content_id="pipeline-803",
         content_text="活动建议",
-        source_appid=CITY_LORD_APPID,
+        source_appid=SAMPLE_APPID,
     )
     CandidatePost.objects.create(
         topic_id=803, content_id="pipeline-803", origin_type=OriginType.ORIGINAL
@@ -79,9 +80,9 @@ def test_workspace_saves_reply_without_publishing():
             overall_confidence=0.8,
             reply_suggestion=ReplyOutput(
                 user_intent_summary="诉求",
-                faq_rule_id="activity-suggestion",
+                faq_rule_id="event-suggestion",
                 style_variants=[
-                    ReplyStyleOutput(style="WARM", draft="感谢城主的活动创意。"),
+                    ReplyStyleOutput(style="WARM", draft="感谢你的活动建议。"),
                     ReplyStyleOutput(style="CONCISE", draft="已记录活动建议。"),
                     ReplyStyleOutput(style="FORMAL", draft="您的活动建议已登记参考。"),
                 ],
@@ -107,7 +108,7 @@ def test_workspace_rejects_invalid_or_missing_local_reply_drafts_without_creatin
         topic_id=804,
         content_id="pipeline-804",
         content_text="活动建议",
-        source_appid=CITY_LORD_APPID,
+        source_appid=SAMPLE_APPID,
     )
     persist_assessment(
         post,
@@ -117,9 +118,9 @@ def test_workspace_rejects_invalid_or_missing_local_reply_drafts_without_creatin
             overall_confidence=0.8,
                 reply_suggestion=ReplyOutput(
                     user_intent_summary="诉求",
-                    faq_rule_id="activity-suggestion",
+                    faq_rule_id="event-suggestion",
                     style_variants=[
-                        ReplyStyleOutput(style="WARM", draft="感谢城主的活动创意。"),
+                        ReplyStyleOutput(style="WARM", draft="感谢你的活动建议。"),
                         ReplyStyleOutput(style="CONCISE", draft="已记录活动建议。"),
                         ReplyStyleOutput(style="FORMAL", draft="您的活动建议已登记参考。"),
                     ],
@@ -141,6 +142,6 @@ def test_workspace_rejects_invalid_or_missing_local_reply_drafts_without_creatin
 
     assert blank.status_code == too_long.status_code == missing.status_code == 302
     post.reply_draft.refresh_from_db()
-    assert post.reply_draft.draft == "感谢城主的活动创意。"
+    assert post.reply_draft.draft == "感谢你的活动建议。"
     assert BackgroundJob.objects.count() == job_count
     assert not hasattr(without_draft, "reply_draft")

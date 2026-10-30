@@ -47,11 +47,30 @@ def test_official_author_requires_a_managed_game():
         enable_official_author(appid="unmanaged-game", openid="openid-a", nick_name="官方", user=user)
 
 
+@pytest.mark.django_db
+def test_official_author_management_lists_synced_games(client):
+    user = get_user_model().objects.create_user(username="official-author-management")
+    client.force_login(user)
+    current = ManagedGame.objects.create(appid="game-current", name="当前游戏")
+    other = ManagedGame.objects.create(appid="game-other", name="另一款游戏")
+    set_active_game(appid=current.appid)
+
+    response = client.get("/official-authors/")
+
+    assert response.status_code == 200
+    assert response.context["appid"] == current.appid
+    assert {game.appid for game in response.context["managed_games"]} == {
+        current.appid,
+        other.appid,
+    }
+    assert other.name in response.content.decode()
+
+
 def test_game_name_match_normalizes_only_whitespace():
     identity = identity_for_values(
         author_openid="",
-        author_nick_name="  城主\t别慌张  ",
-        game_name="城主 别慌张",
+        author_nick_name="  星海\t远征  ",
+        game_name="星海 远征",
         verified_openids=set(),
     )
 

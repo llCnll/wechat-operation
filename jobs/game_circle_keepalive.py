@@ -38,7 +38,7 @@ def enqueue_keepalive(*, trigger: str, now: datetime | None = None) -> EnqueueRe
         key = f"game-circle-session:keepalive:manual:{uuid4().hex}"
         parameters = {"trigger": "manual"}
     with transaction.atomic():
-        scope = current_execution_scope(persist_default=False)
+        scope = current_execution_scope()
         parameters["scope_version"] = scope.scope_version
         if trigger == "manual":
             return enqueue_active_coalesced_job(
