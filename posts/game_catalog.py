@@ -6,21 +6,15 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from django.conf import settings
 from django.db import transaction
 from django.utils import timezone
 
 from config.cdp import ManagedGameDTO
 
-from .models import ActiveGameScope, ManagedGame, OriginalPost
+from .models import ActiveGameScope, ManagedGame
 
 if TYPE_CHECKING:
     from jobs.models import BackgroundJob
-
-# Deprecated read-only compatibility export. It is deployment configuration, never a
-# business AppID embedded in code; new callers must resolve ActiveGameScope instead.
-DEFAULT_GAME_APPID = str(settings.DEFAULT_GAME_APPID).strip()
-
 
 @dataclass(frozen=True)
 class GameOption:
@@ -38,40 +32,15 @@ class ExecutionScope:
         return {"target_appid": self.target_appid, "scope_version": self.scope_version}
 
 
-def initialize_active_game_scope(*, updated_by=None) -> ActiveGameScope | None:
-    """Initialize the singleton only from a configured game already in the local catalog."""
-    configured_appid = str(settings.DEFAULT_GAME_APPID).strip()
-    if not configured_appid:
-        return None
-    game = ManagedGame.objects.filter(appid=configured_appid).first()
-    if game is None:
-        return None
-    scope, _ = ActiveGameScope.objects.get_or_create(
-        pk=1,
-        defaults={"active_game": game, "updated_by": updated_by},
-    )
-    return scope
-
-
-def managed_game_options(*, persist_default: bool = True) -> list[GameOption]:
+def managed_game_options() -> list[GameOption]:
     """Return the locally synchronized catalog without manufacturing upstream games."""
-    if persist_default:
-        initialize_active_game_scope()
     cached = list(ManagedGame.objects.all())
-    known = {game.appid for game in cached}
     options = [GameOption(game.appid, game.name, game.last_synced_at) for game in cached]
-    for appid in OriginalPost.objects.exclude(source_appid="").values_list(
-        "source_appid", flat=True
-    ).distinct():
-        if appid not in known:
-            options.append(GameOption(appid, f"未知游戏（{appid}）"))
     return sorted(options, key=lambda item: (item.name, item.appid))
 
 
-def active_game_appid(requested_appid: str = "", *, persist_default: bool = True) -> str:
-    """Return the configured scope and reject a conflicting compatibility parameter."""
-    if persist_default:
-        initialize_active_game_scope()
+def active_game_appid(requested_appid: str = "") -> str:
+    """Return the selected operation scope and reject a conflicting request value."""
     scope = ActiveGameScope.objects.select_related("active_game").filter(pk=1).first()
     if scope is None:
         raise ValueError("尚未配置当前操作游戏；请先同步目录并在系统配置中选择游戏")
@@ -81,11 +50,9 @@ def active_game_appid(requested_appid: str = "", *, persist_default: bool = True
 
 
 def current_execution_scope(
-    requested_appid: str = "", *, persist_default: bool = True
+    requested_appid: str = "",
 ) -> ExecutionScope:
     """Read the active scope for a synchronous, operator-confirmed source action."""
-    if persist_default:
-        initialize_active_game_scope()
     scope = ActiveGameScope.objects.select_related("active_game").filter(pk=1).first()
     if scope is None:
         raise ValueError("尚未配置当前操作游戏；请先同步目录并在系统配置中选择游戏")
@@ -201,7 +168,6 @@ def sync_managed_games(games: Iterable[ManagedGameDTO]) -> int:
         count += 1
     if count == 0:
         raise ValueError("游戏列表响应中没有有效游戏")
-    initialize_active_game_scope()
     return count
 
 

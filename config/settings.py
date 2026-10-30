@@ -50,9 +50,10 @@ class RuntimeSettings(BaseSettings):
         extra="ignore",
     )
 
-    django_secret_key: str = Field(min_length=32, default="development-only-secret-key-change-me")
+    django_secret_key: str = Field(min_length=32)
     django_debug: bool = False
     django_allowed_hosts: str = "localhost,127.0.0.1,testserver"
+    web_port: int = Field(default=8000, ge=1024, le=65535)
     database_path: Path = RUNTIME_DIR / "operations.sqlite3"
     sqlite_busy_timeout_ms: int = Field(default=5000, ge=100, le=60000)
     log_level: str = "INFO"
@@ -90,18 +91,14 @@ class RuntimeSettings(BaseSettings):
     enable_ai_automated_moderation: bool = False
     enable_ai_sink_writes: bool = False
     enable_ai_block_writes: bool = False
-    default_game_appid: str = ""
     controlled_chrome_bin: str = ""
     controlled_chrome_user_data_dir: Path = RUNTIME_DIR / "controlled-chrome-profile"
     controlled_chrome_debug_port: int = Field(default=9222, ge=1024, le=65535)
     game_circle_ipc_port: int = Field(default=9364, ge=1024, le=65535)
     game_circle_ipc_timeout_seconds: float = Field(default=30, ge=1, le=120)
     game_circle_session_retire_seconds: int = Field(default=10, ge=1, le=60)
-    # Zero means "unlimited" for the current verified read-only rollout.  The
-    # fields are retained so a future upstream rate-limit finding can be applied
-    # per service deployment without redesigning the lease contract.
+    # Zero means "unlimited" for the current verified read-only rollout.
     game_circle_max_concurrent_accesses: int = Field(default=0, ge=0, le=1000)
-    game_circle_max_requests_per_second: float = Field(default=0, ge=0, le=1000)
     scheduled_ingestion_interval_minutes: int = Field(default=15, ge=1, le=1440)
     scheduled_ingestion_lookback_minutes: int = Field(default=30, ge=1, le=24 * 60)
     scheduled_ingestion_page_size: int = Field(default=FIXED_INGESTION_PAGE_SIZE, ge=1, le=100)
@@ -109,8 +106,8 @@ class RuntimeSettings(BaseSettings):
 
 try:
     runtime = RuntimeSettings()
-except ValidationError as exc:
-    raise RuntimeError("运行时配置无效；请检查非敏感配置值。") from exc
+except ValidationError:
+    raise RuntimeError("运行时配置无效；请检查非敏感配置值。") from None
 
 if not runtime.database_path.is_absolute():
     runtime.database_path = BASE_DIR / runtime.database_path
@@ -122,6 +119,7 @@ RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
 SECRET_KEY = runtime.django_secret_key
 DEBUG = runtime.django_debug
 ALLOWED_HOSTS = [host.strip() for host in runtime.django_allowed_hosts.split(",") if host.strip()]
+WEB_PORT = runtime.web_port
 
 INSTALLED_APPS = [
     "django.contrib.admin",
@@ -197,7 +195,6 @@ LOGIN_URL = "/admin/login/"
 SCHEDULED_INGESTION_INTERVAL_MINUTES = runtime.scheduled_ingestion_interval_minutes
 SCHEDULED_INGESTION_LOOKBACK_MINUTES = runtime.scheduled_ingestion_lookback_minutes
 SCHEDULED_INGESTION_PAGE_SIZE = runtime.scheduled_ingestion_page_size
-DEFAULT_GAME_APPID = runtime.default_game_appid
 CONTROLLED_CHROME_BIN = runtime.controlled_chrome_bin
 CONTROLLED_CHROME_USER_DATA_DIR = runtime.controlled_chrome_user_data_dir
 CONTROLLED_CHROME_DEBUG_PORT = runtime.controlled_chrome_debug_port
@@ -206,7 +203,6 @@ GAME_CIRCLE_IPC_PORT = runtime.game_circle_ipc_port
 GAME_CIRCLE_IPC_TIMEOUT_SECONDS = runtime.game_circle_ipc_timeout_seconds
 GAME_CIRCLE_SESSION_RETIRE_SECONDS = runtime.game_circle_session_retire_seconds
 GAME_CIRCLE_MAX_CONCURRENT_ACCESSES = runtime.game_circle_max_concurrent_accesses
-GAME_CIRCLE_MAX_REQUESTS_PER_SECOND = runtime.game_circle_max_requests_per_second
 
 
 class SensitiveDataFilter(logging.Filter):

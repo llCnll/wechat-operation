@@ -29,7 +29,7 @@ def active_game_scope(request):
     if request.node.get_closest_marker("django_db") is None:
         return
     game, _ = ManagedGame.objects.get_or_create(
-        appid="wx6d2454a8afcd9706",
+        appid="sample-game",
         defaults={"name": "测试游戏"},
     )
     set_active_game(appid=game.appid)
@@ -60,7 +60,7 @@ def test_scheduled_enqueue_is_fixed_game_and_idempotent_in_one_time_bucket():
     assert second.created is False
     assert first.job.pk == second.job.pk
     assert first.job.parameter_summary == {
-        "appid": "wx6d2454a8afcd9706",
+        "appid": "sample-game",
         "start_time": int(_shanghai_time(9, 45).timestamp()),
         "end_time": int(_shanghai_time(10, 15).timestamp()),
         "page_size": 100,
@@ -77,7 +77,7 @@ def test_scheduled_status_sync_is_fixed_game_and_idempotent_in_one_time_bucket()
 
     assert first.created is True
     assert second.created is False
-    assert first.job.parameter_summary == {"appid": "wx6d2454a8afcd9706", "limit": 20}
+    assert first.job.parameter_summary == {"appid": "sample-game", "limit": 20}
     assert BackgroundJob.objects.filter(task_type="STATUS_SYNC").count() == 1
 
 

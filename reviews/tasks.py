@@ -45,8 +45,8 @@ def evaluate_post_handler(job: BackgroundJob) -> None:
     if expected_fingerprint and expected_fingerprint != fingerprint:
         raise RuntimeError("帖子内容已变化，等待重新入队")
     has_video_evidence = bool(current_video_extractions(post))
-    faq_version = available_reply_faq_version(appid=post.source_appid)
-    faq_rules = available_reply_faq_rules(appid=post.source_appid, content=f"{content}\n{ocr_text}")
+    faq_version = available_reply_faq_version()
+    faq_rules = available_reply_faq_rules(content=f"{content}\n{ocr_text}")
     output = OpenAiCompatibleReviewClient().evaluate(
         content, ocr_text, has_video_evidence=has_video_evidence, faq_rules=faq_rules
     )

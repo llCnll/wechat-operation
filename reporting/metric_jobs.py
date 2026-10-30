@@ -54,7 +54,7 @@ def _daily_parameters(*, appid: str, run_day: date, source: MetricSource) -> dic
 
 def enqueue_daily_metric_sync(run_day: date) -> tuple[EnqueueResult, ...]:
     """Schedule every enabled daily domain under its own stable time bucket."""
-    appid = active_game_appid(persist_default=False)
+    appid = active_game_appid()
     return tuple(
         enqueue_job_with_result(
             task_type=METRIC_DAILY_SYNC_TASK,
@@ -69,7 +69,7 @@ def enqueue_daily_metric_sync(run_day: date) -> tuple[EnqueueResult, ...]:
 def enqueue_weekly_metric_sync(
     *, business_week_start: date, phase: WeeklyReleasePhase
 ) -> EnqueueResult:
-    appid = active_game_appid(persist_default=False)
+    appid = active_game_appid()
     start_day = business_week_start - timedelta(days=7 * (WEEKLY_RECHECK_WEEKS - 1))
     parameters = {
         "appid": appid,
@@ -142,7 +142,7 @@ def enqueue_manual_daily_metric_range(*, start_day: date, end_day: date) -> tupl
     """Queue one range read per verified daily metric source for the active scope."""
     validate_manual_metric_range(start_day=start_day, end_day=end_day)
     with transaction.atomic():
-        scope = current_execution_scope(persist_default=False)
+        scope = current_execution_scope()
         return tuple(
             _enqueue_manual_metric_range(
                 scope=scope, source=source, start_day=start_day, end_day=end_day
@@ -157,7 +157,7 @@ def enqueue_manual_weekly_metric_range(*, start_day: date, end_day: date) -> tup
     normalized_start = start_day - timedelta(days=start_day.weekday())
     normalized_end = end_day + timedelta(days=6 - end_day.weekday())
     with transaction.atomic():
-        scope = current_execution_scope(persist_default=False)
+        scope = current_execution_scope()
         result = _enqueue_manual_metric_range(
             scope=scope,
             source=MetricSource.OPERATION_EFFECT_WEEKLY,
@@ -172,7 +172,7 @@ def enqueue_metric_backfill(*, source: str, start_day: date, end_day: date) -> E
     if start_day > end_day:
         raise ValueError("指标回填范围无效")
     normalized_source = MetricSource(source)
-    appid = active_game_appid(persist_default=False)
+    appid = active_game_appid()
     if normalized_source == MetricSource.CONTENT_FANS_DAILY:
         raise ValueError("内容粉丝当前未完成权限与字段验证，禁止创建采集任务")
     parameters = {

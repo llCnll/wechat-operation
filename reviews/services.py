@@ -1251,10 +1251,9 @@ def persist_assessment(
         risk.label in PUBLIC_REPLY_SUPPRESSION_RISK_LABELS for risk in output.risk_labels
     )
     candidates = tuple(faq_rules) if faq_rules is not None else available_reply_faq_rules(
-        appid=post.source_appid,
         content="\n".join((post.title, post.content_text, post.ballot_text)),
     )
-    guidance_available = reply_faq_guidance_is_available(appid=post.source_appid)
+    guidance_available = reply_faq_guidance_is_available()
     plan = _reply_draft_plan(
         suggestion=output.reply_suggestion,
         candidates=candidates,
@@ -1281,7 +1280,7 @@ def persist_assessment(
                 "risk_notice": output.reply_suggestion.risk_notice,
                 "faq_rule_id": plan.rule.rule_id if plan.rule else "",
                 "faq_version": (
-                    faq_version or available_reply_faq_version(appid=post.source_appid)
+                    faq_version or available_reply_faq_version()
                 )
                 if plan.rule
                 else "",
