@@ -183,7 +183,7 @@ def enqueue_manual_current_ingestion_window(
     )
     page_size = _fixed_ingestion_page_size()
     with transaction.atomic():
-        scope = current_execution_scope(persist_default=False)
+        scope = current_execution_scope()
         parameters = {
             "appid": scope.target_appid,
             "start_time": window.start_time,
@@ -219,7 +219,7 @@ def enqueue_manual_historical_ingestion_window(
 
     local_now = (now or timezone.now()).astimezone(SHANGHAI).replace(second=0, microsecond=0)
     with transaction.atomic():
-        scope = current_execution_scope(persist_default=False)
+        scope = current_execution_scope()
         return _enqueue_ingestion_window(
             appid=scope.target_appid,
             start_time=int((local_now - timedelta(hours=duration_hours)).timestamp()),
@@ -249,7 +249,7 @@ def enqueue_manual_topic_ingestion(*, topic_ids: list[int]) -> tuple[IngestionEn
 
     results: list[IngestionEnqueueResult] = []
     with transaction.atomic():
-        scope = current_execution_scope(persist_default=False)
+        scope = current_execution_scope()
         for topic_id in unique_topic_ids:
             result = enqueue_active_coalesced_job(
                 task_type=MANUAL_TOPIC_INGEST_TASK,
@@ -270,7 +270,7 @@ def enqueue_manual_topic_ingestion(*, topic_ids: list[int]) -> tuple[IngestionEn
 def enqueue_filtered_post_refresh(*, filters: OriginalPostFilter) -> IngestionEnqueueResult:
     """Queue a fixed predicate; the Worker resolves matching local posts when it runs."""
     with transaction.atomic():
-        scope = current_execution_scope(persist_default=False)
+        scope = current_execution_scope()
         parameters = {"appid": scope.target_appid, "filters": filters.as_parameters()}
         predicate_key = sha256(
             json.dumps(parameters["filters"], ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
@@ -321,7 +321,7 @@ def enqueue_scheduled_ingestion(
     now: datetime, *, interval_minutes: int = 15
 ) -> IngestionEnqueueResult:
     """Enqueue the current operation scope without invoking any browser adapter."""
-    appid = active_game_appid(persist_default=False)
+    appid = active_game_appid()
     page_size = _fixed_ingestion_page_size()
     window = scheduled_ingestion_window(now, interval_minutes=interval_minutes)
     return _enqueue_ingestion_window(
@@ -338,7 +338,7 @@ def enqueue_scheduled_status_sync(
     now: datetime, *, interval_minutes: int = 15
 ) -> IngestionEnqueueResult:
     """Queue one small pending-post status scan in the same scheduler time bucket."""
-    appid = active_game_appid(persist_default=False)
+    appid = active_game_appid()
     window = scheduled_ingestion_window(now, interval_minutes=interval_minutes)
     result = enqueue_job_with_result(
         task_type=STATUS_SYNC_TASK,

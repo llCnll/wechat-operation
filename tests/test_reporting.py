@@ -160,7 +160,7 @@ def test_analysis_range_defaults_to_seven_days_and_rejects_more_than_maximum():
 @pytest.mark.django_db
 def test_metric_workspace_reads_persisted_snapshots_without_an_inline_upstream_request():
     snapshot = GameCircleMetricSnapshot.objects.create(
-        appid="wx6d2454a8afcd9706",
+        appid="sample-game",
         source=MetricSource.CIRCLE_FANS_DAILY,
         period_start=date(2026, 7, 18),
         period_end=date(2026, 7, 18),
@@ -171,7 +171,7 @@ def test_metric_workspace_reads_persisted_snapshots_without_an_inline_upstream_r
     GameCircleMetricSnapshot.objects.bulk_create(
         [
             GameCircleMetricSnapshot(
-                appid="wx6d2454a8afcd9706",
+                appid="sample-game",
                 source=MetricSource.GROUP_PUBLISH_DAILY,
                 period_start=date(2026, 7, 18),
                 period_end=date(2026, 7, 18),
@@ -180,7 +180,7 @@ def test_metric_workspace_reads_persisted_snapshots_without_an_inline_upstream_r
                 captured_at=_at(10),
             ),
             GameCircleMetricSnapshot(
-                appid="wx6d2454a8afcd9706",
+                appid="sample-game",
                 source=MetricSource.GROUP_CONSUME_DAILY,
                 period_start=date(2026, 7, 18),
                 period_end=date(2026, 7, 18),
@@ -189,7 +189,7 @@ def test_metric_workspace_reads_persisted_snapshots_without_an_inline_upstream_r
                 captured_at=_at(10),
             ),
             GameCircleMetricSnapshot(
-                appid="wx6d2454a8afcd9706",
+                appid="sample-game",
                 source=MetricSource.GROUP_SHARE_DAILY,
                 period_start=date(2026, 7, 18),
                 period_end=date(2026, 7, 18),
@@ -198,7 +198,7 @@ def test_metric_workspace_reads_persisted_snapshots_without_an_inline_upstream_r
                 captured_at=_at(10),
             ),
             GameCircleMetricSnapshot(
-                appid="wx6d2454a8afcd9706",
+                appid="sample-game",
                 source=MetricSource.GROUP_RETAIN_DAILY,
                 period_start=date(2026, 7, 18),
                 period_end=date(2026, 7, 18),
@@ -212,7 +212,7 @@ def test_metric_workspace_reads_persisted_snapshots_without_an_inline_upstream_r
     workspace = build_metric_workspace(
         start_day=date(2026, 7, 18),
         end_day=date(2026, 7, 18),
-        appid="wx6d2454a8afcd9706",
+        appid="sample-game",
     )
 
     assert snapshot.pk
@@ -231,7 +231,7 @@ def test_metric_workspace_reads_persisted_snapshots_without_an_inline_upstream_r
 @pytest.mark.django_db
 def test_metric_workspace_marks_partial_days_and_never_selects_a_cross_source_day():
     GameCircleMetricSnapshot.objects.create(
-        appid="wx6d2454a8afcd9706",
+        appid="sample-game",
         source=MetricSource.CIRCLE_FANS_DAILY,
         period_start=date(2026, 7, 19),
         period_end=date(2026, 7, 19),
@@ -240,7 +240,7 @@ def test_metric_workspace_marks_partial_days_and_never_selects_a_cross_source_da
         captured_at=_at(11),
     )
     GameCircleMetricSnapshot.objects.create(
-        appid="wx6d2454a8afcd9706",
+        appid="sample-game",
         source=MetricSource.GROUP_CONSUME_DAILY,
         period_start=date(2026, 7, 18),
         period_end=date(2026, 7, 18),
@@ -252,7 +252,7 @@ def test_metric_workspace_marks_partial_days_and_never_selects_a_cross_source_da
     workspace = build_metric_workspace(
         start_day=date(2026, 7, 18),
         end_day=date(2026, 7, 19),
-        appid="wx6d2454a8afcd9706",
+        appid="sample-game",
     )
 
     assert workspace.complete_business_day is None
@@ -265,7 +265,7 @@ def test_metric_workspace_marks_partial_days_and_never_selects_a_cross_source_da
 @pytest.mark.django_db
 def test_metric_workspace_hides_pending_weekly_zero_snapshot():
     GameCircleMetricSnapshot.objects.create(
-        appid="wx6d2454a8afcd9706",
+        appid="sample-game",
         source=MetricSource.OPERATION_EFFECT_WEEKLY,
         period_start=date(2026, 7, 6),
         period_end=date(2026, 7, 12),
@@ -274,7 +274,7 @@ def test_metric_workspace_hides_pending_weekly_zero_snapshot():
         captured_at=_at(10),
     )
     GameCircleMetricSnapshot.objects.create(
-        appid="wx6d2454a8afcd9706",
+        appid="sample-game",
         source=MetricSource.OPERATION_EFFECT_WEEKLY,
         period_start=date(2026, 7, 13),
         period_end=date(2026, 7, 19),
@@ -287,7 +287,7 @@ def test_metric_workspace_hides_pending_weekly_zero_snapshot():
     workspace = build_metric_workspace(
         start_day=date(2026, 7, 18),
         end_day=date(2026, 7, 18),
-        appid="wx6d2454a8afcd9706",
+        appid="sample-game",
     )
 
     assert workspace.weekly_cards[0].value == "120"

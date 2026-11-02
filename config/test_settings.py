@@ -13,6 +13,7 @@ PYTEST_MODE_VALUE = "isolated"
 VOLATILE_RUNTIME_DIRECTORIES = frozenset({"supervisor", "worker-locks", "static"})
 VOLATILE_RUNTIME_REMOVE_ATTEMPTS = 3
 TEST_EXTERNAL_ENVIRONMENT = {
+    "DJANGO_SECRET_KEY": "pytest-only-secret-key-not-used-outside-isolated-tests",
     "AI_BASE_URL": "https://test.invalid",
     "AI_API_KEY": "test-only-key",
     "AI_MODEL": "test-model",

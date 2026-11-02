@@ -70,6 +70,11 @@ def _analysis_query(*, start_day: date, end_day: date, appid: str) -> str:
     )
 
 
+def _scope_setup_redirect(request):
+    messages.info(request, "请先同步可管理游戏并选择当前操作游戏。")
+    return redirect("/admin/")
+
+
 def _quick_ranges(
     today: date, selected_start: date, selected_end: date
 ) -> tuple[dict[str, date | str | bool], ...]:
@@ -95,8 +100,11 @@ def live_operations_analysis(request):
     start_day, end_day, range_error = _requested_analysis_range(
         request.GET.get("start_date", "").strip(), request.GET.get("end_date", "").strip()
     )
-    appid = active_game_appid(request.GET.get("appid", "").strip(), persist_default=False)
-    games = managed_game_options(persist_default=False)
+    try:
+        appid = active_game_appid(request.GET.get("appid", "").strip())
+    except ValueError:
+        return _scope_setup_redirect(request)
+    games = managed_game_options()
     start_at, end_at = analysis_datetime_range(start_day, end_day)
     analysis = build_live_operations_analysis(start_day, end_day, appid)
     workspace_preferences = WorkspacePreferences.from_query(
@@ -140,7 +148,10 @@ def refresh_operations_analysis_metrics(request):
     start_day, end_day, range_error = _requested_analysis_range(
         request.POST.get("start_date", "").strip(), request.POST.get("end_date", "").strip()
     )
-    appid = active_game_appid(request.POST.get("appid", "").strip(), persist_default=False)
+    try:
+        appid = active_game_appid(request.POST.get("appid", "").strip())
+    except ValueError:
+        return _scope_setup_redirect(request)
     query = _analysis_query(start_day=start_day, end_day=end_day, appid=appid)
     if range_error:
         messages.error(request, "互动刷新未创建：请先选择有效的日期范围。")
@@ -158,10 +169,12 @@ def refresh_operations_analysis_metrics(request):
     return redirect(f"{reverse('live-operations-analysis')}?{query}")
 
 
-def _report_scope(request) -> tuple[str, tuple]:
-    appid = active_game_appid(request.GET.get("appid", "").strip(), persist_default=False)
-    games = managed_game_options(persist_default=False)
-    return appid, games
+def _report_scope(request) -> tuple[str, tuple] | HttpResponse:
+    try:
+        appid = active_game_appid(request.GET.get("appid", "").strip())
+    except ValueError:
+        return _scope_setup_redirect(request)
+    return appid, managed_game_options()
 
 
 def _report_for_scope(*, report_id: int, appid: str) -> PublicOpinionReport:
@@ -214,7 +227,10 @@ def _report_payload_for_display(payload: dict) -> dict:
 
 @login_required
 def public_opinion_reports(request):
-    appid, games = _report_scope(request)
+    scope = _report_scope(request)
+    if isinstance(scope, HttpResponse):
+        return scope
+    appid, games = scope
     default_start, default_end = default_report_range()
     try:
         start_day = date.fromisoformat(request.GET.get("start_date", default_start.isoformat()))
@@ -256,7 +272,10 @@ def public_opinion_reports(request):
 @login_required
 @require_POST
 def create_public_opinion_report(request):
-    appid = active_game_appid(request.POST.get("appid", "").strip(), persist_default=False)
+    try:
+        appid = active_game_appid(request.POST.get("appid", "").strip())
+    except ValueError:
+        return _scope_setup_redirect(request)
     try:
         start_day = date.fromisoformat(request.POST.get("start_date", ""))
         end_day = date.fromisoformat(request.POST.get("end_date", ""))
@@ -279,7 +298,10 @@ def create_public_opinion_report(request):
 
 @login_required
 def public_opinion_report_detail(request, report_id: int):
-    appid, games = _report_scope(request)
+    scope = _report_scope(request)
+    if isinstance(scope, HttpResponse):
+        return scope
+    appid, games = scope
     report = _report_for_scope(report_id=report_id, appid=appid)
     runs = report.runs.select_related("job").all()
     requested_run = request.GET.get("run", "")
@@ -312,7 +334,10 @@ def public_opinion_report_detail(request, report_id: int):
 @login_required
 @require_POST
 def rerun_public_opinion_report(request, report_id: int):
-    appid = active_game_appid(request.POST.get("appid", "").strip(), persist_default=False)
+    try:
+        appid = active_game_appid(request.POST.get("appid", "").strip())
+    except ValueError:
+        return _scope_setup_redirect(request)
     report = _report_for_scope(report_id=report_id, appid=appid)
     try:
         result = rerun_report_job(report=report)
@@ -328,7 +353,10 @@ def rerun_public_opinion_report(request, report_id: int):
 
 @login_required
 def public_opinion_report_sources(request, report_id: int):
-    appid, games = _report_scope(request)
+    scope = _report_scope(request)
+    if isinstance(scope, HttpResponse):
+        return scope
+    appid, games = scope
     report = _report_for_scope(report_id=report_id, appid=appid)
     if report.source_locked_at is None:
         raise Http404("报告来源尚未锁定")
@@ -343,7 +371,10 @@ def public_opinion_report_sources(request, report_id: int):
 
 @login_required
 def export_public_opinion_report_word(request, report_id: int, run_number: int):
-    appid, _games = _report_scope(request)
+    scope = _report_scope(request)
+    if isinstance(scope, HttpResponse):
+        return scope
+    appid, _games = scope
     report = _report_for_scope(report_id=report_id, appid=appid)
     run = get_object_or_404(
         PublicOpinionReportRun,
@@ -352,7 +383,7 @@ def export_public_opinion_report_word(request, report_id: int, run_number: int):
         status=PublicOpinionReportRunStatus.SUCCEEDED,
     )
     game_name = next(
-        (game.name for game in managed_game_options(persist_default=False) if game.appid == appid),
+        (game.name for game in managed_game_options() if game.appid == appid),
         "游戏圈",
     )
     content = render_public_opinion_word(report=report, run=run, game_name=game_name)

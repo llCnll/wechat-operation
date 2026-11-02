@@ -39,10 +39,11 @@ from reviews.models import (
     VideoEvidenceKind,
     VideoExtraction,
 )
-from reviews.reply_faq import CITY_LORD_APPID
 from reviews.services import AI_EVALUATE_TASK, OCR_EXTRACT_TASK, persist_assessment
 from reviews.video import media_fingerprint
 from reviews.video_tasks import VIDEO_EXTRACTOR_VERSION
+
+SAMPLE_APPID = "sample-game"
 
 
 @pytest.mark.django_db
@@ -124,14 +125,14 @@ def test_operations_dashboard_filters_by_independent_topic_exactly():
         topic_id=991,
         content_id="topic-filter-match",
         content_text="精确话题帖子",
-        topics=["城主别慌张攻略"],
+        topics=["通用使用技巧"],
         source_appid=appid,
     )
     OriginalPost.objects.create(
         topic_id=992,
         content_id="topic-filter-other",
         content_text="其他话题帖子",
-        topics=["城主别慌张活动"],
+        topics=["社区活动"],
         source_appid=appid,
     )
     OriginalPost.objects.create(
@@ -143,7 +144,7 @@ def test_operations_dashboard_filters_by_independent_topic_exactly():
     client = Client()
     client.force_login(user)
 
-    exact = client.get("/", {"appid": appid, "topic_label": "#城主别慌张攻略"}).content.decode()
+    exact = client.get("/", {"appid": appid, "topic_label": "#通用使用技巧"}).content.decode()
     any_topic = client.get("/", {"appid": appid, "has_topics": "yes"}).content.decode()
     by_post_id = client.get("/", {"appid": appid, "post_id": "992"}).content.decode()
 
@@ -244,7 +245,7 @@ def test_dashboard_displays_only_the_local_author_nickname_projection():
     post = OriginalPost.objects.create(
         topic_id=981,
         content_id="author-display",
-        source_appid="wx6d2454a8afcd9706",
+        source_appid="sample-game",
         content_text="待审核",
         author_nick_name="展示作者",
     )
@@ -265,12 +266,12 @@ def test_dashboard_marks_active_author_mute_with_a_distinct_indicator():
     post = OriginalPost.objects.create(
         topic_id=95,
         content_id="mute-active",
-        source_appid="wx6d2454a8afcd9706",
+        source_appid="sample-game",
         author_openid="active-author",
     )
     AuthorMuteStatus.objects.create(
         openid="active-author",
-        source_appid="wx6d2454a8afcd9706",
+        source_appid="sample-game",
         local_muted_until=now + timedelta(days=1),
         last_synced_at=now,
         source_requested_at=now,
@@ -285,12 +286,13 @@ def test_dashboard_marks_active_author_mute_with_a_distinct_indicator():
 
 @pytest.mark.django_db
 def test_mute_management_filters_by_game_and_links_author_history():
+    _activate_game("sample-game")
     user = get_user_model().objects.create_user(username="mute-list", password="test-password")
     now = timezone.now()
     active = OriginalPost.objects.create(
         topic_id=96,
         content_id="author-active",
-        source_appid="wx6d2454a8afcd9706",
+        source_appid="sample-game",
         author_openid="author-a",
     )
     hidden = OriginalPost.objects.create(
@@ -298,7 +300,7 @@ def test_mute_management_filters_by_game_and_links_author_history():
     )
     status = AuthorMuteStatus.objects.create(
         openid="author-a",
-        source_appid="wx6d2454a8afcd9706",
+        source_appid="sample-game",
         nick_name="可见作者",
         local_muted_until=now + timedelta(days=1),
         last_synced_at=now,
@@ -317,14 +319,14 @@ def test_mute_management_filters_by_game_and_links_author_history():
     client = Client()
     client.force_login(user)
 
-    response = client.get("/mute-management/?appid=wx6d2454a8afcd9706&q=可见")
+    response = client.get("/mute-management/?appid=sample-game&q=可见")
     assert response.status_code == 200
     body = response.content.decode()
     assert "可见作者" in body
     assert "不应出现" not in body
     assert f"/mute-management/{status.pk}/posts/" in body
 
-    history = client.get(f"/mute-management/{status.pk}/posts/?appid=wx6d2454a8afcd9706")
+    history = client.get(f"/mute-management/{status.pk}/posts/?appid=sample-game")
     assert history.status_code == 200
     assert "#96" in history.content.decode()
     assert "#97" not in history.content.decode()
@@ -336,7 +338,7 @@ def test_mute_management_filters_scope_and_imminent_expiry():
     now = timezone.now()
     AuthorMuteStatus.objects.create(
         openid="local-author",
-        source_appid="wx6d2454a8afcd9706",
+        source_appid="sample-game",
         nick_name="本地禁言",
         local_muted_until=now + timedelta(days=2),
         last_synced_at=now,
@@ -344,7 +346,7 @@ def test_mute_management_filters_scope_and_imminent_expiry():
     )
     AuthorMuteStatus.objects.create(
         openid="global-author",
-        source_appid="wx6d2454a8afcd9706",
+        source_appid="sample-game",
         nick_name="全局禁言",
         global_muted_until=now + timedelta(days=10),
         last_synced_at=now,
@@ -501,7 +503,7 @@ def test_operations_dashboard_shows_existing_local_reply_draft_without_publish_c
         topic_id=1099,
         content_id="reply-draft-content",
         content_text="希望增加编队预设",
-        source_appid=CITY_LORD_APPID,
+        source_appid=SAMPLE_APPID,
     )
     persist_assessment(
         post,
@@ -529,7 +531,7 @@ def test_operations_dashboard_shows_existing_local_reply_draft_without_publish_c
     assert "有回复建议" in page
     assert "回复建议" in page
     assert "希望减少重复配队操作" in page
-    assert "功能/内容期望 · feature-request" in page
+    assert "功能或内容期望 · feature-request" in page
     assert "仅供运营准备回复，不会发送或发布到原平台。" in page
     assert "标记本地已采纳" in page
     assert "data-copy-reply-draft" in page
@@ -546,7 +548,7 @@ def test_operations_dashboard_labels_a_generic_unmatched_reply_draft():
         topic_id=1102,
         content_id="generic-reply-draft-content",
         content_text="就问你还有多少和我一样的",
-        source_appid=CITY_LORD_APPID,
+        source_appid=SAMPLE_APPID,
     )
     persist_assessment(
         post,
@@ -666,7 +668,7 @@ def test_dashboard_keyboard_navigation_uses_real_query_separators_and_repairs_le
 
     response = client.get("/", {"topic": first.topic_id, "sort": "publish_time_desc"})
     repaired = client.get(
-        f"/?appid=wx6d2454a8afcd9706&amp%3Bsort=publish_time_desc&amp%3Btopic={first.topic_id}"
+        f"/?appid=sample-game&amp%3Bsort=publish_time_desc&amp%3Btopic={first.topic_id}"
     )
 
     assert response.status_code == 200
@@ -675,7 +677,7 @@ def test_dashboard_keyboard_navigation_uses_real_query_separators_and_repairs_le
     assert 'const postWorkspaceAnchor="#post-workspace"' in page
     assert repaired.status_code == 302
     assert (
-        repaired.url == f"/?appid=wx6d2454a8afcd9706&sort=publish_time_desc&topic={first.topic_id}"
+        repaired.url == f"/?appid=sample-game&sort=publish_time_desc&topic={first.topic_id}"
     )
 
 
@@ -1612,7 +1614,7 @@ def test_dashboard_batch_executes_only_eligible_ai_sink_and_block_recommendation
     monkeypatch.setattr(runtime, "enable_sink_writes", True)
     monkeypatch.setattr(runtime, "enable_block_writes", True)
     user = get_user_model().objects.create_user(username="batch-operator", password="test-password")
-    appid = "wx6d2454a8afcd9706"
+    appid = "sample-game"
     _activate_game(appid)
 
     def create_post(topic_id, action, *, status=2, with_evidence=True):

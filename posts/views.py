@@ -46,7 +46,7 @@ from reviews.models import (
     ReviewTask,
     risk_label_display,
 )
-from reviews.reply_faq import city_lord_reply_faq_rule
+from reviews.reply_faq import community_reply_faq_rule
 from reviews.services import (
     BLOCK_REASON_OPTIONS,
     OperationExecutionConflict,
@@ -323,24 +323,17 @@ def _batch_ai_candidates(posts: list[OriginalPost]) -> list[OriginalPost]:
 
 
 def _dashboard_game_filter(appid: str) -> Q:
-    # Before the first catalog synchronization there is no legal execution
-    # scope.  The dashboard remains read-only and shows historical records;
-    # every source-touching action still goes through _require_active_post_scope.
-    return Q() if not appid else Q(source_appid=appid)
+    # An unconfigured game context must not turn into an implicit all-games view.
+    return Q(pk__in=[]) if not appid else Q(source_appid=appid)
 
 
 def _dashboard_active_game(requested_appid: str) -> str:
-    """Keep historical dashboard reads available before initial scope configuration."""
+    """Use only the explicitly selected operation scope; do not fall back to history."""
     try:
         return active_game_appid(requested_appid)
     except ValueError:
         if ActiveGameScope.objects.filter(pk=1).exists():
             return "__invalid_scope__"
-        # Read views may still be used to inspect historical records before an
-        # operator selects the first scope.  A requested game remains a read
-        # filter only; source actions separately require current_execution_scope.
-        if requested_appid:
-            return requested_appid
         return ""
 
 
@@ -348,13 +341,13 @@ def _require_active_post_scope(post: OriginalPost) -> None:
     """Reject direct post URLs that would otherwise bypass the selected operation scope."""
     if not post.source_appid:
         raise ValueError("帖子缺少游戏范围，不能调用上游")
-    active_game_appid(post.source_appid, persist_default=False)
+    active_game_appid(post.source_appid)
 
 
 @contextmanager
 def _source_for_active_game(appid: str):
     """Create a fixed IPC facade; this Django process never owns CDP state."""
-    scope = current_execution_scope(appid, persist_default=False)
+    scope = current_execution_scope(appid)
     source = GameCirclePostClient(scope=scope)
     try:
         yield source
@@ -457,23 +450,24 @@ def _official_preview_key(appid: str) -> str:
 
 @login_required
 def official_author_management(request):
-    games = managed_game_options(persist_default=False)
     try:
-        default_appid = active_game_appid(persist_default=False)
+        current_appid = active_game_appid()
     except ValueError:
-        default_appid = games[0].appid if games else ""
-    appid = request.GET.get("appid", default_appid).strip() or default_appid
+        messages.error(request, "请先同步可管理游戏并选择当前操作游戏。")
+        return redirect("/admin/")
+    appid = request.GET.get("appid", current_appid).strip() or current_appid
     game = ManagedGame.objects.filter(appid=appid).first()
     if game is None:
         messages.error(request, "请选择本地可管理游戏。")
         return redirect(reverse("official-author-management"))
+    managed_games = managed_game_options()
     return render(
         request,
         "posts/official_author_management.html",
         {
             "appid": appid,
             "game": game,
-            "managed_games": games,
+            "managed_games": managed_games,
             "authors": OfficialAuthor.objects.filter(
                 source_appid=appid, disabled_at__isnull=True
             ).order_by("nick_name", "openid"),
@@ -560,7 +554,7 @@ def disable_official_author_view(request, author_id: int):
 
 
 def _comment_export_scope_or_error():
-    return current_execution_scope(persist_default=False)
+    return current_execution_scope()
 
 
 def _comment_export_runs(request):
@@ -788,7 +782,7 @@ def operations_dashboard(request):
     if selected_post:
         reply_draft = getattr(selected_post, "reply_draft", None)
         if reply_draft and reply_draft.faq_rule_id:
-            rule = city_lord_reply_faq_rule(reply_draft.faq_rule_id)
+            rule = community_reply_faq_rule(reply_draft.faq_rule_id)
             reply_draft.faq_scene = rule.scene if rule else ""
         selected_post.author_mute_status = _author_mute_status_for_post(selected_post, appid)
         selected_post.author_mute_presentation = _author_mute_presentation(
@@ -1167,7 +1161,7 @@ def apply_permanent_mute_intent(request):
         messages.warning(request, "请先选择至少一位作者。")
         return redirect(_mute_management_return_url(request))
     try:
-        scope = current_execution_scope(persist_default=False)
+        scope = current_execution_scope()
         statuses = list(
             AuthorMuteStatus.objects.filter(
                 pk__in=requested_ids, source_appid=scope.target_appid

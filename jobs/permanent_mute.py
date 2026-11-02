@@ -64,7 +64,7 @@ def enqueue_permanent_mute_renewal(
     *, source: str, now: datetime | None = None
 ) -> EnqueueResult:
     """Create/reuse the current game's 12-hour renewal work without source I/O."""
-    scope = current_execution_scope(persist_default=False)
+    scope = current_execution_scope()
     local_now = (now or timezone.now()).astimezone(SHANGHAI)
     if source == "scheduler":
         slot = local_now.strftime("%Y%m%d") + ("00" if local_now.hour < 12 else "12")
@@ -106,7 +106,7 @@ def enqueue_scheduled_permanent_mute_renewal(now: datetime) -> EnqueueResult | N
 
 def enqueue_author_mute_status_refresh(*, source: str = "manual") -> EnqueueResult:
     """Queue one bounded, read-only refresh for the current mute-management list."""
-    scope = current_execution_scope(persist_default=False)
+    scope = current_execution_scope()
     list_as_of = timezone.now()
     status_ids = list(
         mute_management_status_queryset(
@@ -130,7 +130,7 @@ def enqueue_author_mute_status_refresh(*, source: str = "manual") -> EnqueueResu
 
 def enqueue_post_author_mute_status_sync(*, source: str = "manual") -> EnqueueResult:
     """Queue one bounded scan of distinct saved post authors without upstream writes."""
-    scope = current_execution_scope(persist_default=False)
+    scope = current_execution_scope()
     posts = OriginalPost.objects.filter(source_appid=scope.target_appid)
     upper_post_id = posts.aggregate(max_id=Max("pk"))["max_id"] or 0
     skipped_missing_openid = OriginalPost.objects.filter(
@@ -151,7 +151,7 @@ def enqueue_post_author_mute_status_sync(*, source: str = "manual") -> EnqueueRe
 
 def enqueue_blocked_user_list_sync(*, source: str = "manual") -> EnqueueResult:
     """Queue one current-game, read-only platform blocked-user list import."""
-    scope = current_execution_scope(persist_default=False)
+    scope = current_execution_scope()
     return _enqueue_or_reuse_read_maintenance_job(
         task_type=BLOCKED_USER_LIST_SYNC_TASK,
         scope=scope,

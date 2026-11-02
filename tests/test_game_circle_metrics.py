@@ -32,7 +32,7 @@ from reporting.metric_tasks import METRIC_WORKER_HANDLERS, metric_sync_handler
 from reporting.models import GameCircleMetricSnapshot, MetricPublicationState, MetricSource
 from reporting.source_client import CdpGameCircleMetricClient
 
-APPID = "wx6d2454a8afcd9706"
+APPID = "sample-game"
 SHANGHAI = ZoneInfo("Asia/Shanghai")
 
 

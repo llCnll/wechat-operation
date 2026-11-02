@@ -97,7 +97,7 @@ def read_confirmation_snapshot(
     """Read and validate a post without modifying any local business record."""
     if not isinstance(topic_id, int) or topic_id <= 0:
         raise ValueError("帖子 ID 必须是正整数。")
-    scope = scope or current_execution_scope(persist_default=False)
+    scope = scope or current_execution_scope()
     post = OriginalPost.objects.filter(topic_id=topic_id, source_appid=scope.target_appid).first()
     if post is None or not post.content_id or not post.author_openid:
         raise ValueError("当前游戏未找到可确认的已采集帖子。")

@@ -52,7 +52,7 @@ from reviews.video_tasks import VIDEO_EXTRACTOR_VERSION
 @pytest.fixture(autouse=True)
 def active_game_scope():
     game, _ = ManagedGame.objects.get_or_create(
-        appid="wx6d2454a8afcd9706",
+        appid="sample-game",
         defaults={"name": "测试游戏"},
     )
     ManagedGame.objects.create(appid="wx-test", name="测试游戏二")
@@ -908,7 +908,7 @@ def test_corrected_ai_review_displays_verified_final_post_transition():
     post = OriginalPost.objects.create(
         topic_id=90051,
         content_id="corrected-transition",
-        source_appid="wx6d2454a8afcd9706",
+        source_appid="sample-game",
         status=4,
     )
     CandidatePost.objects.create(
@@ -979,7 +979,7 @@ def test_escalating_an_ai_review_opens_its_content_management_task(monkeypatch):
         content_id="escalate-dashboard-9011",
         content_text="内容",
         status=2,
-        source_appid="wx6d2454a8afcd9706",
+        source_appid="sample-game",
     )
     CandidatePost.objects.create(
         topic_id=post.topic_id, content_id=post.content_id, origin_type=OriginType.ORIGINAL
@@ -1018,7 +1018,7 @@ def test_escalating_an_ai_review_opens_its_content_management_task(monkeypatch):
         f"/?appid={post.source_appid}&review_status=AUTO_REVIEW_ESCALATED&topic={post.topic_id}"
     )
     assert (
-        "return_to=%2Fai-operation-reviews%2F%3Fappid%3Dwx6d2454a8afcd9706%26status%3DESCALATED"
+        "return_to=%2Fai-operation-reviews%2F%3Fappid%3Dsample-game%26status%3DESCALATED"
         in response.url
     )
 
@@ -1075,7 +1075,7 @@ def test_ai_worker_does_not_open_cdp_or_write_while_human_operation_is_executing
         content_id="auto-9008",
         content_text="内容",
         status=2,
-        source_appid="wx6d2454a8afcd9706",
+        source_appid="sample-game",
     )
     CandidatePost.objects.create(
         topic_id=post.topic_id, content_id=post.content_id, origin_type=OriginType.ORIGINAL
@@ -1133,7 +1133,7 @@ def test_ai_worker_defers_session_recovery_without_reserving_an_operation(monkey
         content_id="auto-9009",
         content_text="内容",
         status=2,
-        source_appid="wx6d2454a8afcd9706",
+        source_appid="sample-game",
     )
     CandidatePost.objects.create(
         topic_id=post.topic_id, content_id=post.content_id, origin_type=OriginType.ORIGINAL
@@ -1179,7 +1179,7 @@ def test_ai_worker_records_failure_when_scope_resolution_fails_before_reservatio
         content_id="scope-resolution-failure",
         content_text="内容",
         status=2,
-        source_appid="wx6d2454a8afcd9706",
+        source_appid="sample-game",
     )
     CandidatePost.objects.create(
         topic_id=post.topic_id, content_id=post.content_id, origin_type=OriginType.ORIGINAL
@@ -1227,7 +1227,7 @@ def test_human_operation_reports_conflict_while_ai_operation_is_executing(monkey
         content_id="human-conflict-9010",
         content_text="内容",
         status=2,
-        source_appid="wx6d2454a8afcd9706",
+        source_appid="sample-game",
     )
     CandidatePost.objects.create(
         topic_id=post.topic_id, content_id=post.content_id, origin_type=OriginType.ORIGINAL
@@ -1325,7 +1325,7 @@ def test_review_workspace_filters_and_blocks_direct_action_while_pending(monkeyp
         content_id="auto-9007",
         content_text="内容",
         status=2,
-        source_appid="wx6d2454a8afcd9706",
+        source_appid="sample-game",
         author_openid="workspace-author",
         author_nick_name="复审作者",
     )
