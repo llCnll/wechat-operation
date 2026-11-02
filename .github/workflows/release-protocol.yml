@@ -33,6 +33,9 @@ jobs:
           fetch-depth: 0
       - uses: astral-sh/setup-uv@v7
       - run: uv sync --locked --all-groups
+      - name: Set an ephemeral Django key for release checks
+        shell: bash
+        run: printf 'DJANGO_SECRET_KEY=%s\n' "$(python3 -c 'import secrets; print(secrets.token_urlsafe(50))')" >> "$GITHUB_ENV"
       - run: uv run python manage.py validate_releases
       - run: uv run pytest tests/test_release_protocol.py tests/test_release_source_archive.py -q
 
@@ -48,6 +51,9 @@ jobs:
           fetch-depth: 0
       - uses: astral-sh/setup-uv@v7
       - run: uv sync --locked --all-groups
+      - name: Set an ephemeral Django key for release checks
+        shell: bash
+        run: printf 'DJANGO_SECRET_KEY=%s\n' "$(python3 -c 'import secrets; print(secrets.token_urlsafe(50))')" >> "$GITHUB_ENV"
       - name: Create or verify release tag
         shell: bash
         run: |

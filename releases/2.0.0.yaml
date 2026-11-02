@@ -1,0 +1,25 @@
+version: 2.0.0
+previous: 1.10.1
+changes:
+  - 移除源码预置游戏和默认 AppID；首次部署须在账号授权后同步可管理游戏并显式选择当前操作游戏。
+  - 将 AI 审核提示和回复 FAQ 调整为通用示例，部署方应先审阅并替换为适用政策。
+  - 要求每个部署实例配置独立的 Django 密钥，支持配置本机 Web 端口。
+upgrade:
+  dependencies: none
+  database: migrate
+  static: none
+  restart:
+    mode: supervisor
+    services: []
+  once_jobs: []
+  manual:
+    - 在运行任何 Django 管理命令前，确认 runtime/.env 中已设置至少 32 个字符的 DJANGO_SECRET_KEY。已有显式密钥应原样保留；缺少时为该实例生成唯一密钥。密钥变化会使旧登录会话失效。
+    - 迁移会删除尚未从授权账号同步的游戏目录项及其当前范围。完成受控账号登录、同步可管理游戏并重新选择当前操作游戏后，再启用采集或其它来源任务；已同步目录项保留。
+verification:
+  - uv run python manage.py validate_releases
+  - uv run pytest -q tests/test_release_protocol.py tests/test_release_source_archive.py
+  - uv run pytest -q
+  - uv run python manage.py check
+  - openspec validate --all --no-interactive
+  - 升级前确认受控 Chrome 与游戏圈会话服务按部署手册启动；同步授权游戏目录、选择当前操作游戏，并确认当前 Frame 就绪。
+  - '重启 Supervisor 后确认 /healthz 返回 {"status": "ok"}；按升级计划检查其余迁移和服务操作。'
